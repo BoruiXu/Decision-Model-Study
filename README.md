@@ -6,6 +6,7 @@
 | --- | --- |
 | [open-source-models](open-source-models/README.md) | 高分决策模型、轻量基线、官方权重与评测入口 |
 | [training-frameworks](training-frameworks/README.md) | Joey-1 微调配方、OneJev、其他决策训练实现和公开数据 |
+| [books](books/llm-finetuning-best-practices-pitfalls-debugging.pdf) | 《LLM Fine-Tuning: Best Practices, Common Pitfalls, and Systematic Debugging》教材 PDF（中文，417 页；数据准备、SFT、LoRA/QLoRA、DPO、超参数、51 个故障条目与完整演练） |
 
 ## 阅读顺序
 
