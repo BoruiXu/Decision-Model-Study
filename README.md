@@ -13,6 +13,9 @@
 - [Decision Blocks（决策模型架构模块）](https://yilechen.net/DM-k7p9x2/architecture-blocks/#/)
 - [Decision Landscape（决策智能产业全景）](https://yilechen.net/DM-k7p9x2/industrial-landscape/)
 - **TandemBench** 用双人厨房协作题评测决策模型能否从候选团队方案中选出最优方案，以及能否判断候选项之外是否还有更好的方案。[论文](https://arxiv.org/abs/2611.05827) · [GitHub](https://github.com/lililibaohang/TandemBench)
+- **Artificial Analysis Decision Index v2.1** 按六项评测的加权总分排名。五项采用平均 Decision Score，单次决策得分为 `50 × (1 + c − (p − c)²)`，其中 `c` 表示是否答对（0 或 1），`p` 是模型给所选答案的概率。答对时高置信度得分更高，答错时高置信度扣分更多。第六项 AA-Symmetry 衡量等价改写前后的选项和置信度是否一致。[榜单与分项](https://artificialanalysis.ai/evaluations/artificial-analysis-decision-index) · [评分方法](https://artificialanalysis.ai/methodology/decision-index)
+
+  单项 **Accuracy** 通常只看选中的答案是否正确。页面 **Accuracy → Headline Metrics** 汇总各项的主指标，还包括文档全对率、非幻觉率和改写一致率。[GLiDE v1.2 权重（Qwen3.8-27B 底座）](https://huggingface.co/fastino/GLiDE-27B/tree/glide-v1.2) · [Mammoth 27B 权重](https://huggingface.co/baselabs/mammoth-1)
 
 ## 阅读顺序
 
