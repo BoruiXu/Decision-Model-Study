@@ -34,7 +34,7 @@ def make_lock(tmp_path, seeds=(42, 7)):
         (prep / f).write_text(f"{f}\n")
     data = {"train": str(prep / "train.jsonl"), "select": str(prep / "select.jsonl"), "prepared_dir": str(prep),
             "sha256": {f: hashlib.sha256((prep / f).read_bytes()).hexdigest() for f in DATA_FILES}}
-    lock = {"experiment": "exp", "repo_root": str(tmp_path / "repo"), "run_id": "abcdef1234567890",
+    lock = {"experiment": "exp", "repo_root": str(tmp_path / "repo"), "run_id": "20261117T101500Z-abcdef12",
             "run_dir": str(run_dir), "n_gpus": 2, "seeds": list(seeds),
             "flags": {"epochs": 1}, "plan": {"steps": 10, "ranks": 2, "interval": 5},
             "base": {"name": "b"}, "data": data,
@@ -78,7 +78,8 @@ def test_launch_returns_immediately(tmp_path):
     assert f"PYTHONPATH={lock['repo_root']} /venv/bin/python" in argv[7]
     assert run_dir.is_dir()
     assert out["session"] == session and getpass.getuser().replace(".", "_") in session
-    assert session.startswith("ojh-") and session.endswith("abcdef12")
+    assert session.startswith("ojh-") and session.endswith("20261117T101500Z-abcdef12")
+    assert "CUDA_VISIBLE_DEVICES" not in argv[7]  # scan: the runner picks and locks the cards
     assert all(c.isalnum() or c in "_-" for c in session)
     assert "/venv/bin/python -m harness.runner" in argv[7] and "runner.log" in argv[7]
     assert out["done"] == str(run_dir / "DONE") and out["run_dir"] == str(run_dir)
@@ -296,3 +297,43 @@ def test_unreadable_lock_writes_done(tmp_path, text, capsys):
     assert done["exit_code"] == 1 and done["stage"] == "verify" and done["error"]
     assert (run_dir / "status").read_text().strip() == "failed" and acquired == []
     assert "runner error in stage verify" in capsys.readouterr().err
+
+
+def test_two_runs_of_one_experiment_on_one_day_get_distinct_sessions(tmp_path):
+    sessions = []
+    for i, run_id in enumerate(("20261117T101500Z-abcdef12", "20261117T113000Z-0f1e2d3c")):
+        path, lock, run_dir = make_lock(tmp_path / str(i))
+        lock["run_id"] = run_id
+        path.write_text(yaml.safe_dump(lock))
+        sessions.append(launch(path, tmux=lambda a: None)["session"])
+    assert sessions[0] != sessions[1] and sessions[1].endswith("0f1e2d3c")
+
+
+def _preassigned(tmp_path):
+    path, lock, run_dir = make_lock(tmp_path)
+    lock["machine"]["gpu"]["source"] = "preassigned"
+    path.write_text(yaml.safe_dump(lock))
+    return path, run_dir
+
+
+def test_preassigned_devices_passed_to_the_session(tmp_path, monkeypatch):
+    path, _ = _preassigned(tmp_path)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-x,GPU-y")
+    seen = []
+    launch(path, tmux=seen.append)
+    # an existing tmux server would otherwise start the session with its own environment
+    assert seen[0][7].startswith("CUDA_VISIBLE_DEVICES=GPU-x,GPU-y PYTHONPATH=")
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_preassigned_without_devices_refused(tmp_path, monkeypatch, value):
+    from harness.config import ConfigError
+    path, run_dir = _preassigned(tmp_path)
+    if value is None:
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    else:
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", value)
+    seen = []
+    with pytest.raises(ConfigError, match="CUDA_VISIBLE_DEVICES"):
+        launch(path, tmux=seen.append)
+    assert seen == [] and not (run_dir / "runner.log").exists()
