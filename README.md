@@ -8,6 +8,11 @@
 | [training-frameworks](training-frameworks/README.md) | Joey-1 微调配方、OneJev、其他决策训练实现和公开数据 |
 | [books](books/llm-finetuning-best-practices-pitfalls-debugging.pdf) | 《LLM Fine-Tuning: Best Practices, Common Pitfalls, and Systematic Debugging》教材 PDF（中文，417 页；数据准备、SFT、LoRA/QLoRA、DPO、超参数、51 个故障条目与完整演练） |
 
+## 在线学习资料
+
+- [Decision Blocks（决策模型架构模块）](https://yilechen.net/DM-k7p9x2/architecture-blocks/#/)
+- [Decision Landscape（决策智能产业全景）](https://yilechen.net/DM-k7p9x2/industrial-landscape/)
+
 ## 阅读顺序
 
 1. 从 Joey-1 的官方 SFT 示例开始。先看 `prepare_data.py` 如何把业务标签转成决策问题，再看 `run.sh` 如何启动 OneJev 训练。[Joey-1 SFT](https://github.com/basetenlabs/ml-cookbook/tree/main/training-jobs/examples/joey-1-sft/training)
