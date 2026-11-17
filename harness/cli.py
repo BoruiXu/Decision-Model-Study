@@ -142,12 +142,11 @@ def cmd_cleanup(a) -> int:
     if not a.confirm:
         print(f"{len(cands)} candidate(s); nothing deleted (add --confirm to delete)")
         return 0
-    done = cleanup.delete(a.run, confirm=True)
+    done, skipped = cleanup.delete_report(a.run, confirm=True)
     for c in done:
         print(f"deleted {c['path']}")
-    skipped = len(cands) - len(done)
-    if skipped:
-        print(f"{skipped} candidate(s) skipped (outside the run dir or already gone)", file=sys.stderr)
+    for c in skipped:
+        print(f"skipped {c['path']}: {c['reason']}", file=sys.stderr)
     return 0
 
 

@@ -156,3 +156,27 @@ def test_finalize_and_eval_report_acquire_one_gpu(tmp_path, monkeypatch, capsys)
     assert cli.main(["eval-report", str(run_dir), "--allow-report", "--allow-test"]) == 0
     assert log[1]["devices"] == ["GPU-9"] and log[1]["allow_test"] and log[1]["seed"] is None
     assert log[-1] == "release"
+
+
+def test_cleanup_symlinks_and_protected_paths(tmp_path):
+    run_dir = tmp_path / "run"
+    seed = run_dir / "runs" / "exp-s42"
+    keep, link, out_link = seed / "final", seed / "checkpoint-4", seed / "checkpoint-8"
+    keep.mkdir(parents=True)
+    (keep / "w.bin").write_bytes(b"k")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "w.bin").write_bytes(b"o")
+    link.symlink_to(keep, target_is_directory=True)
+    out_link.symlink_to(outside, target_is_directory=True)
+    (run_dir / "run.lock.yaml").write_text("x")
+    (run_dir / "deletion_candidates.json").write_text(json.dumps({"candidates": [
+        {"path": str(link), "bytes": 1}, {"path": str(out_link), "bytes": 1},
+        {"path": str(run_dir / "run.lock.yaml"), "bytes": 1}, {"path": str(run_dir / "runs"), "bytes": 1},
+        {"path": str(run_dir / "runs" / "exp-s42" / ".." / ".." / "run.lock.yaml"), "bytes": 1}]}))
+    done, skipped = cleanup.delete_report(run_dir, confirm=True)
+    assert [c["path"] for c in done] == [str(link), str(out_link)]
+    assert not link.is_symlink() and not out_link.is_symlink()
+    assert (keep / "w.bin").exists() and (outside / "w.bin").exists()
+    assert (run_dir / "run.lock.yaml").exists() and (run_dir / "runs").is_dir()
+    assert len(skipped) == 3 and all(c["reason"] for c in skipped)
