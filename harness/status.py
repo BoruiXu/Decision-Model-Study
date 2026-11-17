@@ -22,7 +22,7 @@ def status(run_dir) -> dict:
     run_dir = Path(run_dir)
     lock = yaml.safe_load((run_dir / "run.lock.yaml").read_text())
     seeds = lock["seeds"]
-    total = lock["plan"]["steps"] * lock["flags"]["epochs"]
+    total = lock["plan"]["steps"] * lock["flags"].get("epochs", 1)
     cap = lock["flags"].get("max_steps") or 0
     if cap > 0:
         total = min(total, cap)

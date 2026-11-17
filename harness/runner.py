@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,7 +40,44 @@ def _default_finalize(run_dir):
     return finalize(run_dir)
 
 
-def run(lock_path, *, acquire=None, popen=subprocess.Popen, finalize=_default_finalize) -> int:
+class Interrupted(KeyboardInterrupt):
+    """Raised by the SIGTERM/SIGHUP handlers so the cleanup in run() still executes."""
+
+
+def _raise_interrupted(signum, frame):
+    raise Interrupted(f"signal {signum}")
+
+
+def _terminate_group(proc, killpg, timeout=30) -> None:
+    """SIGTERM the child's process group, wait, escalate to SIGKILL, and reap it."""
+    try:
+        killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+
+
+def run(lock_path, *, acquire=None, popen=subprocess.Popen, finalize=_default_finalize,
+        killpg=os.killpg) -> int:
+    old = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            old[sig] = signal.signal(sig, _raise_interrupted)
+    try:
+        return _run(lock_path, acquire, popen, finalize, killpg)
+    finally:
+        for sig, h in old.items():
+            signal.signal(sig, h)
+
+
+def _run(lock_path, acquire, popen, finalize, killpg) -> int:
     lock = yaml.safe_load(Path(lock_path).read_text())
     run_dir = Path(lock["run_dir"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -60,8 +99,13 @@ def run(lock_path, *, acquire=None, popen=subprocess.Popen, finalize=_default_fi
         for seed in lock["seeds"]:
             start, t0 = _now(), time.monotonic()
             with open(run_dir / f"train-s{seed}.log", "ab") as log:
-                rc = popen(build_command(lock, seed), env=env, cwd=repo,
-                           stdout=log, stderr=subprocess.STDOUT).wait()
+                proc = popen(build_command(lock, seed), env=env, cwd=repo, stdout=log,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+                try:
+                    rc = proc.wait()
+                except BaseException:
+                    _terminate_group(proc, killpg)
+                    raise
             timing["seeds"][str(seed)] = {"start": start, "end": _now(),
                                           "seconds": round(time.monotonic() - t0, 1), "exit_code": rc}
             _write_json(run_dir / "timing.json", timing)
@@ -72,7 +116,7 @@ def run(lock_path, *, acquire=None, popen=subprocess.Popen, finalize=_default_fi
             stage = "finalize"
             finalize(run_dir)
             code = 0
-    except Exception as e:  # code stays non-zero; DONE is written below
+    except BaseException as e:  # code stays non-zero; DONE is written below
         print(f"runner error in stage {stage}: {e!r}", file=sys.stderr)
     finally:
         if lease is not None:

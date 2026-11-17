@@ -42,3 +42,11 @@ def test_status_max_steps_cap_and_no_log(tmp_path):
     assert status(run_dir)["step"] is None and status(run_dir)["eta_s"] is None
     run_dir = setup(tmp_path / "b", RECS, max_steps=60)
     assert status(run_dir)["total_steps"] == 60
+
+
+def test_status_epochs_default(tmp_path):
+    run_dir = setup(tmp_path, RECS)
+    lock = yaml.safe_load((run_dir / "run.lock.yaml").read_text())
+    del lock["flags"]["epochs"]
+    (run_dir / "run.lock.yaml").write_text(yaml.safe_dump(lock))
+    assert status(run_dir)["total_steps"] == 50

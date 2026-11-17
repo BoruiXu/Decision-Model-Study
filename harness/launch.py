@@ -28,8 +28,10 @@ def launch(lock_path, *, tmux=_tmux) -> dict:
     if done.exists():
         raise RuntimeError(f"run already finished ({done} exists); resolve a new run instead")
     session = _sanitize(f"ojh-{getpass.getuser()}-{lock['experiment']}-{str(lock['run_id'])[:8]}")
+    run_dir.mkdir(parents=True, exist_ok=True)
     log = run_dir / "runner.log"
-    inner = (f"{shlex.quote(lock['machine']['python'])} -m harness.runner "
+    repo = str(lock["repo_root"])
+    inner = (f"PYTHONPATH={shlex.quote(repo)} {shlex.quote(lock['machine']['python'])} -m harness.runner "
              f"{shlex.quote(str(lock_path))} >> {shlex.quote(str(log))} 2>&1")
-    tmux(["tmux", "new-session", "-d", "-s", session, inner])
+    tmux(["tmux", "new-session", "-d", "-s", session, "-c", repo, inner])
     return {"session": session, "log": str(log), "done": str(done), "run_dir": str(run_dir)}
