@@ -204,3 +204,76 @@ def test_no_warning_when_group_writable_or_created(tmp_path):
         acquire(machine(tmp_path), 1, query=FakeSmi(CARDS), sleep=no_sleep).release()
         assert (tmp_path / "locks").stat().st_mode & stat.S_IWGRP
         acquire(machine(tmp_path), 1, query=FakeSmi(CARDS), sleep=no_sleep).release()
+
+
+def _lockable(m, uuid):
+    fd = os.open(os.path.join(m.lock_dir, f"{uuid}.lock"), os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_partial_round_releases_locks_before_retry(tmp_path):
+    m = machine(tmp_path, min_free_mib=30000)
+    os.makedirs(m.lock_dir)
+    os.chmod(m.lock_dir, 0o2775)
+    held = os.open(os.path.join(m.lock_dir, "GPU-d.lock"), os.O_CREAT | os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def sleep(_):
+        seen.append((_lockable(m, "GPU-b"), _lockable(m, "GPU-c")))
+        raise Stop
+
+    try:
+        with pytest.raises(Stop):
+            acquire(m, 3, query=FakeSmi(CARDS), sleep=sleep)
+    finally:
+        os.close(held)
+    assert seen == [(True, True)]
+
+
+def test_query_error_mid_recheck_releases_all(tmp_path):
+    m = machine(tmp_path)
+    base = FakeSmi(CARDS)
+
+    def query(uuid=None):
+        if uuid == "GPU-b":
+            raise RuntimeError("smi died")
+        return base(uuid)
+
+    with pytest.raises(RuntimeError, match="smi died"):
+        acquire(m, 3, query=query, sleep=no_sleep)
+    assert _lockable(m, "GPU-d") and _lockable(m, "GPU-b")
+
+
+def test_unopenable_lock_file_is_busy(tmp_path):
+    m = machine(tmp_path)
+    os.makedirs(m.lock_dir)
+    os.chmod(m.lock_dir, 0o2775)
+    bad = os.path.join(m.lock_dir, "GPU-d.lock")
+    open(bad, "w").close()
+    os.chmod(bad, 0)
+    try:
+        lease = acquire(m, 1, query=FakeSmi(CARDS), sleep=no_sleep)
+        assert lease.uuids == ["GPU-b"]
+        lease.release()
+    finally:
+        os.chmod(bad, 0o600)
+
+
+def test_new_lock_file_is_group_writable(tmp_path):
+    old = os.umask(0o022)
+    try:
+        m = machine(tmp_path)
+        acquire(m, 1, query=FakeSmi(CARDS), sleep=no_sleep).release()
+    finally:
+        os.umask(old)
+    assert os.stat(os.path.join(m.lock_dir, "GPU-d.lock")).st_mode & stat.S_IWGRP

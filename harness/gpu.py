@@ -88,6 +88,32 @@ def _prepare_lock_dir(lock_dir: str) -> None:
     os.chmod(lock_dir, 0o2775)  # makedirs mode is masked by umask
 
 
+def _try_lock(path: str) -> int | None:
+    """Open (creating if needed) and flock a lock file; None if the card is busy or the file is unusable.
+
+    Opened read-only: flock works on a read-only fd, so group members need no write access to the file.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o664)
+        try:
+            os.chmod(path, 0o664)  # umask-proof so other group members can open it
+        except OSError:
+            pass
+    except FileExistsError:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return None
+    except PermissionError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def _preassigned(n: int, query) -> GpuLease:
     raw = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     ids = [p.strip() for p in raw.split(",") if p.strip()]
@@ -131,25 +157,30 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
         gpus.sort(key=lambda g: g.free_mib, reverse=True)
         got: list[Gpu] = []
         fds: list[int] = []
-        for g in gpus:
-            fd = None
-            if machine.lock_dir:
-                fd = os.open(os.path.join(machine.lock_dir, f"{g.uuid}.lock"), os.O_CREAT | os.O_RDWR, 0o664)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    os.close(fd)
-                    continue
-                fresh = [x for x in parse_nvidia_smi(query(g.uuid)) if x.uuid == g.uuid]
-                if not fresh or fresh[0].free_mib < machine.min_free_mib:
-                    os.close(fd)
-                    continue
-                fds.append(fd)
-            got.append(g)
-            if len(got) == n:
-                return GpuLease([x.uuid for x in got], [x.name for x in got], fds)
-        for fd in fds:
-            os.close(fd)
+        try:
+            for g in gpus:
+                fd = None
+                if machine.lock_dir:
+                    fd = _try_lock(os.path.join(machine.lock_dir, f"{g.uuid}.lock"))
+                    if fd is None:
+                        continue
+                    try:
+                        fresh = [x for x in parse_nvidia_smi(query(g.uuid)) if x.uuid == g.uuid]
+                    except BaseException:
+                        os.close(fd)
+                        raise
+                    if not fresh or fresh[0].free_mib < machine.min_free_mib:
+                        os.close(fd)
+                        continue
+                    fds.append(fd)
+                got.append(g)
+                if len(got) == n:
+                    lease = GpuLease([x.uuid for x in got], [x.name for x in got], fds)
+                    fds = []  # ownership moved to the lease
+                    return lease
+        finally:
+            for fd in fds:
+                os.close(fd)
         if clock() > deadline:
             raise GpuWaitTimeout(
                 f"no {n} GPU(s) with >= {machine.min_free_mib} MiB free within {machine.wait_timeout_s} s")
