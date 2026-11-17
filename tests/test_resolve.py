@@ -164,6 +164,7 @@ def test_lock_has_all_fields(tmp_path):
     assert lock["plan"] == {"steps": 176, "ranks": 4, "interval": 22}
     assert lock["flags"]["eval_every"] == 22 and lock["flags"]["save_every"] == 22
     assert lock["data"]["sha256"]["train.jsonl"] and lock["base"]["revision"]
+    assert lock["data"]["adapter"] == "onejev_rows"
     assert lock["onejev"]["patch"]["sha256"] and lock["fingerprint"]["driver_version"] == "570.00"
     assert lock["machine"]["python"] == "/venv/bin/python"
     assert lock["eval_sets"] == {"val": {"train_labels": "/d/val.jsonl", "reference": None}}

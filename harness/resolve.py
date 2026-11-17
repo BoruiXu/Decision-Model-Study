@@ -257,7 +257,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     if not info_path.is_file():
         raise ConfigError(f"no prepared data at {prepared}; run `ojh prepare` first")
     info = json.loads(info_path.read_text())
-    data = {"prepared_dir": str(prepared), "source": exp.data.train,
+    data = {"prepared_dir": str(prepared), "source": exp.data.train, "adapter": exp.data.adapter,
             "sha256": {f: _sha(prepared / f) for f in ("train.jsonl", "select.jsonl", "select_index.json")},
             "source_sha256": info["train_sha256_source"], "subset": info.get("subset"),
             "counts": info.get("counts")}
