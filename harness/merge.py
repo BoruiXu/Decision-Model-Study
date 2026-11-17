@@ -20,9 +20,12 @@ def merge_lora(base_dir, adapter_dir, out_dir, *, multimodal: bool = False, devi
     """``dtype`` and ``disable_fla_kernels`` follow the run (OneJev's LoRA load dtype is ``--dtype``)."""
     base_dir, adapter_dir, out = Path(base_dir), Path(adapter_dir), Path(out_dir)
     partial = out.with_name(out.name + ".partial")
-    for p in (out, partial):  # never delete here: a leftover is listed as a deletion candidate
-        if p.exists():
-            raise FileExistsError(f"merge target already exists: {p}")
+    if out.exists():  # never deleted here: a finished merge is listed as a deletion candidate
+        raise FileExistsError(f"merge target already exists: {out}")
+    if partial.is_symlink() or partial.is_file():
+        partial.unlink()
+    elif partial.exists():  # this function's own temp dir, left by a merge that died
+        shutil.rmtree(partial)
     common = prepare_onejev(disable_fla_kernels)
     import peft
     from qev.readout import CONFIG_FILE, HEAD_FILE, ReadoutConfig

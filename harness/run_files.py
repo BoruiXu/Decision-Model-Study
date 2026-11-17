@@ -78,6 +78,8 @@ def write_checkpoint_manifest(run_dir: Path, lock: dict, seeds: dict) -> dict:
 
 
 def _ckpt_kind(name: str) -> str | None:
+    if name.endswith(".partial"):  # a merge that died (finalize's own temp dir)
+        return "partial"
     if name.startswith("merged-step"):
         return "merged"
     if name.startswith(("ckpt-step", "adapter-step")) or name in ("final", "adapter"):
@@ -85,14 +87,16 @@ def _ckpt_kind(name: str) -> str | None:
     return None
 
 
-def write_deletion_candidates(run_dir: Path, lock: dict, seeds: dict) -> dict:
-    """Unselected checkpoint dirs and every merged dir, with sizes. Nothing is deleted here.
+FAILED_NOTE = ("the run failed: nothing is offered for deletion until a re-finalize succeeds; "
+               "nothing is deleted without `ojh cleanup --confirm`")
 
-    A seed whose selection failed lists only its merged dirs, so a failed finalize never offers the
-    checkpoint it could not verify for deletion.
+
+def write_deletion_candidates(run_dir: Path, lock: dict, seeds: dict, *, failed: bool = False) -> dict:
+    """Unselected checkpoint dirs, every merged dir and any ``.partial`` dir, with sizes. Nothing is deleted
+    here. A failed run lists nothing: its selection or verification is not trustworthy.
     """
     cands = []
-    for seed in lock["seeds"]:
+    for seed in ([] if failed else lock["seeds"]):
         seed_dir = run_dir / "runs" / f"{lock['experiment']}-s{seed}"
         keep = seeds.get(str(seed), {}).get("checkpoint")
         if not seed_dir.is_dir():
@@ -102,7 +106,7 @@ def write_deletion_candidates(run_dir: Path, lock: dict, seeds: dict) -> dict:
             if kind is None or (kind == "checkpoint" and (keep is None or d == Path(keep))):
                 continue
             cands.append({"path": str(d), "seed": seed, "kind": kind, "bytes": dir_bytes(d)})
-    obj = {"note": "nothing is deleted without `ojh cleanup --confirm`", "candidates": cands,
+    obj = {"note": FAILED_NOTE if failed else "nothing is deleted without `ojh cleanup --confirm`", "candidates": cands,
            "total_bytes": sum(c["bytes"] for c in cands)}
     write_json(run_dir / "deletion_candidates.json", obj)
     return obj
@@ -230,12 +234,19 @@ def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str
             per = "; ".join(f"{s}: {_f(v)}" for s, v in (t.get("per_set") or {}).items())
             lines.append(f"- seed {key} · **{name}**：{own}" + (f"；分集 {per}" if per else ""))
     lines += ["", "## 被去掉的 id（参照连接、未分配、评测时缺标签）"] + _dropped_lines(dropped)
-    lines += ["", "## 门"] + [f"- seed {k}：{_gate_text(c.get('gate'))}" for k, c in comparison.items()]
+    lines += ["", "## 门"]
+    if ev["type"] == "binary_decision":
+        lines.append("- 规则：每个评测集上，路由器的 AUC（有分组时还有组内 AUC）都要高于 TF-IDF 和分组先验；"
+                     "某个集没有任何对照基线，或它的 select 行全部被去掉时，门不通过（没有可比的对象不能算通过）")
+    lines += [f"- seed {k}：{_gate_text(c.get('gate'))}" for k, c in comparison.items()]
     lines += ["", "## overrides"]
     ov = lock.get("overrides") or {}
     lines += [f"- {k} = {_f(v.get('value'))}（原因：{v.get('reason')}）" for k, v in ov.items()] or ["- 无"]
     lines += ["", "## 删除候选（需 `ojh cleanup --confirm`）"]
-    lines += [f"- {rel(c['path'], run_dir)}（{c['kind']}，{c['bytes'] / 2**30:.2f} GiB）"
-              for c in candidates["candidates"]] or ["- 无"]
+    if status == "failed":
+        lines.append("- 无：run 失败时不列出任何删除候选；修好后重新 finalize 成功才会列出")
+    else:
+        lines += [f"- {rel(c['path'], run_dir)}（{c['kind']}，{c['bytes'] / 2**30:.2f} GiB）"
+                  for c in candidates["candidates"]] or ["- 无"]
     lines += ["", "## 状态", f"- **{status}**"] + [f"- {f}" for f in failures]
     (run_dir / "RUN_CARD.md").write_text("\n".join(lines) + "\n")

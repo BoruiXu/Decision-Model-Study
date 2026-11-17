@@ -146,3 +146,14 @@ def test_merge_lora_writes_full_dir(fake_onejev, tmp_path):
     assert ("readout_load", str(adapter)) in fake_onejev and n.index("peft") < n.index("merge")
     with pytest.raises(FileExistsError):
         merge.merge_lora(tmp_path / "base", adapter, out)
+
+
+def test_merge_lora_replaces_a_stale_partial(fake_onejev, tmp_path):
+    adapter = tmp_path / "adapter-step8"
+    adapter.mkdir()
+    stale = tmp_path / "merged-step8.partial"  # left by a merge that died
+    stale.mkdir()
+    (stale / "half.safetensors").write_text("junk")
+    out = merge.merge_lora(tmp_path / "base", adapter, tmp_path / "merged-step8")
+    assert (out / "model.safetensors").is_file() and not (out / "half.safetensors").exists()
+    assert not stale.exists()

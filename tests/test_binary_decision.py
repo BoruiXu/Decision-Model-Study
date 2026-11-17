@@ -174,3 +174,27 @@ def test_plugin_default_baselines_share_label_rules():
     out = evaluate_plugin(types.ModuleType("empty"), recs, parts, train, fields, EvaluatorSpec())
     assert out["dropped"] == {"baseline_train": ["rt0"]}
     assert {"tfidf", "group_prior"} <= set(out["sets"]["pooled_select"])
+
+
+def test_gate_without_rival_baseline_cannot_pass():
+    preds, parts, train, fields = setup(text=None, group=None)
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert out["gate"]["passed"] is False
+    for n in ("a", "b"):
+        assert out["gate"][n]["passed"] is False and "no rival baseline" in out["gate"][n]["reason"]
+    assert evaluate(preds, parts, train, fields, EvaluatorSpec(gate=False))["gate"]["passed"] is None
+
+
+def test_gate_fails_for_a_set_whose_rows_were_all_dropped():
+    preds, parts, train, fields = setup()
+    for r in parts.select_rows:
+        if parts.select_index[r["id"]] == "a":
+            del r["meta"]["f"]
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert "a" not in out["sets"] and set(out["gate"]["b"]) == {"auc", "within_group_auc"}
+    assert out["gate"]["a"]["passed"] is False and "dropped" in out["gate"]["a"]["reason"]
+    assert out["gate"]["passed"] is False
+    for r in parts.select_rows:
+        r["meta"].pop("f", None)
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())  # nothing left at all
+    assert out["gate"]["passed"] is False and {"a", "b"} <= set(out["gate"])

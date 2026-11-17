@@ -45,12 +45,36 @@ def _beats(router, others, key) -> bool:
     return mine > max(rivals) if rivals else True
 
 
+NO_RIVAL = "no rival baseline (TF-IDF needs fields.text, the group prior fields.group; both need labeled train rows)"
+
+
+def _gate(set_names, sets, has_group, evaluator_cfg) -> dict:
+    """Per eval set: does the router beat every rival baseline on AUC (and within-group AUC)? A set without
+    any rival baseline, or whose select rows were all dropped, records why and fails: a gate with nothing
+    to beat cannot pass."""
+    keys = ["auc"] + (["within_group_auc"] if has_group else [])
+    gate: dict = {"enabled": bool(evaluator_cfg.gate)}
+    ok = []
+    for n in set_names:
+        e = sets.get(n)
+        rivals = [e[k] for k in ("tfidf", "group_prior") if k in e] if e is not None else []
+        if e is None:
+            gate[n] = {"passed": False, "reason": "every select row was dropped (no label, consistency or group)"}
+        elif not rivals:
+            gate[n] = {"passed": False, "reason": NO_RIVAL}
+        else:
+            gate[n] = {k: _beats(e["router"], rivals, k) for k in keys}
+        ok.append("reason" not in gate[n] and all(gate[n].values()))
+    gate["passed"] = (bool(ok) and all(ok)) if evaluator_cfg.gate else None
+    return gate
+
+
 def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     """Score `preds` (id -> positive-class probability) on the pooled and per-set select rows.
 
     A select row is its own reference when `parts.reference` lacks its id (eval sets without a
-    reference file). The gate is always evaluated per set; `gate["enabled"]` mirrors
-    `evaluator_cfg.gate` and `gate["passed"]` is None when the gate is off.
+    reference file). The gate is always evaluated per eval set that has select rows (see `_gate`);
+    `gate["enabled"]` mirrors `evaluator_cfg.gate` and `gate["passed"]` is None when the gate is off.
     """
     has_group = fields.group is not None
     has_f = fields.consistency is not None
@@ -115,10 +139,10 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
             entry[name] = _summary(ex, s, budgets, group=has_group, with_ece=name == "router")
         sets[n] = entry
 
-    result: dict = {"sets": sets, "thresholds": {}, "gate": {}, "dropped": dropped,
-                    "tfidf_strength": model.strength if model is not None else None}
+    all_sets = list(dict.fromkeys(parts.select_index[r["id"]] for r in parts.select_rows))
+    result: dict = {"sets": sets, "thresholds": {}, "gate": _gate(all_sets, sets, has_group, evaluator_cfg),
+                    "dropped": dropped, "tfidf_strength": model.strength if model is not None else None}
     if not examples:
-        result["gate"] = {"enabled": bool(evaluator_cfg.gate), "passed": False if evaluator_cfg.gate else None}
         return result
 
     # Thresholds: fitted on pooled select rows with router scores only.
@@ -141,13 +165,4 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
             if not has_f:
                 t["per_set"][n].pop("inconsistency")
     result["thresholds"] = thr
-
-    keys = ["auc"] + (["within_group_auc"] if has_group else [])
-    gate = {"enabled": bool(evaluator_cfg.gate)}
-    for n in names:
-        e = sets[n]
-        rivals = [e[k] for k in ("tfidf", "group_prior") if k in e]
-        gate[n] = {k: _beats(e["router"], rivals, k) for k in keys}
-    gate["passed"] = all(v for n in names for v in gate[n].values()) if evaluator_cfg.gate else None
-    result["gate"] = gate
     return result

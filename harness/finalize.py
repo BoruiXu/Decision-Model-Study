@@ -343,7 +343,7 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     thresholds = {k: (s["evaluation"] or {}).get("thresholds") for k, s in seeds.items()}
     timing = run_files.write_timing(run_dir, lock)
     manifests = run_files.write_checkpoint_manifest(run_dir, lock, seeds)
-    candidates = run_files.write_deletion_candidates(run_dir, lock, seeds)
+    candidates = run_files.write_deletion_candidates(run_dir, lock, seeds, failed=status == "failed")
     run_files.write_predictions(run_dir, seeds, None if plugin else exp.fields.label.rsplit(".", 1)[-1])
     run_files.write_json(run_dir / "thresholds.json", thresholds)
     run_files.write_json(run_dir / "comparison.json", comparison)

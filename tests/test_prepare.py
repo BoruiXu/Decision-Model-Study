@@ -155,7 +155,7 @@ def test_empty_subset_noop_and_adapter_template(tmp_path):
     from adapters import template
     with pytest.raises(NotImplementedError):
         template.adapt(Path("x"))
-    exp = make_exp(tmp_path, [row("t1"), row("t2")])
+    exp = make_exp(tmp_path, [row("t1"), row("t2")], {"val": ([row("a", split="val")], None)})
     exp.subset = SubsetSpec()
     with pytest.warns(UserWarning):
         assert prepare(exp, tmp_path / "o")["counts"]["train"] == 2
@@ -221,3 +221,15 @@ def test_prepared_json_records_allow_test(tmp_path):
     exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a", split="val")], None)}, {"val": {"a": "select"}})
     assert prepare(exp, tmp_path / "out")["allow_test"] is False
     assert json.loads((tmp_path / "out" / "prepared.json").read_text())["allow_test"] is False
+
+
+@pytest.mark.filterwarnings("ignore:data.train_sha256 not set")
+def test_empty_select_set_refused(tmp_path):
+    from harness.config import ConfigError
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a"), row("b")], None), "ood": ([row("c")], None)},
+                   {"val": {"a": "report", "b": "report"}, "ood": {"c": "report"}})
+    with pytest.raises(ConfigError, match="val.*ood|ood.*val"):
+        prepare(exp, tmp_path / "out")
+    with pytest.raises(ConfigError, match="no eval sets"):
+        prepare(make_exp(tmp_path, [row("t1")]), tmp_path / "out")
+    assert not (tmp_path / "out").exists()

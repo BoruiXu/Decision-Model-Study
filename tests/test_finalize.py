@@ -273,7 +273,10 @@ def test_finalize_lora_merge_compared(tmp_path, merged_shift, status):
     assert lock["base"]["revision"] in manifest and "runs/exp-s42/merged-step8/model.safetensors" in manifest
     cands = json.loads((run_dir / "deletion_candidates.json").read_text())["candidates"]
     kinds = {Path(c["path"]).name: c["kind"] for c in cands}
-    assert kinds == {"adapter-step4": "checkpoint", "adapter": "checkpoint", "merged-step8": "merged"}
+    if status == "done":
+        assert kinds == {"adapter-step4": "checkpoint", "adapter": "checkpoint", "merged-step8": "merged"}
+    else:  # a failed run offers nothing for deletion
+        assert kinds == {}
     (rec,) = registry.read(registry_path(lock))
     assert rec["mode"] == "lora" and rec["base_revision"] == lock["base"]["revision"]
     assert len(rec["merged_sha256"]) == 64 and rec["merged_sha256"] != rec["checkpoint_sha256"]
@@ -529,3 +532,33 @@ def test_finalize_refuses_changed_prepared_data(tmp_path, changed):
     assert any(changed in f and "sha256" in f for f in out["failures"]), out["failures"]
     assert json.loads((run_dir / "comparison.json").read_text())["42"]["sets"] is None  # not evaluated
     assert (run_dir / "status").read_text().strip() == "failed"
+
+
+def test_failed_run_offers_no_deletion_candidates(tmp_path):
+    run_dir, lock = make_run(tmp_path)
+    out = finalize(run_dir, scorer=FakeScorer(shift=0.05), merger=no_merger)  # NLL mismatch
+    assert out["status"] == "failed"
+    cands = json.loads((run_dir / "deletion_candidates.json").read_text())
+    assert cands["candidates"] == [] and cands["total_bytes"] == 0 and "failed" in cands["note"]
+    section = (run_dir / "RUN_CARD.md").read_text().split("## 删除候选", 1)[1].split("\n## ", 1)[0]
+    assert "失败" in section and "ckpt-step4" not in section
+
+
+def test_partial_dirs_listed_as_deletion_candidates(tmp_path):
+    run_dir, lock = make_run(tmp_path)
+    seed_dir = run_dir / "runs" / "exp-s42"
+    for name in ("merged-step4.partial", "scratch.partial"):
+        (seed_dir / name).mkdir()
+        (seed_dir / name / "w").write_bytes(b"x" * 7)
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert out["status"] == "done", out["failures"]
+    kinds = {Path(c["path"]).name: c["kind"] for c in
+             json.loads((run_dir / "deletion_candidates.json").read_text())["candidates"]}
+    assert kinds["merged-step4.partial"] == kinds["scratch.partial"] == "partial"
+
+
+def test_run_card_states_the_gate_rule(tmp_path):
+    run_dir, lock = make_run(tmp_path)
+    finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    section = (run_dir / "RUN_CARD.md").read_text().split("## 门", 1)[1].split("\n## ", 1)[0]
+    assert "没有任何对照基线" in section and "全部被去掉" in section and "不通过" in section

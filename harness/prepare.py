@@ -190,6 +190,10 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     train = apply_subset(train_all, exp.subset)
 
     parts = build_eval_parts(exp, allow_test=allow_test)
+    if not parts.select_rows:
+        raise ConfigError(f"no select rows in eval sets {sorted(data.eval)}: checkpoint selection needs at least "
+                          "one (check data.split_file)" if data.eval else
+                          "data.eval lists no eval sets: checkpoint selection needs select rows")
     train_ids = {r["id"] for r in train_all}
     owner: dict[str, str] = {}
     for name, spec in data.eval.items():
