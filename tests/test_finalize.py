@@ -432,15 +432,15 @@ def test_refinalize_upserts_registry_and_keeps_note(tmp_path):
     assert lock["run_id"] in registry.table(reg)
 
 
-def test_score_kwargs_follow_onejev_load_rule():
-    from harness.finalize import _score_kwargs
+def testscore_kwargs_follow_onejev_load_rule():
+    from harness.finalize import score_kwargs
     base = {"base": {"multimodal": False}}
-    assert _score_kwargs({**base, "flags": {"full_finetune": True}})["dtype"] == "float32"
-    assert _score_kwargs({**base, "flags": {"full_finetune": True, "fsdp": True, "dtype": "bfloat16"}})["dtype"] \
+    assert score_kwargs({**base, "flags": {"full_finetune": True}})["dtype"] == "float32"
+    assert score_kwargs({**base, "flags": {"full_finetune": True, "fsdp": True, "dtype": "bfloat16"}})["dtype"] \
         == "bfloat16"
-    assert _score_kwargs({**base, "flags": {"dtype": "float16"}})["dtype"] == "float16"  # LoRA: flags.dtype
-    assert _score_kwargs({**base, "flags": {}})["dtype"] == "bfloat16"
-    assert _score_kwargs({**base, "flags": {"disable_fla_kernels": True}})["disable_fla_kernels"] is True
+    assert score_kwargs({**base, "flags": {"dtype": "float16"}})["dtype"] == "float16"  # LoRA: flags.dtype
+    assert score_kwargs({**base, "flags": {}})["dtype"] == "bfloat16"
+    assert score_kwargs({**base, "flags": {"disable_fla_kernels": True}})["disable_fla_kernels"] is True
 
 
 def test_finalize_forwards_fla_override(tmp_path):

@@ -83,7 +83,7 @@ def _plugin(exp: ExperimentConfig):
     raise ConfigError(f"unknown evaluator.type {t!r}: use binary_decision or plugin")
 
 
-def _score_kwargs(lock: dict) -> dict:
+def score_kwargs(lock: dict) -> dict:
     """Forward-pass settings of the in-training eval, so the rescored NLL compares with it.
 
     Mirrors OneJev ``sft.py``: load dtype float32 for a full fine-tune without FSDP, else ``--dtype``;
@@ -173,7 +173,7 @@ def _seed(run_dir, lock, exp, seed, select_rows, train_rows, parts, plugin, scor
         fail(f"training scored {hits[-1]['n']} select rows but the prepared select.jsonl has {len(select_rows)}")
         return out
     base_dir =Path(lock["machine"]["model_dir"]) / lock["base"]["name"] if lora else None
-    kw = _score_kwargs(lock)
+    kw = score_kwargs(lock)
     recs = scorer(ckpt, select_rows, base_dir=base_dir, **kw)
     if set(recs) != {r["id"] for r in select_rows}:
         fail(f"rescoring returned {len(recs)} rows for {len(select_rows)} select rows")
