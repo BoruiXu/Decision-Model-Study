@@ -1,0 +1,22 @@
+name: mammoth-1
+hf_repo: baselabs/mammoth-1
+revision: 61cec44c281c693992e3d6ebeb44dd3402dfa186
+params_b: 27
+multimodal: true
+attention: noncausal
+readout: slot_lm
+sha256:
+  chat_template.jinja: a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715
+  config.json: bab5a8ceb73fd6a8f191afaf23afbf689d931da5b3c7c9d5153cf1e4b5024502
+  constraints.txt: 7afb5334b5d57ef09e3d8ac2fc670f07182c50ffb51035d5b6eb7898f863edfb
+  generation_config.json: eb67f249756eede535dd6f8c941570e91a2a73f0c8d05d00c6012216ecfca869
+  model-00001-of-00002.safetensors: 29701f9a7b131bedb3fe1d565dad69b912d9128c6fc27e3d8fb0aedc47ae0e06
+  model-00002-of-00002.safetensors: 4da0ff5476813bbd9898454f0d7f7ba3c82914c42e32e2b87577c6d69daae671
+  model.safetensors.index.json: 0424520f63f04816eee4d229a4487dc9744866ceb46513e591dd987e401b1663
+  processor_config.json: bfbc24af59a3e73a9cd0653b8d4ae758dfaec4e3e6c15dfb1c6c8ee8d5683c85
+  readout.json: 96ea8a5c6ecfc30c20cdd369762db5997c5f4fb9821ce0a0318941343eb5e8ba
+  serve.patch: f234c125f1d38d82104b9e1f24e75bde51e4401928acfba2fbf5c59ef2fb46b8
+  tokenizer.json: a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f
+  tokenizer_config.json: 2984c03425a28d242744e234a5003786fd289b3713db79fe0958c65eb59d85b2
+published_recipe: Published by baselabs as a ready decision-model router; see the
+  model card at the hf_repo. Weights ship with the OneJev serve.patch.

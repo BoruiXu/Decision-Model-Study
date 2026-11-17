@@ -1,0 +1,20 @@
+name: joey-1
+hf_repo: baselabs/joey-1
+revision: 9efbe485efbed9598dfca5294cbbe8da00e21908
+params_b: 2
+multimodal: true
+attention: noncausal
+readout: slot_lm
+sha256:
+  chat_template.jinja: 273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80
+  config.json: 7c7ebc3322308391787aac279c7cbd4c3a38bba85e270b5f5568ad07467673e1
+  constraints.txt: 7afb5334b5d57ef09e3d8ac2fc670f07182c50ffb51035d5b6eb7898f863edfb
+  generation_config.json: 290866a6d7d4a4442fe83ba2434a31517446f40a01de500ff97b4354e7e5d082
+  model.safetensors: 4c503aded23bae311dff80a63326503fb720572c178f07a2142332d55f5f3afc
+  processor_config.json: bfbc24af59a3e73a9cd0653b8d4ae758dfaec4e3e6c15dfb1c6c8ee8d5683c85
+  readout.json: 96ea8a5c6ecfc30c20cdd369762db5997c5f4fb9821ce0a0318941343eb5e8ba
+  serve.patch: f234c125f1d38d82104b9e1f24e75bde51e4401928acfba2fbf5c59ef2fb46b8
+  tokenizer.json: a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f
+  tokenizer_config.json: 2984c03425a28d242744e234a5003786fd289b3713db79fe0958c65eb59d85b2
+published_recipe: Published by baselabs as a ready decision-model router; see the
+  model card at the hf_repo. Weights ship with the OneJev serve.patch.

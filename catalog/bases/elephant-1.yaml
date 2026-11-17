@@ -1,0 +1,20 @@
+name: elephant-1
+hf_repo: baselabs/elephant-1
+revision: b3f8a93462fb1051a9de031e94a7ff380e254072
+params_b: 9
+multimodal: true
+attention: noncausal
+readout: slot_lm
+sha256:
+  chat_template.jinja: a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715
+  config.json: f26324589d15932e2742dbb13dbc7c561865ce4f80990af3b7dff05efe4dadab
+  constraints.txt: 7afb5334b5d57ef09e3d8ac2fc670f07182c50ffb51035d5b6eb7898f863edfb
+  generation_config.json: 290866a6d7d4a4442fe83ba2434a31517446f40a01de500ff97b4354e7e5d082
+  model.safetensors: 682f02348dfe4617dd21bba2915c12e805de8cf16327a61e895a831ea681d0ba
+  processor_config.json: bfbc24af59a3e73a9cd0653b8d4ae758dfaec4e3e6c15dfb1c6c8ee8d5683c85
+  readout.json: 96ea8a5c6ecfc30c20cdd369762db5997c5f4fb9821ce0a0318941343eb5e8ba
+  serve.patch: f234c125f1d38d82104b9e1f24e75bde51e4401928acfba2fbf5c59ef2fb46b8
+  tokenizer.json: a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f
+  tokenizer_config.json: 2984c03425a28d242744e234a5003786fd289b3713db79fe0958c65eb59d85b2
+published_recipe: Published by baselabs as a ready decision-model router; see the
+  model card at the hf_repo. Weights ship with the OneJev serve.patch.

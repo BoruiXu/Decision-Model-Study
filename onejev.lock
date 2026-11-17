@@ -1,0 +1,17 @@
+# Pinned OneJev runtime: upstream revision plus the baselabs serve.patch.
+# The serve.patch published with joey-1, elephant-1 and mammoth-1 was downloaded at each
+# base's pinned revision and has the same sha256 (f234c125...) in all three, so one patch
+# serves every base and the catalog carries no per-base patch overrides.
+repo: https://github.com/OmniJev/OneJev.git
+revision: 81ce62f1597c91e46767d4d02d6ac2e18534fe94
+patch:
+  hf_repo: baselabs/joey-1
+  revision: 9efbe485efbed9598dfca5294cbbe8da00e21908
+  file: serve.patch
+  sha256: f234c125f1d38d82104b9e1f24e75bde51e4401928acfba2fbf5c59ef2fb46b8
+patched_sha256:
+  qev/prompt.py: f0763b5f747039c2919bc2a6d51e4ed88308fe3497e53498e6f298286b6169b2
+  qev/readout.py: e084edead750ddeb39384b9f659182df52720d96294d9a95c9259a8001e3c20d
+  train/common.py: af38cc54d688b6a5a19bec09c7f91ad54e1ddc7d6302e4902ca1f83d9d028ad9
+  train/fsdp.py: cd07b861b3e275e2c2cb508e046448b6169482713d57da53729fa6b6fb7bd4d7
+  train/sft.py: b86093cd4dbdad2ca992b3fc9a652248c6b0521999a84160c8449f81eaf0bfce
