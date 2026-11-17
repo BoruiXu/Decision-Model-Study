@@ -1,0 +1,196 @@
+"""Data preparation: validate, subset and merge an experiment's data. Imports without torch."""
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import random
+import warnings
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from harness.config import ExperimentConfig, SubsetSpec, get_field
+
+
+class ShaMismatch(RuntimeError):
+    """The source train file does not match data.train_sha256."""
+
+
+class IdOverlap(RuntimeError):
+    """An id appears in train and an eval set, or in two eval sets."""
+
+
+class TestSplitRefused(RuntimeError):
+    """A row belongs to a test split and --allow-test was not given."""
+
+    __test__ = False  # not a pytest class
+
+
+# The v1 data names binary targets yes/no while the criteria are keyed true/false.
+_ALIASES = {"yes": "true", "no": "false"}
+
+
+def _norm(key: str) -> str:
+    return _ALIASES.get(key, key)
+
+
+def _load_adapter(name: str):
+    return importlib.import_module(f"adapters.{name}")
+
+
+def validate_rows(rows: list[dict]) -> list[str]:
+    errors: list[str] = []
+    seen: set = set()
+    for i, r in enumerate(rows):
+        rid = r.get("id", f"<row {i}>")
+        if rid in seen:
+            errors.append(f"duplicate id: {rid}")
+        seen.add(rid)
+        if not r.get("state"):
+            errors.append(f"{rid}: missing state")
+        target = r.get("target")
+        criteria = (r.get("question") or {}).get("criteria") or {}
+        if not isinstance(target, dict) or not target:
+            errors.append(f"{rid}: missing target")
+            continue
+        if not {_norm(k) for k in target} <= {_norm(k) for k in criteria}:
+            errors.append(f"{rid}: target keys {sorted(target)} not in criteria {sorted(criteria)}")
+        total = sum(target.values())
+        if abs(total - 1.0) > 1e-6:
+            errors.append(f"{rid}: target does not sum to 1 (sum={total})")
+    return errors
+
+
+def apply_subset(rows: list[dict], spec: SubsetSpec | None) -> list[dict]:
+    if spec is None or (not spec.where and spec.n is None):
+        return rows
+    out = rows
+    for dotted, want in spec.where.items():
+        def keep(r, dotted=dotted, want=want):
+            try:
+                return get_field(r, dotted) == want
+            except KeyError:
+                return False
+        out = [r for r in out if keep(r)]
+    out = sorted(out, key=lambda r: r["id"])
+    if spec.n is not None and spec.n < len(out):
+        out = random.Random(spec.seed).sample(out, spec.n)
+    return out
+
+
+@dataclass
+class EvalParts:
+    select_rows: list[dict] = field(default_factory=list)
+    select_index: dict[str, str] = field(default_factory=dict)
+    reference: dict[str, dict] = field(default_factory=dict)
+    report_ids: dict[str, list[str]] = field(default_factory=dict)
+    dropped: dict[str, list[str]] = field(default_factory=dict)
+
+
+def _read(adapter: str, path) -> list[dict]:
+    return list(_load_adapter(adapter).adapt(Path(path)))
+
+
+def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> EvalParts:
+    data = exp.data
+    assignments: dict = {}
+    if data.split_file:
+        assignments = json.loads(Path(data.split_file).read_text())
+    parts = EvalParts()
+    for name, spec in data.eval.items():
+        labels = _read(data.adapter, spec.train_labels)
+        if not allow_test:
+            for r in labels:
+                if str(r.get("split", "")).startswith("test"):
+                    raise TestSplitRefused(f"{name}: row {r.get('id')} is in split {r['split']!r}; use --allow-test")
+        ref = None
+        if spec.reference is not None:
+            ref = {r["id"]: r for r in _read(data.adapter, spec.reference)}
+        assign = (assignments.get(name) or {}).get("assignment") or {}
+        dropped = parts.dropped.setdefault(name, [])
+        unassigned = parts.dropped.setdefault("unassigned", [])
+        label_ids = {r["id"] for r in labels}
+        if ref is not None:
+            dropped += sorted(set(ref) - label_ids)
+            dropped += sorted(label_ids - set(ref))
+        sel: list[dict] = []
+        reports: list[str] = []
+        for r in labels:
+            rid = r["id"]
+            if ref is not None and rid not in ref:
+                continue
+            side = assign.get(rid)
+            if side is None:
+                unassigned.append(rid)
+            elif side == "select":
+                sel.append(r)
+                parts.select_index[rid] = name
+            elif side == "report":
+                reports.append(rid)
+            else:
+                raise ValueError(f"{name}: bad assignment {side!r} for {rid}")
+            if side in ("select", "report") and ref is not None:
+                parts.reference[rid] = ref[rid]
+        parts.select_rows += sel
+        parts.report_ids[name] = reports
+    return parts
+
+
+def _sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -> dict:
+    out_dir = Path(out_dir)
+    data = exp.data
+    src_sha = _sha256(data.train)
+    if data.train_sha256 is None:
+        warnings.warn(f"data.train_sha256 not set; recording computed sha256 {src_sha}", UserWarning, stacklevel=2)
+    elif data.train_sha256 != src_sha:
+        raise ShaMismatch(f"train sha256 {src_sha} != expected {data.train_sha256}")
+
+    train_all = _read(data.adapter, data.train)
+    errors = validate_rows(train_all)
+    if errors:
+        raise ValueError("invalid train rows:\n" + "\n".join(errors[:20]))
+    train = apply_subset(train_all, exp.subset)
+
+    parts = build_eval_parts(exp, allow_test=allow_test)
+    train_ids = {r["id"] for r in train_all}
+    owner: dict[str, str] = {}
+    for name, spec in data.eval.items():
+        ids = {r["id"] for r in _read(data.adapter, spec.train_labels)}
+        both = ids & train_ids
+        if both:
+            raise IdOverlap(f"{len(both)} id(s) in train and eval set {name}: {sorted(both)[:3]}")
+        for i in ids:
+            if i in owner and owner[i] != name:
+                raise IdOverlap(f"id {i} is in eval sets {owner[i]} and {name}")
+            owner[i] = name
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(out_dir / "train.jsonl", train)
+    _write_jsonl(out_dir / "select.jsonl", parts.select_rows)
+    (out_dir / "select_index.json").write_text(json.dumps(parts.select_index, indent=2))
+    info = {
+        "train_sha256_source": src_sha,
+        "train_sha256_prepared": _sha256(out_dir / "train.jsonl"),
+        "subset": ({"where": exp.subset.where, "n": exp.subset.n, "seed": exp.subset.seed}
+                   if exp.subset is not None else None),
+        "counts": {"train_source": len(train_all), "train": len(train),
+                   "select": len(parts.select_rows),
+                   "report": {k: len(v) for k, v in parts.report_ids.items()}},
+        "dropped": parts.dropped,
+    }
+    (out_dir / "prepared.json").write_text(json.dumps(info, indent=2))
+    return info
