@@ -241,3 +241,57 @@ def test_emitted_flags_exist_in_onejev(tmp_path):
         assert emitted <= known, emitted - known
         if recipe == "joey_lora_1gpu":
             assert cmd[cmd.index("--target-modules") + 1] == "q_proj,v_proj"
+
+
+def test_reserved_flag_in_recipe_rejected(tmp_path):
+    exp, machine = setup(tmp_path)
+    rec = tmp_path / "r.yaml"
+    rec.write_text("mode: lora\ngpus: 1\nonejev: {full_finetune: true}\n")
+    exp.recipe = str(rec)
+    with pytest.raises(ConfigError, match="full_finetune"):
+        run(exp, machine)
+
+
+@pytest.mark.parametrize("key", ["onejev.eval_every", "onejev.fsdp", "onejev.full_finetune", "onejev.seed"])
+def test_reserved_override_rejected(tmp_path, key):
+    exp, machine = setup(tmp_path, overrides={key: {"value": 5, "reason": "x"}})
+    with pytest.raises(ConfigError, match="set by the harness"):
+        run(exp, machine)
+
+
+def test_max_steps_override_allowed(tmp_path):
+    exp, machine = setup(tmp_path, overrides={"onejev.max_steps": {"value": 10, "reason": "smoke"}})
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    cmd = build_command(lock, 1)
+    assert cmd[cmd.index("--max-steps") + 1] == "10"
+
+
+def test_lora_override_on_full_recipe_rejected(tmp_path):
+    exp, machine = setup(tmp_path, overrides={"lora.r": {"value": 8, "reason": "x"}})
+    with pytest.raises(ConfigError, match="lora"):
+        run(exp, machine)
+
+
+def test_preassigned_too_few_devices(tmp_path, monkeypatch):
+    exp, machine = setup(tmp_path)
+    machine.gpu_source = "preassigned"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-0,GPU-1")
+    with pytest.raises(Infeasible, match="need 4"):
+        run(exp, machine)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    with pytest.raises(Infeasible, match="need 4"):
+        run(exp, machine)
+
+
+def test_preassigned_unmatched_id_records_unchecked(tmp_path, monkeypatch):
+    exp, machine = setup(tmp_path)
+    machine.gpu_source = "preassigned"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-0,GPU-1,GPU-2,GPU-9")
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    assert lock["feasibility"]["checked"] is False and "GPU-9" in lock["feasibility"]["reason"]
+
+
+def test_feasibility_recorded_when_checked(tmp_path):
+    exp, machine = setup(tmp_path)
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    assert lock["feasibility"]["checked"] is True and lock["feasibility"]["min_free_gib"] == 80.0

@@ -27,6 +27,20 @@ FSDP_MIN_PARAMS_B = 9
 
 _RECIPE_TOP = {"mode", "gpus", "fsdp", "onejev", "lora"}
 _OVERRIDE_TOP = {"mode", "gpus", "fsdp"}
+# flags the harness derives itself; they may not appear under ``onejev`` (recipe or override)
+_RESERVED_FLAGS = {"full_finetune": "mode", "fsdp": "fsdp", "attention": "the base catalog",
+                   "readout": "the base catalog", "multimodal": "the base catalog",
+                   "eval_every": "the plan-only interval", "save_every": "the plan-only interval",
+                   "eval_at_start": "the harness", "seed": "seeds", "name": "the experiment name",
+                   "train": "the prepared data", "model": "the base", "eval": "the prepared data",
+                   "runs_dir": "the run directory"}
+
+
+def _check_reserved(flags: dict, where: str) -> None:
+    for k in flags:
+        if k in _RESERVED_FLAGS:
+            raise ConfigError(f"{where}: onejev.{k} is set by the harness (from {_RESERVED_FLAGS[k]}); "
+                              "use the proper key instead")
 
 
 class Infeasible(RuntimeError):
@@ -136,6 +150,7 @@ def _load_recipe(path: str) -> dict:
     unknown = set(r) - _RECIPE_TOP
     if unknown:
         raise ConfigError(f"{path}: unknown recipe key(s): {sorted(unknown)}")
+    _check_reserved(r.get("onejev") or {}, path)
     return r
 
 
@@ -148,6 +163,8 @@ def _apply_overrides(recipe: dict, overrides: dict) -> dict:
             raise ConfigError(f"override {key}: a non-empty reason is required")
         head, _, rest = key.partition(".")
         if head in ("onejev", "lora") and rest:
+            if head == "onejev":
+                _check_reserved({rest: None}, f"override {key}")
             recipe.setdefault(head, {})[rest] = spec["value"]
         elif key in _OVERRIDE_TOP:
             recipe[key] = spec["value"]
@@ -157,28 +174,36 @@ def _apply_overrides(recipe: dict, overrides: dict) -> dict:
     return recorded
 
 
-def _candidate_cards(machine: MachineConfig, n: int, query) -> list[Gpu] | None:
-    """Free-memory view of the cards the run would get; None when unknown."""
+def _candidate_cards(machine: MachineConfig, n: int, query) -> tuple[list[Gpu] | None, str | None]:
+    """Free-memory view of the cards the run would get, or (None, why it could not be determined)."""
     if machine.gpu_source == "preassigned":
-        ids = [p.strip() for p in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if p.strip()][:n]
+        raw = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        ids = [p.strip() for p in raw.split(",") if p.strip()]
+        if len(ids) < n:
+            raise Infeasible(f"gpu_source is 'preassigned' but CUDA_VISIBLE_DEVICES={raw!r} lists "
+                             f"{len(ids)} device(s); need {n}",
+                             ["set CUDA_VISIBLE_DEVICES to the assigned cards", f"use fewer GPUs (gpus: {len(ids)})"])
         try:
             known = parse_nvidia_smi(query())
-        except Exception:
-            return None
-        cards = [next((g for g in known if g.uuid == i or str(g.index) == i), None) for i in ids]
-        return cards if cards and all(cards) else None
+        except Exception as e:
+            return None, f"nvidia-smi query failed: {e}"
+        cards = [next((g for g in known if g.uuid == i or str(g.index) == i), None) for i in ids[:n]]
+        missing = [i for i, c in zip(ids, cards) if c is None]
+        if missing:
+            return None, f"CUDA_VISIBLE_DEVICES id(s) not found in nvidia-smi: {missing}"
+        return cards, None
     cards = [g for g in parse_nvidia_smi(query())
              if (machine.gpu_include is None or g.index in machine.gpu_include)
              and g.index not in machine.gpu_exclude]
     cards.sort(key=lambda g: g.free_mib, reverse=True)
-    return cards
+    return cards, None
 
 
-def _check_feasible(machine, base, mode, n, parallel, query) -> float:
+def _check_feasible(machine, base, mode, n, parallel, query) -> tuple[float, dict]:
     need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
-    cards = _candidate_cards(machine, n, query)
+    cards, why = _candidate_cards(machine, n, query)
     if cards is None:
-        return need
+        return need, {"checked": False, "reason": why}
     chosen = cards[:n]
     if len(chosen) < n:
         raise Infeasible(f"need {n} GPUs but only {len(chosen)} candidate card(s) after filtering",
@@ -186,7 +211,8 @@ def _check_feasible(machine, base, mode, n, parallel, query) -> float:
                           f"use fewer GPUs (gpus: {len(chosen)})" if chosen else "use another machine"])
     free = min(g.free_mib for g in chosen) / 1024
     if need <= free:
-        return need
+        return need, {"checked": True, "need_gib_per_card": round(need, 1), "min_free_gib": round(free, 1),
+                      "cards": [g.uuid for g in chosen]}
     p = base["params_b"]
     alts = []
     if mode == "full":
@@ -214,6 +240,8 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         recipe["gpus"] = exp.gpus
     recorded = _apply_overrides(recipe, exp.overrides)
     mode = recipe.get("mode")
+    if mode == "full" and any(k.startswith("lora.") for k in recorded):
+        raise ConfigError("lora.* override on a full recipe would have no effect; set mode: lora first")
     if mode not in ("full", "lora"):
         raise ConfigError(f"recipe {exp.recipe}: 'mode' is required and must be full or lora (got {mode!r})")
     n = recipe.get("gpus")
@@ -222,7 +250,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
 
     base = load_base(exp.base)
     parallel = parallel_for(mode, base["params_b"], n, recipe.get("fsdp"))
-    need = _check_feasible(machine, base, mode, n, parallel, query)
+    need, feasibility = _check_feasible(machine, base, mode, n, parallel, query)
 
     prepared = Path(machine.out_root) / exp.name / "prepared"
     info_path = prepared / "prepared.json"
@@ -261,7 +289,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
                             "source": machine.gpu_source},
                     "forbidden_write_roots": list(machine.forbidden_write_roots)},
         "mode": mode, "lora": lora, "n_gpus": n, "parallel": parallel, "seeds": list(exp.seeds),
-        "estimate_gib": round(need, 1), "flags": flags, "data": data,
+        "estimate_gib": round(need, 1), "feasibility": feasibility, "flags": flags, "data": data,
         "eval_sets": {k: asdict(v) for k, v in exp.data.eval.items()},
         "split_file": exp.data.split_file, "fields": asdict(exp.fields),
         "evaluator": asdict(exp.evaluator), "merge": exp.merge,
