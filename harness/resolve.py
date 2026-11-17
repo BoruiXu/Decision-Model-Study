@@ -87,7 +87,7 @@ def _flag_tokens(flags: dict) -> list[str]:
         out.append(_kebab(k))
         if v is True:
             continue
-        out.extend(str(x) for x in v) if isinstance(v, (list, tuple)) else out.append(str(v))
+        out.append(",".join(str(x) for x in v) if isinstance(v, (list, tuple)) else str(v))
     return out
 
 
@@ -243,7 +243,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         flags["fsdp"] = True
     lora = dict(recipe.get("lora") or {}) if mode == "lora" else None
     for k, v in (lora or {}).items():
-        flags[f"lora_{k}"] = v
+        flags[k if k == "target_modules" else f"lora_{k}"] = v  # OneJev: --target-modules, --lora-r, ...
     flags["attention"], flags["readout"] = base["attention"], base["readout"]
     if base.get("multimodal"):
         flags["multimodal"] = True

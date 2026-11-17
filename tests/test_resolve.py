@@ -214,3 +214,30 @@ def test_missing_prepared_dir(tmp_path):
     exp.name = "other"
     with pytest.raises(ConfigError, match="prepare"):
         run(exp, machine)
+
+
+ONEJEV_DIR = os.environ.get("ONEJEV_DIR")
+
+
+@pytest.mark.skipif(not ONEJEV_DIR, reason="ONEJEV_DIR not set")
+def test_emitted_flags_exist_in_onejev(tmp_path):
+    import re
+    src = (Path(ONEJEV_DIR) / "train" / "sft.py").read_text()
+    known = set()
+    for call in re.findall(r"add_argument\((.*?)\)\s*\n", src, re.S):
+        known.update(re.findall(r"\"(--[a-z0-9-]+)\"", call))
+    assert "--lora-r" in known and "--target-modules" in known
+    for recipe, base in (("elephant_full_fsdp", "elephant-1"), ("joey_full_1gpu", "joey-1"),
+                         ("joey_lora_1gpu", "joey-1"), ("mammoth_lora_ddp", "mammoth-1")):
+        exp, machine = setup(tmp_path / recipe, base=base, recipe=recipe)
+        exp.overrides = {"lora.target_modules": {"value": ["q_proj", "v_proj"], "reason": "t"}} \
+            if recipe == "joey_lora_1gpu" else {}
+        lock = yaml.safe_load(resolve(exp, machine, query=lambda uuid=None: smi(4, 10**6),
+                                      plan_runner=plan_ok(80, exp.gpus or yaml.safe_load(
+                                          (RECIPES / f"{recipe}.yaml").read_text())["gpus"]),
+                                      fingerprint=fake_fp).read_text())
+        cmd = build_command(lock, 1)
+        emitted = {t for t in cmd if t.startswith("--")} - {"--standalone", "--nproc_per_node"}
+        assert emitted <= known, emitted - known
+        if recipe == "joey_lora_1gpu":
+            assert cmd[cmd.index("--target-modules") + 1] == "q_proj,v_proj"
