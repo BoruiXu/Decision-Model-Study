@@ -1,0 +1,21 @@
+# Hyperparameters are not measured: a starting point, not a recommendation.
+mode: lora
+gpus: 1
+onejev:
+  split: train
+  dtype: bfloat16
+  lr: 1.0e-5
+  epochs: 1
+  brier_weight: 0
+  warmup_frac: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  max_len: 16384
+  batch_tokens: 16384
+  max_rows: 1
+  accum_rows: 32
+  log_every: 1
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05

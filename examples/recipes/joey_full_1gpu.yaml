@@ -1,0 +1,17 @@
+# Example recipe from DynamicServe v1; 1 epoch only (it overfits after one).
+mode: full
+gpus: 1
+onejev:
+  split: train
+  dtype: bfloat16
+  lr: 1.0e-5
+  epochs: 1
+  brier_weight: 0
+  warmup_frac: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  max_len: 16384
+  batch_tokens: 16384
+  max_rows: 1
+  accum_rows: 32
+  log_every: 1

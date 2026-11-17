@@ -1,0 +1,216 @@
+import json
+import os
+import shlex
+from pathlib import Path
+
+import pytest
+import yaml
+
+from harness.config import (ConfigError, DataSpec, EvalSetSpec, ExperimentConfig, FieldsSpec,
+                            MachineConfig)
+from harness.resolve import (Infeasible, build_command, estimate_gib, eval_interval, parallel_for,
+                             parse_plan_only, resolve)
+
+ROOT = Path(__file__).resolve().parent.parent
+RECIPES = ROOT / "examples" / "recipes"
+V1_DIR = os.environ.get("HARNESS_V1_DIR")
+
+
+def smi(n, free_mib=81920):
+    return "".join(f"{i}, GPU-{i}, NVIDIA A100-SXM4-80GB, {free_mib}\n" for i in range(n))
+
+
+def plan_ok(steps=176, ranks=4):
+    return lambda lock: f"PLAN_OK\n{steps} steps for {ranks} ranks\n"
+
+
+def fake_fp():
+    return {"pip_freeze_sha256": "ab" * 32, "driver_version": "570.00"}
+
+
+def setup(tmp_path, base="elephant-1", recipe="elephant_full_fsdp", n_gpus_free=4, **kw):
+    out = tmp_path / "out"
+    prep = out / "exp" / "prepared"
+    prep.mkdir(parents=True)
+    for name in ("train.jsonl", "select.jsonl", "select_index.json"):
+        (prep / name).write_text(f"{name}\n")
+    (prep / "prepared.json").write_text(json.dumps({
+        "train_sha256_source": "s" * 64, "train_sha256_prepared": "p" * 64,
+        "subset": None, "counts": {}, "dropped": {}}))
+    machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"),
+                            out_root=str(out), env={"HF_HUB_OFFLINE": "1"})
+    exp = ExperimentConfig(
+        name="exp", base=base, recipe=str(RECIPES / f"{recipe}.yaml"),
+        data=DataSpec(train="/d/train.jsonl",
+                      eval={"val": EvalSetSpec(train_labels="/d/val.jsonl")}, split_file="/d/splits.json"),
+        fields=FieldsSpec(label="meta.f"), **kw)
+    return exp, machine
+
+
+def run(exp, machine, n=4, free=81920, steps=176, **kw):
+    return resolve(exp, machine, query=lambda uuid=None: smi(n, free),
+                   plan_runner=plan_ok(steps, exp.gpus or 4), fingerprint=fake_fp, **kw)
+
+
+def v1_flags(path):
+    text = Path(path).read_text().replace("\\\n", " ")
+    seg = text.rsplit("publisher_native_train.py\"", 1)[1].split(">>", 1)[0]
+    return parse_flags(shlex.split(seg))
+
+
+def parse_flags(tokens, skip=("--model", "--train", "--runs-dir", "--name", "--eval")):
+    out, i = {}, 0
+    while i < len(tokens):
+        t = tokens[i]
+        assert t.startswith("--"), t
+        j = i + 1
+        vals = []
+        while j < len(tokens) and not tokens[j].startswith("--"):
+            vals.append(tokens[j])
+            j += 1
+        i = j
+        if t in skip:
+            continue
+        v = True
+        if vals:
+            v = vals[0] if len(vals) == 1 else vals
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                pass
+        out[t] = v
+    return out
+
+
+@pytest.mark.skipif(not V1_DIR, reason="HARNESS_V1_DIR not set")
+def test_elephant_command_matches_v1(tmp_path):
+    exp, machine = setup(tmp_path)
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    cmd = build_command(lock, 42)
+    assert cmd[:6] == ["/venv/bin/python", "-m", "torch.distributed.run", "--standalone",
+                       "--nproc_per_node", "4"]
+    assert cmd[6:8] == ["-m", "harness.train_entry"]
+    mine = parse_flags(cmd[8:])
+    assert mine == v1_flags(Path(V1_DIR) / "train" / "command_elephant.sh")
+    assert mine["--eval-every"] == 22.0
+
+
+def test_mode_required(tmp_path):
+    exp, machine = setup(tmp_path)
+    rec = tmp_path / "r.yaml"
+    rec.write_text("gpus: 4\nonejev: {lr: 1.0e-5}\n")
+    exp.recipe = str(rec)
+    with pytest.raises(ConfigError, match="mode"):
+        run(exp, machine)
+
+
+def test_lora_fsdp_infeasible():
+    with pytest.raises(Infeasible):
+        parallel_for("lora", 9, 4, True)
+    assert parallel_for("lora", 9, 4, None) == "ddp"
+    assert parallel_for("lora", 9, 1, None) == "single"
+    assert parallel_for("full", 9, 4, None) == "fsdp"
+    assert parallel_for("full", 2, 4, None) == "ddp"
+    assert parallel_for("full", 2, 1, None) == "single"
+
+
+def test_mammoth_full_infeasible_lists_lora(tmp_path):
+    exp, machine = setup(tmp_path, base="mammoth-1", recipe="elephant_full_fsdp")
+    with pytest.raises(Infeasible) as e:
+        run(exp, machine)
+    alts = " ".join(e.value.alternatives)
+    assert "lora" in alts.lower() and "GPUs" in alts and "smaller base" in alts
+
+
+def test_lora_override_makes_mammoth_feasible(tmp_path):
+    exp, machine = setup(tmp_path, base="mammoth-1", recipe="mammoth_lora_ddp")
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    cmd = build_command(lock, 1)
+    assert "--full-finetune" not in cmd and "--fsdp" not in cmd
+    assert "--lora-autocast" in cmd and cmd[cmd.index("--lora-r") + 1] == "32"
+
+
+def test_override_needs_reason(tmp_path):
+    exp, machine = setup(tmp_path, overrides={"onejev.lr": {"value": 1e-6}})
+    with pytest.raises(ConfigError, match="reason"):
+        run(exp, machine)
+    exp.overrides = {"onejev.lr": {"value": 1e-6, "reason": ""}}
+    with pytest.raises(ConfigError, match="reason"):
+        run(exp, machine)
+
+
+def test_override_applied_and_recorded(tmp_path):
+    ov = {"onejev.lr": {"value": 1e-6, "reason": "lower lr"},
+          "onejev.disable_fla_kernels": {"value": True, "reason": "fla crash"}}
+    exp, machine = setup(tmp_path, overrides=ov)
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    assert lock["overrides"] == ov
+    cmd = build_command(lock, 42)
+    assert cmd[cmd.index("--lr") + 1] == "1e-06"
+    assert "--disable-fla-kernels" in cmd
+
+
+def test_lock_has_all_fields(tmp_path):
+    exp, machine = setup(tmp_path, seeds=[42, 7], merge=True)
+    path = run(exp, machine)
+    assert path.name == "run.lock.yaml" and path.parent.parent == Path(machine.out_root) / "exp"
+    lock = yaml.safe_load(path.read_text())
+    for k in ("run_id", "run_dir", "experiment", "repo_root", "machine", "mode", "lora", "flags",
+              "n_gpus", "seeds", "parallel", "plan", "data", "eval_sets", "split_file", "fields",
+              "evaluator", "merge", "base", "onejev", "fingerprint", "overrides", "estimate_gib"):
+        assert k in lock, k
+    assert lock["mode"] == "full" and lock["parallel"] == "fsdp" and lock["n_gpus"] == 4
+    assert lock["seeds"] == [42, 7] and lock["merge"] is True
+    assert lock["plan"] == {"steps": 176, "ranks": 4, "interval": 22}
+    assert lock["flags"]["eval_every"] == 22 and lock["flags"]["save_every"] == 22
+    assert lock["data"]["sha256"]["train.jsonl"] and lock["base"]["revision"]
+    assert lock["onejev"]["patch"]["sha256"] and lock["fingerprint"]["driver_version"] == "570.00"
+    assert lock["machine"]["python"] == "/venv/bin/python"
+    assert lock["eval_sets"] == {"val": {"train_labels": "/d/val.jsonl", "reference": None}}
+    assert lock["run_id"] in str(path)
+    cmd = build_command(lock, 7)
+    assert cmd[cmd.index("--name") + 1] == "exp-s7" and cmd[cmd.index("--seed") + 1] == "7"
+    assert cmd[cmd.index("--runs-dir") + 1] == str(path.parent / "runs")
+
+
+def test_single_gpu_command_has_no_torchrun(tmp_path):
+    exp, machine = setup(tmp_path, base="joey-1", recipe="joey_full_1gpu")
+    lock = yaml.safe_load(resolve(exp, machine, query=lambda uuid=None: smi(1),
+                                  plan_runner=plan_ok(80, 1), fingerprint=fake_fp).read_text())
+    cmd = build_command(lock, 42)
+    assert cmd[:3] == ["/venv/bin/python", "-m", "harness.train_entry"]
+    assert "--full-finetune" in cmd and "--fsdp" not in cmd and lock["plan"]["interval"] == 10
+
+
+def test_exp_gpus_overrides_recipe(tmp_path):
+    exp, machine = setup(tmp_path, gpus=2)
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    assert lock["n_gpus"] == 2
+
+
+def test_not_enough_cards_and_preassigned(tmp_path, monkeypatch):
+    exp, machine = setup(tmp_path)
+    with pytest.raises(Infeasible):
+        run(exp, machine, n=2)
+    machine.gpu_source = "preassigned"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-0,GPU-1,GPU-2,GPU-3")
+    with pytest.raises(Infeasible):  # 36 GiB/card needed, 30 GiB free
+        run(exp, machine, free=30 * 1024)
+    assert run(exp, machine).exists()
+
+
+def test_estimate_and_plan_parsing():
+    assert estimate_gib(9, "full", 4, True) == 36
+    assert estimate_gib(9, "full", 4, False) == 144
+    assert estimate_gib(27, "lora", 4, False) == pytest.approx(62.1)
+    assert parse_plan_only("PLAN_OK\n176 steps for 4 ranks\n") == 176
+    assert eval_interval(176) == 22 and eval_interval(177) == 23
+    with pytest.raises(ValueError):
+        parse_plan_only("176 steps for 4 ranks")
+
+
+def test_missing_prepared_dir(tmp_path):
+    exp, machine = setup(tmp_path)
+    exp.name = "other"
+    with pytest.raises(ConfigError, match="prepare"):
+        run(exp, machine)

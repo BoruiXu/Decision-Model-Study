@@ -1,0 +1,18 @@
+# Example recipe from DynamicServe v1; a starting point, not a default.
+mode: full
+gpus: 4
+fsdp: true
+onejev:
+  split: train
+  dtype: bfloat16
+  lr: 3.5e-6
+  epochs: 1
+  brier_weight: 1
+  warmup_frac: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  max_len: 16384
+  batch_tokens: 16384
+  max_rows: 8
+  accum_rows: 32
+  log_every: 1
