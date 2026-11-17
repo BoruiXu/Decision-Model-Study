@@ -16,5 +16,5 @@ sha256:
   serve.patch: f234c125f1d38d82104b9e1f24e75bde51e4401928acfba2fbf5c59ef2fb46b8
   tokenizer.json: a5cd9732badce41de57e6efce8302930ded1c1188c5f81feb2bd6c24c4a1941f
   tokenizer_config.json: 2984c03425a28d242744e234a5003786fd289b3713db79fe0958c65eb59d85b2
-published_recipe: Published by baselabs as a ready decision-model router; see the
-  model card at the hf_repo. Weights ship with the OneJev serve.patch.
+published_recipe: 'Qwen3.5-2B base, lr 1e-5, 1 epoch, 16xH100. Source: baselabs model
+  card at hf_repo.'

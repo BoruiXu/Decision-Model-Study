@@ -21,6 +21,13 @@ gpu = [
   "torchvision==0.23.0",
   "transformers==5.19.0",
   "peft==0.21.2",
+  "accelerate",
+  "pillow",
+  "jinja2",
+  "pydantic",
+  "fastapi",
+  "uvicorn",
+  "safetensors",
   "flash-linear-attention==0.5.2",
 ]
 
