@@ -127,25 +127,42 @@ def load_machine(path) -> MachineConfig:
     return MachineConfig(**d)
 
 
+def _check_keys(d: Any, cls, prefix: str = "") -> dict:
+    """Require a mapping whose keys are all fields of ``cls``."""
+    where = prefix.rstrip(".") or "top level"
+    if not isinstance(d, dict):
+        raise ConfigError(f"{where} must be a mapping")
+    for k in d:
+        if k not in cls.__dataclass_fields__:
+            raise ConfigError(f"unknown key: {prefix}{k}")
+    return d
+
+
 def load_experiment(path) -> ExperimentConfig:
-    d = _load_yaml(path)
+    d = _check_keys(_load_yaml(path), ExperimentConfig)
     for k in ("name", "base", "recipe"):
         _require(d, k)
-    data = _section(d, "data")
-    fields_ = _section(d, "fields")
+    data = _check_keys(_section(d, "data"), DataSpec, "data.")
+    fields_ = _check_keys(_section(d, "fields"), FieldsSpec, "fields.")
     train = _require(data, "train", "data.")
     label = _require(fields_, "label", "fields.")
     eval_sets = {}
-    for name, spec in (data.get("eval") or {}).items():
+    raw_eval = data.get("eval") or {}
+    if not isinstance(raw_eval, dict):
+        raise ConfigError("data.eval must be a mapping")
+    for name, spec in raw_eval.items():
+        prefix = f"data.eval.{name}."
+        _check_keys(spec, EvalSetSpec, prefix)
         eval_sets[name] = EvalSetSpec(
-            train_labels=_require(spec, "train_labels", f"data.eval.{name}."),
+            train_labels=_require(spec, "train_labels", prefix),
             reference=spec.get("reference"),
         )
     data_kw = {k: data[k] for k in ("adapter", "train_sha256", "split_file") if k in data}
     sub = d.get("subset")
-    subset = SubsetSpec(**sub) if sub else None
+    subset = SubsetSpec(**_check_keys(sub, SubsetSpec, "subset.")) if sub is not None else None
     ev = d.get("evaluator")
-    evaluator = EvaluatorSpec(**ev) if ev else EvaluatorSpec()
+    evaluator = (EvaluatorSpec(**_check_keys(ev, EvaluatorSpec, "evaluator."))
+                 if ev is not None else EvaluatorSpec())
     kw = {k: d[k] for k in ("seeds", "gpus", "merge", "overrides") if k in d}
     return ExperimentConfig(
         name=d["name"], base=d["base"], recipe=d["recipe"],

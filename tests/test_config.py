@@ -58,3 +58,26 @@ def test_missing_key_named(tmp_path):
     p = _write(tmp_path, "m.yaml", {"python": "py", "out_root": "/o"})
     with pytest.raises(ConfigError, match="model_dir"):
         load_machine(p)
+
+
+def _base(**over):
+    d = {"name": "x", "base": "b", "recipe": "r",
+         "data": {"train": "t.jsonl"}, "fields": {"label": "l"}}
+    d.update(over)
+    return d
+
+
+@pytest.mark.parametrize("exp, key", [
+    (_base(seed=[1]), "seed"),
+    (_base(data={"train": "t", "train_sha": "ab"}), "data.train_sha"),
+    (_base(data={"train": "t", "eval": {"v": {"train_labels": "a", "refrence": "b"}}}),
+     "data.eval.v.refrence"),
+    (_base(fields={"label": "l", "grp": "g"}), "fields.grp"),
+    (_base(subset={"n": 1, "sed": 2}), "subset.sed"),
+    (_base(evaluator={"budget": [0.1]}), "evaluator.budget"),
+    (_base(evaluator=["binary_decision"]), "evaluator"),
+    (_base(subset="full"), "subset"),
+])
+def test_unknown_or_malformed_key_is_config_error(tmp_path, exp, key):
+    with pytest.raises(ConfigError, match=key):
+        load_experiment(_write(tmp_path, "e.yaml", exp))
