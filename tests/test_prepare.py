@@ -11,10 +11,10 @@ from harness.prepare import (EvalParts, IdOverlap, ShaMismatch, TestSplitRefused
                              apply_subset, build_eval_parts, prepare, validate_rows)
 
 
-def row(i, y=1.0, split="train", f=0.5, cat="a"):
+def row(i, y=1.0, split="train", f=0.5, cat="a"):  # noqa: default type noul
     return {"id": i, "state": {"messages": [{"role": "user", "content": i}]},
-            "question": {"type": "q", "instructions": "x", "criteria": {"true": "t", "false": "f"}},
-            "target": {"true": y, "false": 1 - y}, "meta": {"f": f, "cat": cat}, "split": split}
+            "question": {"type": "noul", "instructions": "x", "criteria": {"true": "t", "false": "f"}},
+            "target": {"yes": y, "no": 1 - y}, "meta": {"f": f, "cat": cat}, "split": split}
 
 
 def write(path, rows):
@@ -47,8 +47,25 @@ def test_validate_rows_errors():
     assert any("sum" in e for e in validate_rows([bad_sum]))
     no_state = row("d"); del no_state["state"]
     assert any("state" in e for e in validate_rows([no_state]))
-    alias = row("e"); alias["target"] = {"yes": 1.0, "no": 0.0}
-    assert validate_rows([alias]) == []
+    # noul labels are yes/no; true/false are only descriptions
+    v1 = row("e"); v1["question"]["type"] = "noul"; v1["target"] = {"yes": 1.0, "no": 0.0}
+    assert validate_rows([v1]) == []
+    wrong = row("f"); wrong["question"]["type"] = "noul"; wrong["target"] = {"true": 1.0}
+    assert any("labels" in e for e in validate_rows([wrong]))
+    neg = row("g"); neg["question"]["type"] = "noul"; neg["target"] = {"yes": 1.5, "no": -0.5}
+    assert any("[0, 1]" in e for e in validate_rows([neg]))
+    ch = row("h"); ch["question"] = {"type": "choice", "criteria": {"a": "x", "b": "y"}}
+    ch["target"] = {"a": 0.5, "b": 0.5}
+    assert validate_rows([ch]) == []
+    ch["target"] = {"yes": 1.0}
+    assert validate_rows([ch])
+    sc = row("i"); sc["question"] = {"type": "score", "criteria": ["lo", "hi"]}
+    sc["target"] = {"0": 0.25, "1": 0.75}
+    assert validate_rows([sc]) == []
+    sc["target"] = {"2": 1.0}
+    assert validate_rows([sc])
+    unk = row("j"); unk["question"]["type"] = "weird"
+    assert any("unknown question type" in e for e in validate_rows([unk]))
 
 
 def test_subset_deterministic():
@@ -78,6 +95,13 @@ def test_split_assignment(tmp_path):
     assert "stray" in p.dropped["val"] and "extra" in p.dropped["val"]
     exp2 = make_exp(tmp_path, [row("t1")], {"val": ([row("a"), row("stray")], None)}, {"val": {"a": "select"}})
     assert build_eval_parts(exp2).dropped["unassigned"] == ["stray"]
+
+
+def test_invalid_eval_rows_named(tmp_path):
+    bad = row("a"); bad["target"] = {"true": 1.0}
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([bad], None)}, {"val": {"a": "select"}})
+    with pytest.raises(ValueError, match="val.*a"):
+        build_eval_parts(exp)
 
 
 def test_test_split_refused(tmp_path):

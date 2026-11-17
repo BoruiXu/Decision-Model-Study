@@ -26,16 +26,19 @@ class TestSplitRefused(RuntimeError):
     __test__ = False  # not a pytest class
 
 
-# The v1 data names binary targets yes/no while the criteria are keyed true/false.
-_ALIASES = {"yes": "true", "no": "false"}
-
-
-def _norm(key: str) -> str:
-    return _ALIASES.get(key, key)
-
-
 def _load_adapter(name: str):
     return importlib.import_module(f"adapters.{name}")
+
+
+def _labels(qtype, criteria) -> list[str] | None:
+    """Labels OneJev renders for a question type (qev/prompt.py render_question)."""
+    if qtype == "noul":
+        return ["yes", "no"]
+    if qtype == "choice":
+        return list((criteria or {}).keys())
+    if qtype == "score":
+        return [str(i) for i in range(len(criteria or []))]
+    return None
 
 
 def validate_rows(rows: list[dict]) -> list[str]:
@@ -49,13 +52,19 @@ def validate_rows(rows: list[dict]) -> list[str]:
         if not r.get("state"):
             errors.append(f"{rid}: missing state")
         target = r.get("target")
-        criteria = (r.get("question") or {}).get("criteria") or {}
         if not isinstance(target, dict) or not target:
             errors.append(f"{rid}: missing target")
             continue
-        if not {_norm(k) for k in target} <= {_norm(k) for k in criteria}:
-            errors.append(f"{rid}: target keys {sorted(target)} not in criteria {sorted(criteria)}")
-        total = sum(target.values())
+        q = r.get("question") or {}
+        labels = _labels(q.get("type"), q.get("criteria"))
+        if labels is None:
+            errors.append(f"{rid}: unknown question type {q.get('type')!r}")
+            continue
+        if not set(target) <= set(labels):
+            errors.append(f"{rid}: target keys {sorted(target)} not in labels {labels}")
+        if any(not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0 for v in target.values()):
+            errors.append(f"{rid}: target values must be in [0, 1]")
+        total = sum(v for v in target.values() if isinstance(v, (int, float)))
         if abs(total - 1.0) > 1e-6:
             errors.append(f"{rid}: target does not sum to 1 (sum={total})")
     return errors
@@ -114,6 +123,10 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> Eval
             dropped += sorted(set(ref) - label_ids)
             dropped += sorted(label_ids - set(ref))
         sel: list[dict] = []
+        errs = validate_rows([r for r in labels if assign.get(r["id"]) == "select"
+                              and (ref is None or r["id"] in ref)])
+        if errs:
+            raise ValueError(f"invalid select rows in eval set {name!r}:\n" + "\n".join(errs[:20]))
         reports: list[str] = []
         for r in labels:
             rid = r["id"]
