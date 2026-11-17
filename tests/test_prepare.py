@@ -42,7 +42,7 @@ def test_validate_rows_errors():
     errs = validate_rows([good, row("a")])
     assert any("duplicate" in e for e in errs)
     bad_key = row("b"); bad_key["target"] = {"maybe": 1.0}
-    assert any("criteria" in e for e in validate_rows([bad_key]))
+    assert any("labels" in e for e in validate_rows([bad_key]))
     bad_sum = row("c"); bad_sum["target"] = {"true": 0.5, "false": 0.2}
     assert any("sum" in e for e in validate_rows([bad_sum]))
     no_state = row("d"); del no_state["state"]
