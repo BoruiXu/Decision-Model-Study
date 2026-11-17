@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from harness.config import ConfigError, ExperimentConfig, SubsetSpec, get_field
+from harness.jsonl import dumps_line
 
 
 class ShaMismatch(RuntimeError):
@@ -163,9 +164,9 @@ def _sha256(path) -> str:
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write(dumps_line(r))
 
 
 def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -> dict:

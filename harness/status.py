@@ -6,16 +6,11 @@ from pathlib import Path
 
 import yaml
 
+from harness.jsonl import read_jsonl
+
 
 def _jsonl(path: Path) -> list[dict]:
-    out = []
-    if path.is_file():
-        for line in path.read_text().splitlines():
-            try:
-                out.append(json.loads(line))
-            except ValueError:
-                pass  # a half-written last line
-    return out
+    return read_jsonl(path, tolerant=True) if path.is_file() else []  # tolerant: a half-written last line
 
 
 def status(run_dir) -> dict:

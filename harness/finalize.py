@@ -25,6 +25,7 @@ from harness.catalog import sha256_file
 from harness.config import (ConfigError, DataSpec, EvalSetSpec, EvaluatorSpec, ExperimentConfig, FieldsSpec,
                             get_field)
 from harness.eval_records import nll
+from harness.jsonl import read_jsonl
 from harness.evaluator import binary_decision
 from harness.merge import merge_lora
 from harness.plugins import evaluate_plugin, hook, load_plugin
@@ -47,7 +48,7 @@ def exp_from_lock(lock: dict) -> ExperimentConfig:
 
 
 def _jsonl(path) -> list[dict]:
-    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    return read_jsonl(path)
 
 
 def label_version(rows: list[dict], path) -> str:

@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import stat
 import tempfile
 from pathlib import Path
+
+from harness.jsonl import dumps_line, read_jsonl
 
 REQUIRED = ("exp", "run_id", "seed", "train_label_version", "reference_label_version", "data_sha256", "base",
             "base_revision", "recipe", "mode", "onejev", "gpu_name", "n_gpus", "gpu_hours", "selected_step",
@@ -66,7 +67,7 @@ def _read(path) -> list[dict]:
     path = Path(path)
     if not path.is_file():
         return []
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return read_jsonl(path)
 
 
 def read(path) -> list[dict]:
@@ -82,8 +83,8 @@ def _rewrite(path: Path, records: list[dict]) -> None:
     """Replace the registry atomically (temp file in the same dir + os.replace), keeping its file mode."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(dumps_line(r) for r in records))
             f.flush()
             os.fsync(f.fileno())
         mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0
@@ -115,7 +116,7 @@ def append(path, record: dict) -> dict:
             records[hits[0]] = record
             _rewrite(path, [r for i, r in enumerate(records) if i not in hits[1:]])
             return record
-        data = (json.dumps(record, ensure_ascii=False) + "\n").encode()
+        data = dumps_line(record).encode("utf-8")
         new = not path.exists()
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, SHARED_MODE)
         if new:
