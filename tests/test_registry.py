@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -91,3 +93,27 @@ def test_registry_concurrent_append(tmp_path):
     for tag in ("a", "b"):
         assert sorted(r["i"] for r in recs if r["run_id"] == tag) == list(range(60))
     assert all(r["complete"] is False for r in recs)
+
+
+def mode(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def test_registry_files_group_writable(tmp_path):
+    old = os.umask(0o022)
+    try:
+        path = tmp_path / "registry.jsonl"
+        lock = tmp_path / "registry.jsonl.lock"
+        registry.append(path, record("r1", conclusion=""))
+        assert mode(path) == 0o664 and mode(lock) == 0o664
+        registry.note(path, "r1", "noted")  # atomic rewrite
+        assert mode(path) == 0o664
+        os.chmod(path, 0o644)  # a registry created before this fix
+        registry.append(path, record("r1", conclusion=""))  # upsert rewrite
+        assert mode(path) == 0o664
+        os.chmod(lock, 0o444)  # a lock file this user cannot write, as for a second user
+        registry.append(path, record("r2"))
+        assert [r["run_id"] for r in registry.read(path)] == ["r1", "r2"] and "r2" in registry.table(path)
+        assert not list(tmp_path.glob("*.tmp"))
+    finally:
+        os.umask(old)

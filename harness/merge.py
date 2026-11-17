@@ -11,22 +11,23 @@ import os
 import shutil
 from pathlib import Path
 
-from harness.score import ensure_onejev_path, release_gpu_memory
+from harness.score import prepare_onejev, release_gpu_memory
 
 
 def merge_lora(base_dir, adapter_dir, out_dir, *, multimodal: bool = False, device: str = "cuda:0",
-               chat_template: str | None = None) -> Path:
-    ensure_onejev_path()
-    import peft
-    from qev.readout import CONFIG_FILE, HEAD_FILE, ReadoutConfig
-    from train import common
-
+               dtype: str = "bfloat16", chat_template: str | None = None,
+               disable_fla_kernels: bool = False) -> Path:
+    """``dtype`` and ``disable_fla_kernels`` follow the run (OneJev's LoRA load dtype is ``--dtype``)."""
     base_dir, adapter_dir, out = Path(base_dir), Path(adapter_dir), Path(out_dir)
     partial = out.with_name(out.name + ".partial")
     for p in (out, partial):  # never delete here: a leftover is listed as a deletion candidate
         if p.exists():
             raise FileExistsError(f"merge target already exists: {p}")
-    bundle = common.load_bundle(str(base_dir), device=device, dtype="bfloat16", multimodal=multimodal,
+    common = prepare_onejev(disable_fla_kernels)
+    import peft
+    from qev.readout import CONFIG_FILE, HEAD_FILE, ReadoutConfig
+
+    bundle = common.load_bundle(str(base_dir), device=device, dtype=dtype, multimodal=multimodal,
                                 chat_template=chat_template)
     merged = None
     try:

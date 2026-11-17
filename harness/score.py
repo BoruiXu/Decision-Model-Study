@@ -1,6 +1,7 @@
 """Reload a saved checkpoint and score rows one at a time with OneJev's own scoring path (GPU).
 
-Loading follows OneJev's ``train/eval_mm.py``: ``common.load_bundle`` and ``Readout.attach`` with the readout
+Loading follows OneJev's ``train/eval_mm.py``: ``common.load_bundle`` (in the dtype training loaded, and with
+the fla kernels blocked when training blocked them) and ``Readout.attach`` with the readout
 settings saved next to the weights. A LoRA adapter is loaded on top of the pinned base with
 ``peft.PeftModel.from_pretrained`` (after the readout is attached to the base, as training does). Rows are
 scored with ``max_rows=1`` under the same autocast setting as the in-training eval, so the result is
@@ -39,15 +40,29 @@ def release_gpu_memory() -> None:
         torch.cuda.empty_cache()
 
 
-def load_scoring_bundle(model_dir, *, base_dir=None, multimodal: bool, device: str = "cuda:0",
-                        chat_template: str | None = None):
-    """(bundle, adapter) with the checkpoint's readout attached; ``adapter`` is the PeftModel or None."""
+def prepare_onejev(disable_fla_kernels: bool):
+    """Import OneJev's ``train.common``; block the fla kernels first when training did (sft.py main)."""
     ensure_onejev_path()
-    from qev.readout import HEAD_FILE, Readout, ReadoutConfig
     from train import common
 
+    if disable_fla_kernels:
+        common.block_fla_kernels()  # must run before any model is loaded
+    return common
+
+
+def load_scoring_bundle(model_dir, *, base_dir=None, multimodal: bool, device: str = "cuda:0",
+                        dtype: str = "bfloat16", chat_template: str | None = None,
+                        disable_fla_kernels: bool = False):
+    """(bundle, adapter) with the checkpoint's readout attached; ``adapter`` is the PeftModel or None.
+
+    ``dtype`` should follow OneJev's load rule (sft.py): float32 for a full fine-tune without FSDP,
+    otherwise the run's ``--dtype``; finalize passes it from the lock.
+    """
+    common = prepare_onejev(disable_fla_kernels)
+    from qev.readout import HEAD_FILE, Readout, ReadoutConfig
+
     weights = Path(base_dir) if base_dir is not None else Path(model_dir)
-    bundle = common.load_bundle(str(weights), device=device, dtype="bfloat16", multimodal=multimodal,
+    bundle = common.load_bundle(str(weights), device=device, dtype=dtype, multimodal=multimodal,
                                 chat_template=chat_template)
     rcfg = ReadoutConfig.load(model_dir)  # LoRA: the adapter's readout.json carries the attention setting
     head = Path(model_dir) / HEAD_FILE
@@ -65,22 +80,22 @@ def load_scoring_bundle(model_dir, *, base_dir=None, multimodal: bool, device: s
 
 
 def score_checkpoint(model_dir, rows, *, base_dir=None, multimodal: bool, device: str = "cuda:0",
-                     autocast: bool = True, chat_template: str | None = None,
-                     media_root: str | None = None) -> dict[str, dict]:
+                     dtype: str = "bfloat16", autocast: bool = True, chat_template: str | None = None,
+                     media_root: str | None = None, disable_fla_kernels: bool = False) -> dict[str, dict]:
     """Score ``rows`` with the checkpoint in ``model_dir`` (an adapter dir when ``base_dir`` is given).
 
     Returns ``{row id: {"id", "labels", "probs", "target"}}`` (``eval_records.records``).
     """
-    ensure_onejev_path()
+    common = prepare_onejev(disable_fla_kernels)
     import torch
-    from train import common, sft
+    from train import sft
 
     if media_root:
         from train import mm
 
         mm.set_root(media_root)
     bundle, adapter = load_scoring_bundle(model_dir, base_dir=base_dir, multimodal=multimodal, device=device,
-                                          chat_template=chat_template)
+                                          dtype=dtype, chat_template=chat_template)
     try:
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
             if bundle.multimodal:

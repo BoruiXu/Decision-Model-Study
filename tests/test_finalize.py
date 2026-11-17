@@ -25,6 +25,7 @@ WORDS = ["alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta"]
 STEPS = [0, 4, 8, 10]  # saves at 4 and 8; step 10 is the end of training (final/ or adapter/)
 NOISE = {0: 0.45, 4: 0.25, 8: 0.05, 10: 0.15}  # step 8 has the lowest select NLL
 FILES = ["predictions_select.jsonl", "thresholds.json", "comparison.json", "timing.json", "checkpoint.sha256",
+         "dropped.json",
          "deletion_candidates.json", "RUN_CARD.md", "status"]
 
 
@@ -46,7 +47,8 @@ def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
-def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evaluator=None):
+def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evaluator=None, overrides=None,
+             drop=False):
     rng = random.Random(0)
     src = tmp_path / "src"
     src.mkdir()
@@ -56,13 +58,18 @@ def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evalua
         rows = [mk(f"{name}{i}", rng, "val", f"g{i % 4}") for i in range(30)]
         evals[name] = EvalSetSpec(train_labels=write_jsonl(src / f"{name}.jsonl", rows))
         assign[name] = {"assignment": {r["id"]: ("select" if i % 2 == 0 else "report") for i, r in enumerate(rows)}}
+        if drop and name == "a":  # a1 gets no assignment
+            del assign[name]["assignment"]["a1"]
+        if drop and name == "b":  # the reference lacks b2, and b4's reference has no positive label
+            ref = [dict(r, target={"no": 1.0}) if r["id"] == "b4" else r for r in rows if r["id"] != "b2"]
+            evals[name].reference = write_jsonl(src / "b_ref.jsonl", ref)
     split = src / "splits.json"
     split.write_text(json.dumps(assign))
     exp = ExperimentConfig(
         name="exp", base="joey-1", recipe=str(RECIPES / f"{recipe}.yaml"),
         data=DataSpec(train=train, train_sha256=_sha256(train), eval=evals, split_file=str(split)),
         fields=FieldsSpec(label="target.yes", group="meta.cat", consistency="meta.f", text="messages"),
-        evaluator=evaluator or EvaluatorSpec(), seeds=list(seeds), merge=merge)
+        evaluator=evaluator or EvaluatorSpec(), seeds=list(seeds), merge=merge, overrides=overrides or {})
     out = tmp_path / "out"
     prepare(exp, out / "exp" / "prepared")
     machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"), out_root=str(out))
@@ -134,10 +141,11 @@ class FakeScorer:
 
 class FakeMerger:
     def __init__(self):
-        self.calls = []
+        self.calls, self.kw = [], []
 
     def __call__(self, base_dir, adapter_dir, out_dir, **kw):
         self.calls.append((Path(base_dir), Path(adapter_dir), Path(out_dir)))
+        self.kw.append(kw)
         out = Path(out_dir)
         out.mkdir(parents=True)
         (out / "model.safetensors").write_bytes(b"merged" * 100)
@@ -172,6 +180,8 @@ def test_finalize_writes_all_files(tmp_path, monkeypatch):
     (call,) = scorer.calls
     assert call["model_dir"] == seed_dir / "ckpt-step8" and call["base_dir"] is None
     assert call["multimodal"] is True and call["autocast"] is True and call["cuda"] == "GPU-0"
+    # OneJev loads a full fine-tune without FSDP in float32 (sft.py load_dtype); the reload follows it
+    assert call["dtype"] == "float32" and call["disable_fla_kernels"] is False
     assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
     preds = read_jsonl(run_dir / "predictions_select.jsonl")
@@ -246,6 +256,8 @@ def test_finalize_lora_merge_compared(tmp_path, merged_shift, status):
     assert merger.calls == [(base_dir, seed_dir / "adapter-step8", seed_dir / "merged-step8")]
     first, second = scorer.calls
     assert first["model_dir"] == seed_dir / "adapter-step8" and Path(first["base_dir"]) == base_dir
+    assert first["dtype"] == second["dtype"] == merger.kw[0]["dtype"] == "bfloat16"
+    assert merger.kw[0]["disable_fla_kernels"] is False
     assert second["model_dir"] == seed_dir / "merged-step8" and second["base_dir"] is None
     if status == "failed":
         assert any("merge" in f for f in out["failures"])
@@ -418,3 +430,53 @@ def test_refinalize_upserts_registry_and_keeps_note(tmp_path):
     assert [r["seed"] for r in recs] == [42, 7, "summary"] and out["status"] == "done"
     assert all(r["conclusion"] == "beats both baselines on a and b" and r["complete"] for r in recs)
     assert lock["run_id"] in registry.table(reg)
+
+
+def test_score_kwargs_follow_onejev_load_rule():
+    from harness.finalize import _score_kwargs
+    base = {"base": {"multimodal": False}}
+    assert _score_kwargs({**base, "flags": {"full_finetune": True}})["dtype"] == "float32"
+    assert _score_kwargs({**base, "flags": {"full_finetune": True, "fsdp": True, "dtype": "bfloat16"}})["dtype"] \
+        == "bfloat16"
+    assert _score_kwargs({**base, "flags": {"dtype": "float16"}})["dtype"] == "float16"  # LoRA: flags.dtype
+    assert _score_kwargs({**base, "flags": {}})["dtype"] == "bfloat16"
+    assert _score_kwargs({**base, "flags": {"disable_fla_kernels": True}})["disable_fla_kernels"] is True
+
+
+def test_finalize_forwards_fla_override(tmp_path):
+    ov = {"onejev.disable_fla_kernels": {"value": True, "reason": "fla gated backward broken on this triton"}}
+    run_dir, lock = make_run(tmp_path, overrides=ov)
+    scorer = FakeScorer()
+    finalize(run_dir, scorer=scorer, merger=no_merger)
+    assert scorer.calls[0]["disable_fla_kernels"] is True
+    assert "onejev.disable_fla_kernels" in (run_dir / "RUN_CARD.md").read_text()
+
+
+def test_finalize_pins_leased_cards(tmp_path, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-unleased")
+    run_dir, lock = make_run(tmp_path)
+    scorer = FakeScorer()
+    finalize(run_dir, scorer=scorer, merger=no_merger)
+    assert scorer.calls[0]["cuda"] == "GPU-0"  # gpus.json wins over an inherited value
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-unleased"
+    scorer = FakeScorer()
+    finalize(run_dir, scorer=scorer, merger=no_merger, devices=["GPU-7", "GPU-8"])
+    assert scorer.calls[0]["cuda"] == "GPU-7,GPU-8"
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-unleased"
+    (run_dir / "gpus.json").unlink()
+    with pytest.raises(RuntimeError, match="gpus.json"):
+        finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-unleased"
+
+
+def test_finalize_records_dropped_ids(tmp_path):
+    run_dir, lock = make_run(tmp_path, drop=True)
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert out["status"] == "done", out["failures"]
+    dropped = json.loads((run_dir / "dropped.json").read_text())
+    assert dropped["eval_parts"] == {"a": [], "unassigned": ["a1"], "b": ["b2"]}
+    assert dropped["evaluate"] == {"42": {"b": ["b4"]}}
+    card = (run_dir / "RUN_CARD.md").read_text()
+    section = card.split("## 被去掉的 id", 1)[1].split("\n## ", 1)[0]
+    for s in ("unassigned：1", "a1", "b2", "b4", "dropped.json"):
+        assert s in section, s

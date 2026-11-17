@@ -29,11 +29,32 @@ def is_complete(record: dict) -> bool:
     return True
 
 
+SHARED_MODE = 0o664  # a registry may be shared by a group: files stay group-writable whatever the umask
+
+
+def _chmod_shared(path) -> None:
+    try:
+        os.chmod(path, SHARED_MODE)
+    except OSError:
+        pass  # not ours to change; the owner made it
+
+
+def _open_lock(lock: Path) -> int:
+    """Open (creating if needed) the lock file read-only: flock works on a read-only fd, so other users
+    need no write access to it (as gpu.py ``_try_lock``)."""
+    try:
+        fd = os.open(lock, os.O_RDONLY | os.O_CREAT | os.O_EXCL, SHARED_MODE)
+    except FileExistsError:
+        return os.open(lock, os.O_RDONLY)
+    _chmod_shared(lock)
+    return fd
+
+
 @contextlib.contextmanager
 def _locked(path, exclusive: bool = True):
     lock = Path(f"{path}.lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o664)
+    fd = _open_lock(lock)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         yield
@@ -65,8 +86,8 @@ def _rewrite(path: Path, records: list[dict]) -> None:
             f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
             f.flush()
             os.fsync(f.fileno())
-        if path.exists():
-            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0
+        os.chmod(tmp, mode | SHARED_MODE)  # mkstemp makes 0600; keep the registry group-writable
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
@@ -95,7 +116,10 @@ def append(path, record: dict) -> dict:
             _rewrite(path, [r for i, r in enumerate(records) if i not in hits[1:]])
             return record
         data = (json.dumps(record, ensure_ascii=False) + "\n").encode()
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o664)
+        new = not path.exists()
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, SHARED_MODE)
+        if new:
+            _chmod_shared(path)
         try:
             view = memoryview(data)
             while view:

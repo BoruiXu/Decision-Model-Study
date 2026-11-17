@@ -163,8 +163,27 @@ def _gate_text(gate: dict | None) -> str:
     return head + (f"（{detail}）" if detail else "")
 
 
+DROPPED_SHOWN = 20
+
+
+def _dropped_lines(dropped: dict) -> list[str]:
+    """Counts per key and the first ids; the full lists are in dropped.json."""
+    out = []
+
+    def add(label, ids):
+        shown = ", ".join(map(str, ids[:DROPPED_SHOWN])) + (" …" if len(ids) > DROPPED_SHOWN else "")
+        out.append(f"- {label}：{len(ids)}" + (f"（{shown}）" if ids else ""))
+    for key, ids in (dropped.get("eval_parts") or {}).items():
+        add(key, ids)
+    for seed, per_set in (dropped.get("evaluate") or {}).items():
+        for key, ids in per_set.items():
+            add(f"评测时缺标签（seed {seed}）· {key}", ids)
+    return out + ["- 完整列表见 dropped.json"]
+
+
 def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str], comparison: dict,
-                   thresholds: dict, timing: dict, candidates: dict, versions: dict, manifests: dict) -> None:
+                   thresholds: dict, timing: dict, candidates: dict, versions: dict, manifests: dict,
+                   dropped: dict) -> None:
     base, data = lock["base"], lock["data"]
     seeds = ", ".join(str(s) for s in lock["seeds"])
     ev = lock["evaluator"]
@@ -206,6 +225,7 @@ def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str
             own = ", ".join(f"{k} {_f(v)}" for k, v in t.items() if k != "per_set")
             per = "; ".join(f"{s}: {_f(v)}" for s, v in (t.get("per_set") or {}).items())
             lines.append(f"- seed {key} · **{name}**：{own}" + (f"；分集 {per}" if per else ""))
+    lines += ["", "## 被去掉的 id（参照连接、未分配、评测时缺标签）"] + _dropped_lines(dropped)
     lines += ["", "## 门"] + [f"- seed {k}：{_gate_text(c.get('gate'))}" for k, c in comparison.items()]
     lines += ["", "## overrides"]
     ov = lock.get("overrides") or {}

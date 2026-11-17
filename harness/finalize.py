@@ -84,23 +84,33 @@ def _plugin(exp: ExperimentConfig):
 
 
 def _score_kwargs(lock: dict) -> dict:
-    """Load and autocast settings of the in-training eval (OneJev ``use_autocast``), so NLLs compare."""
+    """Forward-pass settings of the in-training eval, so the rescored NLL compares with it.
+
+    Mirrors OneJev ``sft.py``: load dtype float32 for a full fine-tune without FSDP, else ``--dtype``;
+    autocast as ``use_autocast``; fla kernels blocked when ``--disable-fla-kernels`` was set.
+    """
     f = lock["flags"]
+    full = bool(f.get("full_finetune"))
     return {"multimodal": bool(lock["base"].get("multimodal")),
-            "autocast": bool(f.get("lora_autocast") or (f.get("full_finetune") and not f.get("no_autocast"))),
+            "dtype": "float32" if full and not f.get("fsdp") else (f.get("dtype") or "bfloat16"),
+            "autocast": bool(f.get("lora_autocast") or (full and not f.get("no_autocast"))),
+            "disable_fla_kernels": bool(f.get("disable_fla_kernels")),
             "chat_template": f.get("chat_template"), "media_root": f.get("media_root")}
 
 
 @contextlib.contextmanager
-def _gpu_env(run_dir: Path, lock: dict):
-    """While scoring in this process: the machine env, offline HF, and the run's leased cards (gpus.json)
-    unless CUDA_VISIBLE_DEVICES is already set. The previous environment is restored afterwards."""
-    want = {**{k: str(v) for k, v in (lock["machine"].get("env") or {}).items()}, "HF_HUB_OFFLINE": "1"}
-    gpus = run_dir / "gpus.json"
-    if "CUDA_VISIBLE_DEVICES" not in os.environ and gpus.is_file():
-        uuids = [g["uuid"] for g in json.loads(gpus.read_text())]
-        if uuids:
-            want["CUDA_VISIBLE_DEVICES"] = ",".join(uuids)
+def _gpu_env(run_dir: Path, lock: dict, devices: list[str] | None = None):
+    """While scoring in this process: the machine env, offline HF, and CUDA_VISIBLE_DEVICES pinned to
+    ``devices`` or else the run's leased cards in gpus.json (the runner still holds that lease), even
+    when a value was inherited. The previous environment is restored afterwards."""
+    if not devices:
+        gpus = run_dir / "gpus.json"
+        devices = [g["uuid"] for g in json.loads(gpus.read_text())] if gpus.is_file() else []
+    if not devices:
+        raise RuntimeError(f"no cards to score on: {run_dir / 'gpus.json'} is missing or empty and no devices "
+                           "were given")
+    want = {**{k: str(v) for k, v in (lock["machine"].get("env") or {}).items()}, "HF_HUB_OFFLINE": "1",
+            "CUDA_VISIBLE_DEVICES": ",".join(devices)}
     saved = {k: os.environ.get(k) for k in want}
     os.environ.update(want)
     try:
@@ -176,8 +186,9 @@ def _seed(run_dir, lock, exp, seed, select_rows, train_rows, parts, plugin, scor
     if lora and lock.get("merge"):
         merged = seed_dir / f"merged-step{step}"
         if not merged.is_dir():  # a re-finalize reuses the merged dir it wrote before
-            merged = Path(merger(base_dir, ckpt, merged, multimodal=kw["multimodal"],
-                                 chat_template=kw["chat_template"]))
+            merged = Path(merger(base_dir, ckpt, merged, multimodal=kw["multimodal"], dtype=kw["dtype"],
+                                 chat_template=kw["chat_template"],
+                                 disable_fla_kernels=kw["disable_fla_kernels"]))
         m_recs = scorer(merged, select_rows, base_dir=None, **kw)
         m_diff = _max_prob_diff(recs, m_recs)
         out["merge"] = {"dir": merged, "max_prob_diff": m_diff, "tolerance": TOL,
@@ -282,7 +293,8 @@ def _records(run_dir, lock, seeds, comparison, manifests, timing, versions, stat
     return recs
 
 
-def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora) -> dict:
+def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: list[str] | None = None) -> dict:
+    """Finalize ``run_dir``. ``devices`` (CUDA uuids) overrides gpus.json for a manual re-finalize."""
     run_dir = Path(run_dir).absolute()
     lock = yaml.safe_load((run_dir / "run.lock.yaml").read_text())
     exp = exp_from_lock(lock)
@@ -291,6 +303,7 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora) -> dict:
     run_failures: list[str] = []
 
     parts = build_eval_parts(exp)
+    dropped = {"eval_parts": parts.dropped}
     if sorted(r["id"] for r in parts.select_rows) != sorted(r["id"] for r in select_rows):
         run_failures.append("select ids rebuilt from the source files differ from the prepared select.jsonl: "
                             "the source files changed after prepare (re-run prepare and resolve)")
@@ -302,7 +315,7 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora) -> dict:
             run_failures.append(f"plugin validate: {len(errors)} error(s): " + "; ".join(map(str, errors[:5])))
 
     seeds = {}
-    with _gpu_env(run_dir, lock):
+    with _gpu_env(run_dir, lock, devices):
         for seed in lock["seeds"]:
             seeds[str(seed)] = _seed(run_dir, lock, exp, seed, select_rows, train_rows, parts, plugin,
                                      scorer, merger)
@@ -317,6 +330,8 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora) -> dict:
     run_files.write_predictions(run_dir, seeds, None if plugin else exp.fields.label.rsplit(".", 1)[-1])
     run_files.write_json(run_dir / "thresholds.json", thresholds)
     run_files.write_json(run_dir / "comparison.json", comparison)
+    dropped["evaluate"] = {k: (s["evaluation"] or {}).get("dropped") or {} for k, s in seeds.items()}
+    run_files.write_json(run_dir / "dropped.json", dropped)
     versions = label_versions(lock, exp, train_rows)
     records = _records(run_dir, lock, seeds, comparison, manifests, timing, versions, status, run_failures,
                        failures)
@@ -324,7 +339,7 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora) -> dict:
         registry.append(lock["machine"]["registry"], rec)
     run_files.write_run_card(run_dir, lock, status=status, failures=failures, comparison=comparison,
                              thresholds=thresholds, timing=timing, candidates=candidates, versions=versions,
-                             manifests=manifests)
+                             manifests=manifests, dropped=dropped)
     (run_dir / "status").write_text(status + "\n")
     return {"run_id": lock["run_id"], "status": status, "failures": failures, "seeds": comparison,
             "records": records}
