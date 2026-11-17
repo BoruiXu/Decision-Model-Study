@@ -103,7 +103,8 @@ def test_machine_paths_expanded_and_absolute(tmp_path, monkeypatch):
     assert m.registry_path == str(cfg / "reg" / "registry.jsonl")
     # a bare interpreter name is looked up on PATH, not made relative to the file
     m = load_machine(_write(cfg, "m2.yaml", {"python": "python3", "model_dir": "/m", "out_root": "o"}))
-    assert m.python == "python3" and m.out_root == str(cfg / "o") and m.registry_path == str(cfg / "o" / "registry.jsonl")
+    assert m.python == "python3" and m.out_root == str(cfg / "o")
+    assert m.registry_path == str(cfg / "o" / "registry.jsonl")
 
 
 def test_experiment_paths_relative_to_file(tmp_path, monkeypatch):

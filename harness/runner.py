@@ -14,7 +14,7 @@ from pathlib import Path
 import yaml
 
 from harness.config import MachineConfig
-from harness.resolve import build_command
+from harness.resolve import build_command, check_data
 
 
 def _now() -> str:
@@ -77,53 +77,85 @@ def run(lock_path, *, acquire=None, popen=subprocess.Popen, finalize=_default_fi
             signal.signal(sig, h)
 
 
+def _ignore_signals() -> None:
+    """Cleanup (stop and reap the child, release the cards, write DONE) must finish once it has started, so
+    later SIGTERM/SIGHUP are ignored; ``run`` restores the previous handlers when it returns."""
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
+
+
+def _one_line(e: BaseException) -> str:
+    return " ".join(f"{type(e).__name__}: {e}".split())
+
+
 def _run(lock_path, acquire, popen, finalize, killpg) -> int:
-    lock = yaml.safe_load(Path(lock_path).read_text())
-    run_dir = Path(lock["run_dir"])
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "status").write_text("running\n")
-    if acquire is None:
-        from harness.gpu import acquire
-    stage, code, lease = "acquire", 1, None
+    lock_path = Path(lock_path)
+    run_dir = lock_path.parent  # where DONE goes until the lock names the run dir (resolve writes it there)
+    stage, code, lease, error = "verify", 1, None, None
     try:
+        lock = yaml.safe_load(lock_path.read_text())
+        if not isinstance(lock, dict):
+            raise ValueError(f"{lock_path} is not a run lock (expected a mapping)")
+        run_dir = Path(lock["run_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "status").write_text("running\n")
+        check_data(lock)  # before taking cards: a re-run of prepare must not train on data the lock never saw
+        if acquire is None:
+            from harness.gpu import acquire
+        stage = "acquire"
         lease = acquire(_machine(lock["machine"]), lock["n_gpus"])
         _write_json(run_dir / "gpus.json", [{"uuid": u, "name": n} for u, n in zip(lease.uuids, lease.names)])
         repo = lock["repo_root"]
-        env = {**os.environ, **lock["machine"]["env"],
-               "CUDA_VISIBLE_DEVICES": ",".join(lease.uuids),
-               "PYTHONPATH": f"{repo}/vendor/OneJev:{repo}", "HF_HUB_OFFLINE": "1",
-               "TOKENIZERS_PARALLELISM": "false", "WANDB_MODE": "disabled", "OMP_NUM_THREADS": "4"}
+        set_env = {**lock["machine"]["env"],
+                   "CUDA_VISIBLE_DEVICES": ",".join(lease.uuids),
+                   "PYTHONPATH": f"{repo}/vendor/OneJev:{repo}", "HF_HUB_OFFLINE": "1",
+                   "TOKENIZERS_PARALLELISM": "false", "WANDB_MODE": "disabled", "OMP_NUM_THREADS": "4"}
+        env = {**os.environ, **set_env}
         stage = "train"
         timing = {"n_gpus": lock["n_gpus"], "seeds": {}}
         ok = True
         for seed in lock["seeds"]:
+            cmd = build_command(lock, seed)
+            # the executed command (design section 11): argv, cwd and the variables the runner sets
+            _write_json(run_dir / f"command-s{seed}.json", {"seed": seed, "argv": cmd, "cwd": repo, "env": set_env})
             start, t0 = _now(), time.monotonic()
             with open(run_dir / f"train-s{seed}.log", "ab") as log:
-                proc = popen(build_command(lock, seed), env=env, cwd=repo, stdout=log,
-                             stderr=subprocess.STDOUT, start_new_session=True)
-                try:
+                proc = None
+                try:  # entered before Popen returns its handle, so an interrupt right after the start is handled
+                    proc = popen(cmd, env=env, cwd=repo, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
                     rc = proc.wait()
                 except BaseException:
-                    _terminate_group(proc, killpg)
+                    _ignore_signals()
+                    if proc is not None:
+                        _terminate_group(proc, killpg)
                     raise
             timing["seeds"][str(seed)] = {"start": start, "end": _now(),
                                           "seconds": round(time.monotonic() - t0, 1), "exit_code": rc}
             _write_json(run_dir / "timing.json", timing)
             if rc:
                 code, ok = rc, False
+                error = f"seed {seed}: training exited with code {rc} (see train-s{seed}.log)"
                 break
         if ok:
             stage = "finalize"
             finalize(run_dir)
             code = 0
     except BaseException as e:  # code stays non-zero; DONE is written below
+        error = _one_line(e)
         print(f"runner error in stage {stage}: {e!r}", file=sys.stderr)
     finally:
+        _ignore_signals()
         if lease is not None:
             lease.release()
+        run_dir.mkdir(parents=True, exist_ok=True)
         if code != 0:
             (run_dir / "status").write_text("failed\n")
-        _write_json(run_dir / "DONE", {"exit_code": code, "end": _now(), "stage": stage})
+        done = {"exit_code": code, "end": _now(), "stage": stage}
+        if code != 0:
+            done["error"] = error or f"exit code {code}"
+        _write_json(run_dir / "DONE", done)
     return code
 
 

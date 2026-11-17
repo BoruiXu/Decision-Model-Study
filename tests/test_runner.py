@@ -1,5 +1,7 @@
 import getpass
+import hashlib
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -20,13 +22,22 @@ class FakeLease:
         self.released = True
 
 
+DATA_FILES = ("train.jsonl", "select.jsonl", "select_index.json")
+
+
 def make_lock(tmp_path, seeds=(42, 7)):
     run_dir = tmp_path / "exp" / "plan"
     run_dir.mkdir(parents=True)
+    prep = tmp_path / "exp" / "prepared"
+    prep.mkdir()
+    for f in DATA_FILES:
+        (prep / f).write_text(f"{f}\n")
+    data = {"train": str(prep / "train.jsonl"), "select": str(prep / "select.jsonl"), "prepared_dir": str(prep),
+            "sha256": {f: hashlib.sha256((prep / f).read_bytes()).hexdigest() for f in DATA_FILES}}
     lock = {"experiment": "exp", "repo_root": str(tmp_path / "repo"), "run_id": "abcdef1234567890",
             "run_dir": str(run_dir), "n_gpus": 2, "seeds": list(seeds),
             "flags": {"epochs": 1}, "plan": {"steps": 10, "ranks": 2, "interval": 5},
-            "base": {"name": "b"}, "data": {"train": "t", "select": "s"},
+            "base": {"name": "b"}, "data": data,
             "machine": {"python": "/venv/bin/python", "out_root": str(tmp_path), "model_dir": "/m",
                         "registry": None, "env": {"FOO": "bar"},
                         "gpu": {"include": None, "exclude": [], "min_free_mib": 0, "lock_dir": None,
@@ -91,6 +102,8 @@ def test_runner_writes_done_on_child_failure(tmp_path):
     assert rc == 3 and fin == [] and lease.released
     done = json.loads((run_dir / "DONE").read_text())
     assert done["exit_code"] == 3 and done["stage"] == "train" and done["end"].endswith("Z")
+    assert "seed 42" in done["error"] and "3" in done["error"] and "train-s42.log" in done["error"]
+    assert "\n" not in done["error"]
     assert (run_dir / "status").read_text().strip() == "failed"
     assert len(FakePopen.calls) == 1  # stops after the first failing seed
 
@@ -114,7 +127,7 @@ def test_runner_runs_seeds_in_order(tmp_path):
     assert json.loads((run_dir / "gpus.json").read_text()) == [
         {"uuid": "GPU-a", "name": "A100"}, {"uuid": "GPU-b", "name": "A100"}]
     done = json.loads((run_dir / "DONE").read_text())
-    assert done["exit_code"] == 0 and done["stage"] == "finalize"
+    assert done["exit_code"] == 0 and done["stage"] == "finalize" and "error" not in done
     assert (run_dir / "status").read_text().strip() == "running"  # finalize owns the final status
 
 
@@ -127,6 +140,7 @@ def test_runner_acquire_failure_and_finalize_failure(tmp_path):
     assert run(path, acquire=boom, popen=FakePopen, finalize=lambda d: None) != 0
     done = json.loads((run_dir / "DONE").read_text())
     assert done["stage"] == "acquire" and done["exit_code"] != 0
+    assert done["error"] == "TimeoutError: no gpus"
     assert (run_dir / "status").read_text().strip() == "failed"
 
     (run_dir / "DONE").unlink()
@@ -134,11 +148,12 @@ def test_runner_acquire_failure_and_finalize_failure(tmp_path):
     lease = FakeLease()
 
     def bad_fin(d):
-        raise RuntimeError("x")
+        raise RuntimeError("x\nsecond line")
 
     assert run(path, acquire=lambda m, n: lease, popen=FakePopen, finalize=bad_fin) != 0
     done = json.loads((run_dir / "DONE").read_text())
     assert done["stage"] == "finalize" and done["exit_code"] != 0 and lease.released
+    assert done["error"] == "RuntimeError: x second line"  # one line
 
 
 def test_interrupt_terminates_child_before_release_and_writes_done(tmp_path):
@@ -187,3 +202,97 @@ def test_launch_relative_lock_path_made_absolute(tmp_path, monkeypatch):
     seen = []
     launch(path.relative_to(tmp_path), tmux=lambda argv: seen.append(argv))
     assert f"-m harness.runner {path} " in seen[0][7]  # the runner's cwd is the repo, not the caller's cwd
+
+
+@pytest.mark.parametrize("changed", DATA_FILES)
+def test_runner_refuses_changed_prepared_data(tmp_path, capsys, changed):
+    path, lock, run_dir = make_lock(tmp_path)
+    (Path(lock["data"]["prepared_dir"]) / changed).write_text("re-prepared\n")  # prepare re-ran in place
+    acquired = []
+    rc = run(path, acquire=lambda m, n: acquired.append(n) or FakeLease(), popen=FakePopen, finalize=lambda d: None)
+    assert rc == 1 and acquired == [] and FakePopen.calls == []
+    done = json.loads((run_dir / "DONE").read_text())
+    assert done["exit_code"] == 1 and done["stage"] == "verify" and changed in done["error"]
+    assert (run_dir / "status").read_text().strip() == "failed"
+    err = capsys.readouterr().err  # runner.log in a launched run
+    assert changed in err and "sha256" in err and "resolve" in err
+
+
+def test_second_signal_during_cleanup_is_ignored(tmp_path):
+    path, _, run_dir = make_lock(tmp_path)
+    events = []
+
+    class Lease(FakeLease):
+        def release(self):
+            signal.raise_signal(signal.SIGHUP)  # yet another signal while DONE is being written
+            events.append("release")
+            super().release()
+
+    class Hung:
+        pid = 777
+
+        def wait(self, timeout=None):
+            if timeout is None:
+                signal.raise_signal(signal.SIGTERM)  # the first interrupt
+            events.append("reaped")
+            return -15
+
+    def killpg(pid, sig):
+        events.append(("killpg", sig))
+        signal.raise_signal(signal.SIGTERM)  # a second SIGTERM while the child is being stopped
+
+    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    lease = Lease()
+    rc = run(path, acquire=lambda m, n: lease, popen=lambda c, **kw: Hung(), finalize=lambda d: None,
+             killpg=killpg)
+    assert rc != 0 and lease.released
+    assert events == [("killpg", signal.SIGTERM), "reaped", "release"]
+    done = json.loads((run_dir / "DONE").read_text())
+    assert done["stage"] == "train" and done["exit_code"] != 0 and "Interrupted" in done["error"]
+    assert {s: signal.getsignal(s) for s in before} == before  # handlers restored after the run
+
+
+def test_interrupt_inside_popen_still_writes_done(tmp_path):
+    path, _, run_dir = make_lock(tmp_path)
+    lease = FakeLease()
+
+    def popen(cmd, **kw):
+        signal.raise_signal(signal.SIGTERM)
+        raise AssertionError("unreachable")
+
+    assert run(path, acquire=lambda m, n: lease, popen=popen, finalize=lambda d: None) != 0
+    done = json.loads((run_dir / "DONE").read_text())
+    assert done["stage"] == "train" and "Interrupted" in done["error"] and lease.released
+
+
+def test_command_written_before_each_seed_starts(tmp_path):
+    path, lock, run_dir = make_lock(tmp_path)
+    seen = []
+
+    class Recording(FakePopen):
+        def __init__(self, cmd, **kw):
+            seed = cmd[cmd.index("--seed") + 1]
+            seen.append(json.loads((run_dir / f"command-s{seed}.json").read_text()))
+            super().__init__(cmd, **kw)
+
+    FakePopen.codes = [0, 0]
+    assert run(path, acquire=lambda m, n: FakeLease(), popen=Recording, finalize=lambda d: None) == 0
+    assert [s["seed"] for s in seen] == [42, 7]
+    for s, (cmd, kw) in zip(seen, FakePopen.calls):
+        assert s["argv"] == cmd and s["cwd"] == kw["cwd"] == lock["repo_root"]
+        assert s["env"]["CUDA_VISIBLE_DEVICES"] == "GPU-a,GPU-b" and s["env"]["FOO"] == "bar"
+        assert s["env"]["PYTHONPATH"] == kw["env"]["PYTHONPATH"]
+
+
+@pytest.mark.parametrize("text", ["{{{ not yaml", "{}\n", "- a list\n"])
+def test_unreadable_lock_writes_done(tmp_path, text, capsys):
+    run_dir = tmp_path / "exp" / "20261117T000000Z-0123abcd"
+    run_dir.mkdir(parents=True)
+    path = run_dir / "run.lock.yaml"
+    path.write_text(text)
+    acquired = []
+    assert run(path, acquire=lambda m, n: acquired.append(n), popen=FakePopen, finalize=lambda d: None) == 1
+    done = json.loads((run_dir / "DONE").read_text())
+    assert done["exit_code"] == 1 and done["stage"] == "verify" and done["error"]
+    assert (run_dir / "status").read_text().strip() == "failed" and acquired == []
+    assert "runner error in stage verify" in capsys.readouterr().err

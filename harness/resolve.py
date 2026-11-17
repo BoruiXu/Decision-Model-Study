@@ -43,6 +43,40 @@ def _check_reserved(flags: dict, where: str) -> None:
                               "use the proper key instead")
 
 
+DATA_FILES = ("train.jsonl", "select.jsonl", "select_index.json")
+
+
+class DataChanged(RuntimeError):
+    """The prepared files no longer match the sha256 recorded in the lock."""
+
+
+def data_changes(lock: dict) -> list[str]:
+    """Prepared files whose sha256 differs from the lock; a re-run of prepare overwrites them in place."""
+    d = lock.get("data") or {}
+    want, root = d.get("sha256") or {}, d.get("prepared_dir")
+    if not root or not want:
+        return ["the lock records no data.prepared_dir / data.sha256"]
+    out = []
+    for name in DATA_FILES:
+        p = Path(root) / name
+        if name not in want:
+            out.append(f"{name}: no sha256 in the lock")
+        elif not p.is_file():
+            out.append(f"{p}: missing")
+        else:
+            got = sha256_file(p)
+            if got != want[name]:
+                out.append(f"{p}: sha256 {got[:12]}… differs from the lock's {want[name][:12]}…")
+    return out
+
+
+def check_data(lock: dict) -> None:
+    changes = data_changes(lock)
+    if changes:
+        raise DataChanged("prepared data changed after resolve (re-run `ojh resolve` for a new lock): "
+                          + "; ".join(changes))
+
+
 class Infeasible(RuntimeError):
     """The recipe cannot run on the available cards; ``alternatives`` lists concrete options."""
 
@@ -258,7 +292,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         raise ConfigError(f"no prepared data at {prepared}; run `ojh prepare` first")
     info = json.loads(info_path.read_text())
     data = {"prepared_dir": str(prepared), "source": exp.data.train, "adapter": exp.data.adapter,
-            "sha256": {f: _sha(prepared / f) for f in ("train.jsonl", "select.jsonl", "select_index.json")},
+            "sha256": {f: _sha(prepared / f) for f in DATA_FILES},
             "source_sha256": info["train_sha256_source"], "subset": info.get("subset"),
             "counts": info.get("counts")}
     for f in ("train", "select", "select_index"):

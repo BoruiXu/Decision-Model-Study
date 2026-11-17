@@ -509,10 +509,23 @@ def test_allow_test_off_recorded(tmp_path):
 def test_baselines_train_on_the_recipe_split_only(tmp_path):
     plugin = tmp_path / "count_plugin.py"
     plugin.write_text("def baselines(train_rows, eval_rows):\n"
-                      "    return {'seen': {'n': len(train_rows), 'splits': sorted({r['split'] for r in train_rows})}}\n")
+                      "    splits = sorted({r['split'] for r in train_rows})\n"
+                      "    return {'seen': {'n': len(train_rows), 'splits': splits}}\n")
     run_dir, lock = make_run(tmp_path, extra_split=True, evaluator=EvaluatorSpec(type="plugin", path=str(plugin)))
     assert lock["flags"]["split"] == "train" and lock["data"]["counts"]["train"] == 86
     out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
     assert out["status"] == "done", out["failures"]
     pooled = json.loads((run_dir / "comparison.json").read_text())["42"]["sets"]["pooled_select"]
     assert pooled["seen"] == {"n": 80, "splits": ["train"]}  # OneJev's --split train skipped the 6 others
+
+
+@pytest.mark.parametrize("changed", ["train.jsonl", "select.jsonl", "select_index.json"])
+def test_finalize_refuses_changed_prepared_data(tmp_path, changed):
+    run_dir, lock = make_run(tmp_path)
+    p = Path(lock["data"]["prepared_dir"]) / changed
+    p.write_text(p.read_text() + "\n")  # same rows, different bytes: prepare re-ran after resolve
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert out["status"] == "failed"
+    assert any(changed in f and "sha256" in f for f in out["failures"]), out["failures"]
+    assert json.loads((run_dir / "comparison.json").read_text())["42"]["sets"] is None  # not evaluated
+    assert (run_dir / "status").read_text().strip() == "failed"

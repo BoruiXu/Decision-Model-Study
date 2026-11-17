@@ -30,6 +30,7 @@ from harness.evaluator import binary_decision
 from harness.merge import merge_lora
 from harness.plugins import evaluate_plugin, hook, load_plugin
 from harness.prepare import _read, build_eval_parts
+from harness.resolve import data_changes
 from harness.score import score_checkpoint
 from harness.select import checkpoint_dir, eval_events, select_step
 
@@ -314,7 +315,12 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
 
     parts = build_eval_parts(exp, allow_test=bool(lock.get("allow_test")))
     dropped = {"eval_parts": parts.dropped}
-    if sorted(r["id"] for r in parts.select_rows) != sorted(r["id"] for r in select_rows):
+    changed = data_changes(lock)
+    if changed:
+        run_failures.append("prepared data changed after resolve (sha256 differs from the lock; the run did "
+                            "not train on these files): " + "; ".join(changed))
+        parts = None
+    elif sorted(r["id"] for r in parts.select_rows) != sorted(r["id"] for r in select_rows):
         run_failures.append("select ids rebuilt from the source files differ from the prepared select.jsonl: "
                             "the source files changed after prepare (re-run prepare and resolve)")
         parts = None
