@@ -1,8 +1,9 @@
 # DynamicServe v1 elephant 复现实验。路径用占位符：<DATA> 是数据版本目录，<RUN> 是旧流程的训练目录。
+# 路径可以用 ~ 和 $VAR；相对路径相对本文件所在的目录。
 # 用法：ojh prepare 本文件 --machine <机器配置>，再 ojh resolve。
 name: elephant_majority75_repro
 base: elephant-1
-recipe: examples/recipes/elephant_full_fsdp.yaml   # 或使用方自己的配方文件
+recipe: examples/recipes/elephant_full_fsdp.yaml   # 或使用方自己的配方文件；相对路径先按本文件所在目录找，找不到再按 repo 根目录
 data:
   adapter: onejev_rows
   train: <DATA>/export_majority75/binary/train.jsonl

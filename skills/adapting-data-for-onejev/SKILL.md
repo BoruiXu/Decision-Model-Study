@@ -5,7 +5,7 @@ description: Use when a dataset is not yet in OneJev row format and needs an ada
 
 # 把数据适配成 OneJev 行
 
-训练前，`ojh prepare` 通过适配器读取数据。数据已经是 OneJev 行（每行一个 JSON）时，用内置的 `onejev_rows` 适配器即可，不用写代码。否则写一个适配器。训练流程见 `training-with-onejev` skill。
+训练前，`ojh prepare`（`ojh` 即 `<repo>/.venv/bin/ojh`，见 `training-with-onejev`）通过适配器读取数据。数据已经是 OneJev 行（每行一个 JSON）时，用内置的 `onejev_rows` 适配器即可，不用写代码。否则写一个适配器。训练流程见 `training-with-onejev` skill。
 
 ## OneJev 行格式
 

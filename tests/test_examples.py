@@ -88,3 +88,11 @@ def test_skill_symlinks_resolve():
         assert (ROOT / "skills" / name / "SKILL.md").samefile(link / "SKILL.md")
         head = (link / "SKILL.md").read_text().split("---")[1]
         assert yaml.safe_load(head)["name"] == name
+
+
+def test_docs_call_ojh_from_the_venv():
+    # setup.sh never activates .venv, so a bare `ojh` is not on PATH (over ssh in particular)
+    for p in (ROOT / "README.md", ROOT / "skills" / "training-with-onejev" / "SKILL.md"):
+        text = p.read_text()
+        assert "<repo>/.venv/bin/ojh" in text and "ssh <host> <repo>/.venv/bin/ojh" in text, p
+        assert not re.search(r"ssh <host> ojh", text), p

@@ -10,13 +10,15 @@ description: Use when training a OneJev decision model (full fine-tune or LoRA) 
 
 ## 在哪里运行
 
-`ojh` 装在有 GPU 的机器上，在那里运行。你不在 GPU 机器上时，用 ssh 调用，例如 `ssh <host> ojh status <RUN>`。`status` 输出很短，通过 ssh 看很便宜。记录和登记表都留在 GPU 机器的 `out_root` 下。第一次使用先在 GPU 机器上执行 `bash setup.sh <machine.yaml>`（建环境，并执行 `ojh setup`：拉 OneJev、打补丁、校验 sha256），再 `ojh fetch-base <基座名> --machine <machine.yaml>`（基座在 `catalog/bases/`）。
+`ojh` 装在有 GPU 的机器上，在那里运行。`setup.sh` 不会激活 `.venv`，所以要写全路径 `<repo>/.venv/bin/ojh`（`<repo>` 是本 repo 在 GPU 机器上的位置）；下文的 `ojh` 都是它的简写。你不在 GPU 机器上时，用 ssh 调用，例如 `ssh <host> <repo>/.venv/bin/ojh status <RUN>`。`status` 输出很短，通过 ssh 看很便宜。记录和登记表都留在 GPU 机器的 `out_root` 下。第一次使用先在 GPU 机器上执行 `bash setup.sh <machine.yaml>`（建环境，并执行 `ojh setup`：拉 OneJev、打补丁、校验 sha256），再 `<repo>/.venv/bin/ojh fetch-base <基座名> --machine <machine.yaml>`（基座在 `catalog/bases/`）。
+
+配置里的路径可以用 `~` 和 `$VAR`；相对路径按所在配置文件的目录解析（配方找不到时再按 repo 根目录，如 `examples/recipes/…`），所以在哪个目录下运行都一样。机器配置的 `forbidden_write_roots` 下的目录不会被写，要写的路径在其下时命令报 `ConfigError`。
 
 ## 流程
 
 1. **prepare**：`ojh prepare <exp.yaml> --machine <machine.yaml>`。适配器把数据转成 OneJev 行，校验 schema、id 唯一、target 分布和 split 字段，按配置派生训练子集，并把 sha256 和实验配置里的 `data.train_sha256` 比对，不一致就停。输出写到 `<out_root>/<name>/prepared/`。数据格式不是 OneJev 行时，先用 `adapting-data-for-onejev` skill。
 2. **resolve**：`ojh resolve <exp.yaml> --machine <machine.yaml>`。检测 GPU，结合数据、机器、基座、配方解析出 `<out_root>/<name>/<run_id>/run.lock.yaml`（命令会打印路径），并在目标机器上跑 plan-only，按每 epoch 步数的 1/8 设评测和保存间隔。放不下时退出码是 2，并在 stderr 列出替代方案（`alternative: …`）；harness 不会自动换方式。
-3. **launch**：`ojh launch <RUN>/run.lock.yaml`。在 tmux 里依次取卡加锁、按 seed 训练、自动 finalize、写 `DONE` 完成标记（含退出码）。命令**立即返回**会话名、日志路径和完成标记路径。
+3. **launch**：`ojh launch <RUN>/run.lock.yaml`。在 tmux 里依次核对 prepared 数据的 sha256、取卡加锁、按 seed 训练（每个 seed 的命令先写进 `<RUN>/command-s<seed>.json`）、自动 finalize、写 `DONE` 完成标记（`exit_code`、`stage`，失败时还有一行 `error`）。命令**立即返回**会话名、日志路径和完成标记路径。
 4. **status**：`ojh status <RUN>`，输出当前 step / 总 step、最近一次评测、预计剩余时间和占用的卡。
 5. **finalize**：launch 结束时自动调用；失败或想重跑时 `ojh finalize <RUN>`。它选 checkpoint、重载后逐题打分、跑训练基线（TF-IDF、分组先验、全选正类、oracle）、定阈值、出对比表并判门，写 `RUN_CARD.md` 并登记。
 6. **写结论**：读 `<RUN>/RUN_CARD.md` 后，用 `ojh note <RUN> "<一句话结论和依据>"` 填登记表里的 `conclusion`。没有 `conclusion` 的记录算未完成，`ojh table` 默认不显示（加 `--all` 才显示）。`ojh table --machine <machine.yaml>` 把登记表渲染成对比表。
@@ -45,7 +47,7 @@ description: Use when training a OneJev decision model (full fine-tune or LoRA) 
 ## 审批规则（先问用户，得到明确的“可以”再做）
 
 - `ojh cleanup <RUN> --confirm`：先不带 `--confirm` 运行，列出候选和大小给用户看；只有用户同意才加 `--confirm`。没有 `--confirm` 不删任何东西。
-- `ojh eval-report <RUN> --allow-report`，以及任何带 `--allow-test` 的命令（`prepare`、`eval-report`）：report 和 test 部分默认不读。用 `--allow-test` 要用户批准，并写进记录。
+- `ojh eval-report <RUN> --allow-report`，以及任何带 `--allow-test` 的命令（`prepare`、`eval-report`）：report 和 test 部分默认不读；train 文件里有 split 以 `test` 开头的行时，`prepare` 也会拒绝。用 `--allow-test` 要用户批准。`prepare --allow-test` 会写进 `prepared.json` 和 lock，finalize 和 `eval-report` 沿用它，`RUN_CARD.md` 和登记记录里都会写明读过 test。
 - 推送本 repo（`git push`）。
 - 全参和 LoRA 之间的切换（见上）。
 
@@ -59,6 +61,8 @@ description: Use when training a OneJev decision model (full fine-tune or LoRA) 
 | FLA kernel 报错 | 写 override `onejev.disable_fla_kernels: true`，写明原因；不能悄悄加标志 |
 | NCCL 超时 | 先查这些卡上是否有别人的进程（`nvidia-smi`）；或用 `gpus` override 减少卡数后重新 resolve，写明原因 |
 | plan-only 失败（resolve 阶段） | 多半是数据或适配器的问题：检查 `prepared/` 里的 `train.jsonl`、适配器输出，重新 `ojh prepare` |
+| `DONE` 的 `stage` 是 `verify`，`error` 说 prepared 数据的 sha256 和 lock 对不上 | `resolve` 之后又跑过 `prepare`。重新 `ojh resolve` 得到新 lock，再 `ojh launch`；不要改 lock |
+| `ConfigError: refusing to write … forbidden_write_roots` | 要写的目录在禁止写入的目录下。问用户后改机器配置里的 `out_root`、`registry`、`lock_dir` 或 `model_dir` |
 | 等卡超时（`GpuWaitTimeout`） | 继续等，或调整机器配置里的 GPU 规则（`gpu_include` / `gpu_exclude` / `min_free_mib` / `wait_timeout_s`），再重新 launch |
 | 复评 NLL 对不上（rescore 与训练时的 NLL 差超阈值） | **不要手改任何数字**。run 的状态是 `failed`，原因写在 `RUN_CARD.md`，如实向用户报告 |
 | resolve 报不可行（`Infeasible`，退出码 2） | 按替代方案选：等卡、减卡、换更小的基座，或（问过用户后）写 `mode` override 换训练方式 |
@@ -66,7 +70,7 @@ description: Use when training a OneJev decision model (full fine-tune or LoRA) 
 
 ## run 目录里有什么
 
-`run.lock.yaml`（全部设置）、`runner.log`、`DONE`、`timing.json`、`checkpoint.sha256`、`predictions_select.jsonl`、`deletion_candidates.json`、`dropped.json`、`RUN_CARD.md`（一页摘要：选中的 checkpoint、复评 NLL、对照表、阈值、门、overrides、删除候选）。每个 seed 的 checkpoint 在 `runs/<实验名>-s<seed>/` 下。
+`run.lock.yaml`（全部设置）、`command-s<seed>.json`（每个 seed 实际执行的命令、工作目录和 runner 设置的环境变量）、`runner.log`、`DONE`（退出码、阶段，失败时的 `error`）、`timing.json`、`checkpoint.sha256`、`predictions_select.jsonl`、`deletion_candidates.json`、`dropped.json`、`RUN_CARD.md`（一页摘要：选中的 checkpoint、复评 NLL、对照表、阈值、门、overrides、删除候选）。每个 seed 的 checkpoint 在 `runs/<实验名>-s<seed>/` 下。
 
 ## 不要做的事
 
