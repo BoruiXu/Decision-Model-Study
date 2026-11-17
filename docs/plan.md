@@ -16,6 +16,7 @@
 - OneJev: `https://github.com/OmniJev/OneJev.git` @ `81ce62f1597c91e46767d4d02d6ac2e18534fe94` + `serve.patch` from HF `baselabs/joey-1` @ `9efbe485efbed9598dfca5294cbbe8da00e21908`. The patch sha256 and the patched-file sha256s are copied from `dynamicserve-agreement-router/configs/models.json` (`joey.sha256["serve.patch"]`, `onejev.patched_sha256`).
 - GPU env pins are copied verbatim from `dynamicserve-agreement-router/training/{setup.sh,constraints.txt}` (torch==2.8.0, torchvision==0.23.0 from the cu128 index; transformers 5.19.0; peft 0.21.2; flash-linear-attention 0.5.2). CPU extras: `pyyaml`, `numpy`, `scipy`, `scikit-learn==1.9.1` (the version that produced the v1 baselines).
 - Every module under `harness/` except `train_entry.py`, `score.py`, `merge.py` must import without torch, so the CPU test suite runs on a Mac.
+- Fixed locations (pre-flight ruling): OneJev is checked out at `<repo>/vendor/OneJev` and the patch is stored at `<repo>/vendor/serve.patch`; `vendor/` is git-ignored. `prepare` writes to `<out_root>/<exp.name>/prepared/`, which `resolve` reads; base weights live at `<model_dir>/<base name>`.
 - No personal path, account name or machine value (`/Users/`, `/home/`, `xbr`, `/shared/ssd`, `gpu_locks`, a hard-coded GPU index) anywhere in `harness/`, `adapters/`, `skills/`, `catalog/`. They may appear only in `examples/` (as placeholders) and `docs/`.
 - Rows whose split is `test*` are never read without `--allow-test`; report halves are never read without `--allow-report`.
 - Nothing is deleted without `ojh cleanup --confirm`. Training mode (`full` | `lora`) comes only from the recipe or a recorded override; the harness never switches it.
@@ -46,7 +47,7 @@
 - Produces:
   - `get_field(row: dict, dotted: str) -> Any` (raises `KeyError`).
   - `MachineConfig` dataclass: `python: str`, `model_dir: str`, `out_root: str`, `registry: str | None`, `gpu_include: list[int] | None`, `gpu_exclude: list[int]`, `min_free_mib: int = 0`, `lock_dir: str | None = None`, `order: str = "free_desc"`, `wait_timeout_s: int = 3600`, `gpu_source: str = "scan"`, `forbidden_write_roots: list[str]`, `env: dict[str, str]`. Property `registry_path` defaults to `<out_root>/registry.jsonl`.
-  - `ExperimentConfig` dataclass mirroring design §7: `name`, `base`, `recipe`, `data` (`adapter`, `train`, `train_sha256`, `eval: dict[str, EvalSetSpec]`, `split_file`), `subset: SubsetSpec | None`, `fields` (`label`, `group`, `consistency`, `text`), `evaluator` (`type`, `budgets`, `gate`), `seeds: list[int]`, `gpus: int | None`, `merge: bool = False`, `overrides: dict`. `EvalSetSpec(train_labels: str, reference: str | None)`.
+  - `ExperimentConfig` dataclass mirroring design §7: `name`, `base`, `recipe`, `data` (`adapter`, `train`, `train_sha256`, `eval: dict[str, EvalSetSpec]`, `split_file`), `subset: SubsetSpec | None`, `fields` (`label`, `group`, `consistency`, `text`), `evaluator` (`type` default `binary_decision`, `budgets`, `gate` default true, `path` for plugins), `seeds: list[int]`, `gpus: int | None`, `merge: bool = False`, `overrides: dict`. `EvalSetSpec(train_labels: str, reference: str | None)`.
   - `load_machine(path) -> MachineConfig`, `load_experiment(path) -> ExperimentConfig` (raise `ConfigError` naming the missing key).
 
 - [ ] **Step 1:** `git init` the repo; create `pyproject.toml` (requires-python >=3.11; deps pyyaml, numpy, scipy, scikit-learn==1.9.1; extra `dev` = pytest; extra `gpu` = the pinned GPU packages; script `ojh = harness.cli:main`). Create `.venv` with Python ≥3.11 and `pip install -e '.[dev]'`. Copy the design doc and this plan into `docs/`.
@@ -197,7 +198,7 @@
     - applies `exp.overrides` last and records each under `overrides` with its reason (an override without `reason` → `ConfigError`);
     - raises `Infeasible(alternatives: list[str])` when the estimate exceeds the free memory of the best `n` candidate cards.
     - `run_id` = UTC timestamp + short hash of the lock body.
-- Example recipe values: design §8 table (elephant: 4 GPUs FSDP, lr 3.5e-6, 1 epoch, brier 1, warmup .03, wd 0, max-grad-norm 1, max-len 16384, batch-tokens 16384, max-rows 8, accum-rows 32, bf16; joey full: 1 GPU, lr 1e-5, brier 0, max-rows 1, accum-rows 32; LoRA: r 32, alpha 64, dropout 0.05; mammoth LoRA adds autocast).
+- Example recipe values: design §8 table (elephant: 4 GPUs FSDP, lr 3.5e-6, 1 epoch, brier 1, warmup .03, wd 0, max-grad-norm 1, max-len 16384, batch-tokens 16384, max-rows 8, accum-rows 32, bf16, plus `split: train` and `log_every: 1` as in the v1 command; joey full: 1 GPU, lr 1e-5, brier 0, max-rows 1, accum-rows 32; LoRA: r 32, alpha 64, dropout 0.05; mammoth LoRA adds autocast).
 
 - [ ] **Step 1: Failing tests.**
   - `test_elephant_command_matches_v1` (skip without `HARNESS_V1_DIR`): the flag set equals the training flags of `train/command_elephant.sh` (entry module, paths and the eval file name excluded) given `plan_runner` → 176 steps, so `--eval-every 22`.
@@ -279,7 +280,7 @@
     - select the step;
     - rescore select rows; if |NLL − training NLL| > 1e-3 → status `failed`;
     - if `merge`: merge, rescore, and compare per-row probabilities within 1e-3;
-    - positive-class probability for `evaluate` = `probs[label key of fields.label]`;
+    - positive-class probability for `evaluate` = `probs[k]`, where `k` is the last dotted component of `fields.label` (`target.yes` → `yes`);
     - write `predictions_select.jsonl`, `thresholds.json`, `comparison.json`, `timing.json` (adds `gpu_hours = Σ train seconds × n_gpus / 3600`), `checkpoint.sha256` (every file in the selected dir; LoRA also records the base revision), `deletion_candidates.json` (unselected ckpt dirs and merged dirs with sizes), `RUN_CARD.md`;
     - append one registry record; with more than one seed, append a summary record with mean and std of each metric.
   - `registry.REQUIRED = ("exp", "run_id", "seed", "train_label_version", "reference_label_version", "data_sha256", "base", "base_revision", "recipe", "mode", "onejev", "gpu_name", "n_gpus", "gpu_hours", "selected_step", "checkpoint_sha256", "metrics", "baselines", "gate", "overrides", "conclusion")`.
@@ -302,7 +303,7 @@
 
 **Interfaces:**
 - Consumes: everything above.
-- Produces: `ojh` subcommands `setup`, `fetch-base`, `prepare`, `resolve`, `launch`, `status`, `finalize`, `note`, `eval-report`, `table`, `cleanup`, with the flags of design §7 (`--machine`, `--allow-report`, `--allow-test`, `--confirm`).
+- Produces: `ojh` subcommands `setup`, `fetch-base`, `prepare`, `resolve`, `launch`, `status`, `finalize`, `note`, `eval-report`, `table`, `cleanup`, with the flags of design §7 (`--machine`, `--allow-report`, `--allow-test`, `--confirm`). `prepare` also takes `--machine` (it needs `out_root`).
   - `report_eval.run(run_dir, *, allow_report: bool, scorer=...) -> dict` scores report ids with the selected checkpoint and the locked thresholds (no refit) and writes `report_eval.json`. Raises `ReportRefused` unless `allow_report`.
   - `cleanup.candidates(run_dir) -> list[dict]`; `cleanup.delete(run_dir, confirm: bool)` deletes only when `confirm`.
 
