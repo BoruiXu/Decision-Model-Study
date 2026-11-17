@@ -46,7 +46,7 @@ def test_experiment_eval_sets(tmp_path):
     assert e.evaluator.budgets == [0.10, 0.15]
     assert e.evaluator.type == "binary_decision" and e.evaluator.gate is True
     assert e.subset.n == 10 and e.subset.where == {"meta.pair_design": "full"}
-    assert e.seeds == [42] or e.seeds == []
+    assert e.seeds == [42]
     assert e.merge is False and e.overrides == {}
 
 
