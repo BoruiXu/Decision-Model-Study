@@ -1,0 +1,29 @@
+# 机器配置模板：每人每台机器一份。把 <...> 换成本机的真实路径后，用 --machine <本文件> 传给 ojh。
+# 代码里不写任何机器取值，所有机器相关的内容都在这里。
+
+# ---- 必填 ----
+python: <PYTHON>          # python 解释器：setup.sh 用它建 .venv；建好后改成 <repo>/.venv/bin/python，训练用它
+model_dir: <MODEL_DIR>    # 基座权重目录；基座放在 <model_dir>/<基座名>（ojh fetch-base 会下载到这里）
+out_root: <OUT_ROOT>      # 输出根目录：<out_root>/<实验名>/prepared 和每个 run 的目录都在这下面
+
+# ---- 登记表 ----
+# 默认是 <out_root>/registry.jsonl。多人共用一份时，指到大家都能写的目录。
+# registry: <SHARED_DIR>/registry.jsonl
+
+# ---- GPU 规则 ----
+# gpu_source: scan 表示扫描 nvidia-smi 后按下面的规则筛卡、加锁；
+#             preassigned 表示启动前已设好 CUDA_VISIBLE_DEVICES（例如调度系统分配的卡），
+#             直接用这些卡，跳过扫描和加锁。
+gpu_source: scan
+# gpu_include: [0, 1, 2, 3]   # 只允许使用这些卡；不写表示所有卡
+gpu_exclude: []               # 不允许使用的卡
+min_free_mib: 0               # 一张卡至少要有多少空闲显存（MiB）才算可用；共享机器上请设成放得下模型的值
+# lock_dir: <LOCK_DIR>        # 锁目录；不配就不加锁。多人共用一台机器时必须是所有人都能写的共享路径
+order: free_desc              # 取卡顺序：free_desc（空闲显存从多到少）
+wait_timeout_s: 3600          # 等不到足够的卡时最多等多久（秒），超时报 GpuWaitTimeout
+
+# ---- 安全与环境 ----
+forbidden_write_roots: []     # 禁止写入的目录
+# 训练进程的环境变量
+env:
+  HF_HUB_OFFLINE: "1"

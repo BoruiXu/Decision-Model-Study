@@ -1,0 +1,27 @@
+# DynamicServe v1 elephant 复现实验。路径用占位符：<DATA> 是数据版本目录，<RUN> 是旧流程的训练目录。
+# 用法：ojh prepare 本文件 --machine <机器配置>，再 ojh resolve。
+name: elephant_majority75_repro
+base: elephant-1
+recipe: examples/recipes/elephant_full_fsdp.yaml   # 或使用方自己的配方文件
+data:
+  adapter: onejev_rows
+  train: <DATA>/export_majority75/binary/train.jsonl
+  train_sha256: fe83846076cb6c72d80a048548f38edae751bb9df9865f11409992289c3515f2   # 完整值；不一致 prepare 会停
+  eval:                                       # 评测集由使用方显式列出，没列的文件一律不读
+    val_id:
+      train_labels: <DATA>/export_majority75/binary/val_id.jsonl
+    val_catood:
+      train_labels: <DATA>/export_majority75/binary/val_catood.jsonl
+  split_file: <RUN>/train/splits.json         # 固定读取，不重新切分
+fields:
+  label: target.yes                           # 正类在 target 里的键
+  group: meta.category                        # 分组（类别）
+  consistency: meta.f                         # 逐题一致比例，用于预算下的承接率
+  text: messages                              # 基线文本：state.messages 拼成 "role: content"
+evaluator:
+  type: binary_decision
+  budgets: [0.10, 0.15]
+  gate: true
+seeds: [42]
+gpus: 4
+overrides: {}
