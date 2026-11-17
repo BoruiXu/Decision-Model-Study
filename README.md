@@ -12,6 +12,7 @@
 
 - [Decision Blocks（决策模型架构模块）](https://yilechen.net/DM-k7p9x2/architecture-blocks/#/)
 - [Decision Landscape（决策智能产业全景）](https://yilechen.net/DM-k7p9x2/industrial-landscape/)
+- **TandemBench** 用双人厨房协作题评测决策模型能否从候选团队方案中选出最优方案，以及能否判断候选项之外是否还有更好的方案。[论文](https://arxiv.org/abs/2611.05827) · [GitHub](https://github.com/lililibaohang/TandemBench)
 
 ## 阅读顺序
 
