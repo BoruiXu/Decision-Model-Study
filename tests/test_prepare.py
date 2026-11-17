@@ -111,6 +111,7 @@ def test_test_split_refused(tmp_path):
     assert build_eval_parts(exp, allow_test=True).select_index == {"a": "val"}
 
 
+@pytest.mark.filterwarnings("ignore:data.train_sha256 not set")
 def test_rejects_id_overlap(tmp_path):
     exp = make_exp(tmp_path, [row("a")], {"val": ([row("a")], None)}, {"val": {"a": "select"}})
     with pytest.raises(IdOverlap):
@@ -168,6 +169,7 @@ def test_v1_select_matches(tmp_path):
     v1 = Path(V1)
     b = v1 / "full/export_majority75/binary"
     data = DataSpec(train=str(b / "train.jsonl"),
+                    train_sha256="fe83846076cb6c72d80a048548f38edae751bb9df9865f11409992289c3515f2",
                     eval={"val_id": EvalSetSpec(str(b / "val_id.jsonl")),
                           "val_catood": EvalSetSpec(str(b / "val_catood.jsonl"))},
                     split_file=str(v1 / "train/splits.json"))
