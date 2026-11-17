@@ -35,7 +35,7 @@ gpu = [
 ojh = "harness.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["harness*"]
+include = ["harness*", "adapters*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
