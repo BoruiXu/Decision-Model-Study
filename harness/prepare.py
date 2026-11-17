@@ -9,7 +9,7 @@ import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from harness.config import ExperimentConfig, SubsetSpec, get_field
+from harness.config import ConfigError, ExperimentConfig, SubsetSpec, get_field
 
 
 class ShaMismatch(RuntimeError):
@@ -115,7 +115,12 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> Eval
         ref = None
         if spec.reference is not None:
             ref = {r["id"]: r for r in _read(data.adapter, spec.reference)}
-        assign = (assignments.get(name) or {}).get("assignment") or {}
+        if data.split_file:
+            if name not in assignments:
+                raise ConfigError(f"data.split_file has no entry for eval set {name!r}")
+            assign = assignments[name].get("assignment") or {}
+        else:  # no split file: the whole eval set is select
+            assign = {r["id"]: "select" for r in labels}
         dropped = parts.dropped.setdefault(name, [])
         unassigned = parts.dropped.setdefault("unassigned", [])
         label_ids = {r["id"] for r in labels}

@@ -56,4 +56,9 @@ data:
   split_file: <DATA>/splits.json         # 可选：{集名: {"assignment": {id: "select" | "report"}}}
 ```
 
-没有 `split_file` 时，评测集里的行不会被分到 select 或 report，所以需要选模和定阈值时必须提供它。`train_labels` 和 `reference` 按 id 关联，只用两边都有的 id，被去掉的 id 记进记录卡。
+`split_file` 的规则：
+
+- 不写 `split_file`：每个评测集的所有行都算 select（没有 report 部分，也没有未分配的行）。
+- 写了 `split_file`：每个评测集的名字都必须在里面，缺一个就报 `ConfigError` 并点名（也能发现拼错的集名）；集在文件里时，不在 `assignment` 里的 id 记入 `dropped["unassigned"]`，不参与评测。
+
+`train_labels` 和 `reference` 按 id 关联，只用两边都有的 id，被去掉的 id 记进记录卡。

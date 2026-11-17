@@ -37,7 +37,7 @@ ojh table --machine <machine.yaml>                # 把登记表渲染成对比�
 ## 配置
 
 - **机器配置**：每人每台机器一份，模板 `examples/machine.example.yaml`（每个键都有说明）。
-- **实验配置**：数据、字段、评测集、seed、卡数、`overrides`。v1 复现的例子是 `examples/dynamicserve_v1_repro.yaml`。每个评测集可以给 `train_labels`（选模算 NLL）和 `reference`（定阈值、AUC、门）两份标签。
+- **实验配置**：数据、字段、评测集、seed、卡数、`overrides`。v1 复现的例子是 `examples/dynamicserve_v1_repro.yaml`。`data.split_file`（可选）把评测集的行分成 select 和 report：不写则所有行都算 select；写了则每个评测集都必须在其中，缺失会报错，集内未分配的 id 被丢弃并记录。每个评测集可以给 `train_labels`（选模算 NLL）和 `reference`（定阈值、AUC、门）两份标签。
 - **配方**：`examples/recipes/*.yaml`（`elephant_full_fsdp`、`joey_full_1gpu`、`joey_lora_1gpu`、`mammoth_lora_ddp`），必须显式写 `mode: full` 或 `mode: lora`。它们是示例，不是默认值；LoRA 配方的超参没有实测。
 - **lock**：`run.lock.yaml` 写下全部设置（训练方式、完整命令行参数、数据 sha256、基座和 OneJev 的 revision、环境指纹、评测器配置、`overrides` 及原因），执行时只读它。偏离配方只能写 `overrides: {键: {value: ..., reason: ...}}`，每项必须写原因。
 

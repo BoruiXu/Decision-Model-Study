@@ -179,3 +179,27 @@ def test_v1_select_matches(tmp_path):
     assert {r["id"] for r in parts.select_rows} == want and len(want) == 380
     info = prepare(exp, tmp_path / "p", allow_test=False)
     assert info["train_sha256_source"].startswith("fe83846076cb6c72")
+
+
+def test_no_split_file_all_select(tmp_path):
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a"), row("b")], None)})
+    p = build_eval_parts(exp)
+    assert [r["id"] for r in p.select_rows] == ["a", "b"]
+    assert p.select_index == {"a": "val", "b": "val"}
+    assert p.report_ids.get("val", []) == []
+    assert not p.dropped.get("unassigned")
+
+
+def test_split_file_missing_set_raises(tmp_path):
+    from harness.config import ConfigError
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a")], None), "other": ([row("b")], None)},
+                   {"val": {"a": "select"}})
+    with pytest.raises(ConfigError, match="other"):
+        build_eval_parts(exp)
+
+
+def test_split_file_present_set_unassigned_dropped(tmp_path):
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a"), row("z")], None)}, {"val": {"a": "select"}})
+    p = build_eval_parts(exp)
+    assert [r["id"] for r in p.select_rows] == ["a"]
+    assert p.dropped["unassigned"] == ["z"]
