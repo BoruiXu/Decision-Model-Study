@@ -155,3 +155,13 @@ def test_check_writable(tmp_path):
         with pytest.raises(ConfigError) as e:
             check_writable(m, tmp_path / "ok", bad)
         assert str(ro) in str(e.value) and str(bad) in str(e.value)
+
+
+def test_machine_env_values_are_strings(tmp_path):
+    m = load_machine(_write(tmp_path, "m.yaml", {"python": "py", "model_dir": "/m", "out_root": "/o",
+                                                 "env": {"A": 1, "B": 1.5, "C": True, "D": False, "E": "x"}}))
+    assert m.env == {"A": "1", "B": "1.5", "C": "true", "D": "false", "E": "x"}
+    for bad in ({"A": {"x": 1}}, {"A": [1, 2]}, {"A": None}, ["A=1"]):
+        with pytest.raises(ConfigError, match="env"):
+            load_machine(_write(tmp_path, "m.yaml", {"python": "py", "model_dir": "/m", "out_root": "/o",
+                                                     "env": bad}))

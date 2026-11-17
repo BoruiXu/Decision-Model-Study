@@ -155,6 +155,24 @@ def _config_dir(path) -> Path:
     return Path(os.path.abspath(path)).parent
 
 
+def _env(raw) -> dict[str, str]:
+    """Process environment values must be strings: scalars are converted, anything nested is refused."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("env must be a mapping of NAME: value")
+    out = {}
+    for k, v in raw.items():
+        if isinstance(v, bool):
+            v = "true" if v else "false"
+        elif isinstance(v, (int, float)):
+            v = str(v)
+        elif not isinstance(v, str):
+            raise ConfigError(f"env.{k} must be a string, number or boolean (got {type(v).__name__})")
+        out[str(k)] = v
+    return out
+
+
 def load_machine(path) -> MachineConfig:
     d = _load_yaml(path)
     for k in ("python", "model_dir", "out_root"):
@@ -172,6 +190,7 @@ def load_machine(path) -> MachineConfig:
     if not isinstance(roots, list):
         raise ConfigError("forbidden_write_roots must be a list of paths")
     d["forbidden_write_roots"] = [_abs(r, base) for r in roots]
+    d["env"] = _env(d.get("env"))
     return MachineConfig(**d)
 
 

@@ -33,7 +33,11 @@ _RESERVED_FLAGS = {"full_finetune": "mode", "fsdp": "fsdp", "attention": "the ba
                    "eval_every": "the plan-only interval", "save_every": "the plan-only interval",
                    "eval_at_start": "the harness", "seed": "seeds", "name": "the experiment name",
                    "train": "the prepared data", "model": "the base", "eval": "the prepared data",
-                   "runs_dir": "the run directory"}
+                   "runs_dir": "the run directory", "config": "the lock (a OneJev --config file could set any flag)",
+                   "plan_only": "resolve", "device": "the leased cards", "merge": "the experiment's merge key",
+                   "merged_dir": "the experiment's merge key", "worst_case": "the harness",
+                   "dump_first_grad": "the harness", "eval_limit": "the prepared data",
+                   "dist_backend": "the harness"}
 
 
 def _check_reserved(flags: dict, where: str) -> None:
@@ -161,7 +165,8 @@ def _default_plan_runner(lock: dict) -> str:
         + ["--plan-only"]
     env = {**os.environ, **m["env"], "PLAN_WORLD": str(lock["n_gpus"]),
            "PYTHONPATH": str(Path(lock["repo_root"]) / "vendor" / "OneJev")}
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    # cwd: the repo, so a train/ package in the caller's directory cannot shadow OneJev's
+    proc = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=lock["repo_root"])
     if proc.returncode:
         raise RuntimeError(f"plan-only failed ({proc.returncode}):\n{(proc.stdout + proc.stderr)[-1500:]}")
     return proc.stdout
@@ -267,6 +272,12 @@ def _sha(path: Path) -> str:
     return sha256_file(path)
 
 
+def _source_sha(path, what: str) -> str:
+    if not Path(path).is_file():
+        raise ConfigError(f"{what} not found: {path}")
+    return sha256_file(path)
+
+
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
             fingerprint=None, now: dt.datetime | None = None) -> Path:
     out_root = Path(machine.out_root)
@@ -280,6 +291,8 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         raise ConfigError("lora.* override on a full recipe would have no effect; set mode: lora first")
     if mode not in ("full", "lora"):
         raise ConfigError(f"recipe {exp.recipe}: 'mode' is required and must be full or lora (got {mode!r})")
+    if exp.merge and mode != "lora":
+        raise ConfigError("merge: true merges a LoRA adapter into its base; it has no effect with mode: full")
     n = recipe.get("gpus")
     if not isinstance(n, int) or isinstance(n, bool) or n < 1:
         raise ConfigError("gpus must be a positive integer (recipe or experiment)")
@@ -296,7 +309,14 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     data = {"prepared_dir": str(prepared), "source": exp.data.train, "adapter": exp.data.adapter,
             "sha256": {f: _sha(prepared / f) for f in DATA_FILES},
             "source_sha256": info["train_sha256_source"], "subset": info.get("subset"),
-            "counts": info.get("counts")}
+            "counts": info.get("counts"),
+            # the label and split files finalize and eval-report read again (design section 8)
+            "eval_sha256": {name: {"train_labels": _source_sha(s.train_labels, f"data.eval.{name}.train_labels"),
+                                   "reference": None if s.reference is None
+                                   else _source_sha(s.reference, f"data.eval.{name}.reference")}
+                            for name, s in exp.data.eval.items()},
+            "split_file_sha256": None if exp.data.split_file is None
+            else _source_sha(exp.data.split_file, "data.split_file")}
     for f in ("train", "select", "select_index"):
         data[f] = str(prepared / (f + (".json" if f == "select_index" else ".jsonl")))
 

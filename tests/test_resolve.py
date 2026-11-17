@@ -39,10 +39,14 @@ def setup(tmp_path, base="elephant-1", recipe="elephant_full_fsdp", n_gpus_free=
         "subset": None, "counts": {}, "dropped": {}}))
     machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"),
                             out_root=str(out), env={"HF_HUB_OFFLINE": "1"})
+    d = tmp_path / "d"
+    d.mkdir()
+    for name in ("train.jsonl", "val.jsonl", "val_ref.jsonl", "splits.json"):
+        (d / name).write_text(f"{name}\n")
     exp = ExperimentConfig(
         name="exp", base=base, recipe=str(RECIPES / f"{recipe}.yaml"),
-        data=DataSpec(train="/d/train.jsonl",
-                      eval={"val": EvalSetSpec(train_labels="/d/val.jsonl")}, split_file="/d/splits.json"),
+        data=DataSpec(train=str(d / "train.jsonl"),
+                      eval={"val": EvalSetSpec(train_labels=str(d / "val.jsonl"))}, split_file=str(d / "splits.json")),
         fields=FieldsSpec(label="meta.f"), **kw)
     return exp, machine
 
@@ -151,7 +155,7 @@ def test_override_applied_and_recorded(tmp_path):
 
 
 def test_lock_has_all_fields(tmp_path):
-    exp, machine = setup(tmp_path, seeds=[42, 7], merge=True)
+    exp, machine = setup(tmp_path, seeds=[42, 7])
     path = run(exp, machine)
     assert path.name == "run.lock.yaml" and path.parent.parent == Path(machine.out_root) / "exp"
     lock = yaml.safe_load(path.read_text())
@@ -160,14 +164,14 @@ def test_lock_has_all_fields(tmp_path):
               "evaluator", "merge", "base", "onejev", "fingerprint", "overrides", "estimate_gib"):
         assert k in lock, k
     assert lock["mode"] == "full" and lock["parallel"] == "fsdp" and lock["n_gpus"] == 4
-    assert lock["seeds"] == [42, 7] and lock["merge"] is True
+    assert lock["seeds"] == [42, 7] and lock["merge"] is False
     assert lock["plan"] == {"steps": 176, "ranks": 4, "interval": 22}
     assert lock["flags"]["eval_every"] == 22 and lock["flags"]["save_every"] == 22
     assert lock["data"]["sha256"]["train.jsonl"] and lock["base"]["revision"]
     assert lock["data"]["adapter"] == "onejev_rows"
     assert lock["onejev"]["patch"]["sha256"] and lock["fingerprint"]["driver_version"] == "570.00"
     assert lock["machine"]["python"] == "/venv/bin/python"
-    assert lock["eval_sets"] == {"val": {"train_labels": "/d/val.jsonl", "reference": None}}
+    assert lock["eval_sets"] == {"val": {"train_labels": str(tmp_path / "d" / "val.jsonl"), "reference": None}}
     assert lock["run_id"] in str(path)
     cmd = build_command(lock, 7)
     assert cmd[cmd.index("--name") + 1] == "exp-s7" and cmd[cmd.index("--seed") + 1] == "7"
@@ -253,7 +257,10 @@ def test_reserved_flag_in_recipe_rejected(tmp_path):
         run(exp, machine)
 
 
-@pytest.mark.parametrize("key", ["onejev.eval_every", "onejev.fsdp", "onejev.full_finetune", "onejev.seed"])
+@pytest.mark.parametrize("key", ["onejev.eval_every", "onejev.fsdp", "onejev.full_finetune", "onejev.seed",
+                                 "onejev.config", "onejev.plan_only", "onejev.device", "onejev.merge",
+                                 "onejev.merged_dir", "onejev.worst_case", "onejev.dump_first_grad",
+                                 "onejev.eval_limit", "onejev.dist_backend"])
 def test_reserved_override_rejected(tmp_path, key):
     exp, machine = setup(tmp_path, overrides={key: {"value": 5, "reason": "x"}})
     with pytest.raises(ConfigError, match="set by the harness"):
@@ -311,3 +318,51 @@ def test_resolve_refuses_forbidden_write_roots(tmp_path, what):
     with pytest.raises(ConfigError, match="forbidden_write_roots"):
         run(exp, machine)
     assert not [p for p in (tmp_path / "out" / "exp").iterdir() if p.name != "prepared"]
+
+
+def _sha(path):
+    import hashlib
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def test_lock_records_eval_and_split_sha256(tmp_path):
+    exp, machine = setup(tmp_path)
+    d = tmp_path / "d"
+    exp.data.eval["ood"] = EvalSetSpec(train_labels=str(d / "val.jsonl"), reference=str(d / "val_ref.jsonl"))
+    lock = yaml.safe_load(run(exp, machine).read_text())
+    assert lock["data"]["eval_sha256"] == {
+        "val": {"train_labels": _sha(d / "val.jsonl"), "reference": None},
+        "ood": {"train_labels": _sha(d / "val.jsonl"), "reference": _sha(d / "val_ref.jsonl")}}
+    assert lock["data"]["split_file_sha256"] == _sha(d / "splits.json")
+    exp.data.split_file = None
+    assert yaml.safe_load(run(exp, machine).read_text())["data"]["split_file_sha256"] is None
+    (d / "val_ref.jsonl").unlink()
+    with pytest.raises(ConfigError, match="val_ref.jsonl"):
+        run(exp, machine)
+
+
+def test_merge_with_full_mode_rejected(tmp_path):
+    exp, machine = setup(tmp_path, merge=True)
+    with pytest.raises(ConfigError, match="merge"):
+        run(exp, machine)
+    exp, machine = setup(tmp_path / "lora", base="joey-1", recipe="joey_lora_1gpu", merge=True)
+    lock = yaml.safe_load(resolve(exp, machine, query=lambda uuid=None: smi(1), plan_runner=plan_ok(80, 1),
+                                  fingerprint=fake_fp).read_text())
+    assert lock["merge"] is True and lock["mode"] == "lora"
+
+
+def test_plan_only_runs_in_the_repo(tmp_path, monkeypatch):
+    import subprocess
+    from harness import resolve as resolve_mod
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw, cmd=cmd)
+        return subprocess.CompletedProcess(cmd, 0, "PLAN_OK\n8 steps for 1 ranks\n", "")
+    monkeypatch.setattr(resolve_mod.subprocess, "run", fake_run)
+    monkeypatch.chdir(tmp_path)  # a local train/ package here must not shadow OneJev's
+    lock = {"machine": {"python": "/venv/bin/python", "env": {}, "model_dir": "/m"}, "n_gpus": 1,
+            "repo_root": "/repo", "flags": {}, "seeds": [1], "experiment": "e", "run_dir": "/r",
+            "base": {"name": "b"}, "data": {"select": "/s", "train": "/t"}}
+    resolve_mod._default_plan_runner(lock)
+    assert seen["cwd"] == "/repo" and seen["cmd"][1:3] == ["-m", "train.sft"]

@@ -67,6 +67,9 @@ def test_examples_resolve(tmp_path, recipe, monkeypatch):
     machine = load_machine(fill(EXAMPLES / "machine.example.yaml", tmp_path / "m.yaml", tmp_path))
     exp = load_experiment(fill(EXAMPLES / "dynamicserve_v1_repro.yaml", tmp_path / "e.yaml", tmp_path))
     prepared(Path(machine.out_root), exp.name)
+    for p in [s.train_labels for s in exp.data.eval.values()] + [exp.data.split_file]:  # hashed into the lock
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_text("{}\n")
     if recipe.stem != "elephant_full_fsdp":
         exp.recipe, exp.base, exp.gpus = str(recipe), BASE_OF[recipe.stem], None
     n = exp.gpus or yaml.safe_load(recipe.read_text())["gpus"]
