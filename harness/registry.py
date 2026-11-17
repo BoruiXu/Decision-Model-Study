@@ -1,8 +1,10 @@
 """Run registry: one JSON line per finalized seed, plus a summary line for multi-seed runs.
 
-Writers hold an exclusive ``fcntl`` lock on ``<path>.lock``; readers hold a shared one. A record is
-``complete`` only when every REQUIRED field is present and non-empty; ``conclusion`` starts empty, so a
-new record stays incomplete (and hidden from ``table``) until ``note`` fills it. Imports without torch.
+Records are keyed by (run_id, seed): ``append`` is an upsert, so re-running finalize replaces a run's
+records instead of duplicating them. Writers hold an exclusive ``fcntl`` lock on ``<path>.lock``; readers
+hold a shared one. A record is ``complete`` only when every REQUIRED field is present and non-empty;
+``conclusion`` starts empty, so a new record stays incomplete (and hidden from ``table``) until ``note``
+fills it. Imports without torch.
 """
 from __future__ import annotations
 
@@ -51,11 +53,48 @@ def read(path) -> list[dict]:
         return _read(path)
 
 
+def _key(record: dict) -> tuple:
+    return record.get("run_id"), record.get("seed")
+
+
+def _rewrite(path: Path, records: list[dict]) -> None:
+    """Replace the registry atomically (temp file in the same dir + os.replace), keeping its file mode."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
 def append(path, record: dict) -> dict:
-    """Set ``record["complete"]`` and append it as one line under the registry lock."""
-    record["complete"] = is_complete(record)
-    data = (json.dumps(record, ensure_ascii=False) + "\n").encode()
+    """Upsert ``record`` keyed by (run_id, seed) under the registry lock and set ``record["complete"]``.
+
+    A new key is appended as one line. An existing key (a re-run of finalize, the ``seed: "summary"``
+    record included) is replaced in place by an atomic rewrite; an empty new ``conclusion`` keeps the
+    existing one, so re-finalizing never erases a note.
+    """
+    path = Path(path)
     with _locked(path):
+        records = _read(path)
+        hits = [i for i, r in enumerate(records) if _key(r) == _key(record)]
+        if hits:
+            old = str(records[hits[0]].get("conclusion") or "")
+            if not str(record.get("conclusion") or "").strip() and old.strip():
+                record["conclusion"] = old
+        record["complete"] = is_complete(record)
+        if hits:
+            records[hits[0]] = record
+            _rewrite(path, [r for i, r in enumerate(records) if i not in hits[1:]])
+            return record
+        data = (json.dumps(record, ensure_ascii=False) + "\n").encode()
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o664)
         try:
             view = memoryview(data)
@@ -79,18 +118,7 @@ def note(path, run_id: str, text: str) -> int:
                 rec["complete"] = is_complete(rec)
                 n += 1
         if n:
-            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))
-                os.replace(tmp, path)
-            except BaseException:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(tmp)
-                raise
+            _rewrite(path, records)
     return n
 
 

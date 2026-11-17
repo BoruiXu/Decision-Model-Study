@@ -403,3 +403,18 @@ def test_finalize_without_eval_events_fails(tmp_path):
     cands = json.loads((run_dir / "deletion_candidates.json").read_text())
     assert cands["candidates"] == []  # an unverified seed offers no checkpoint for deletion
     assert (run_dir / "RUN_CARD.md").is_file()
+
+
+def test_refinalize_upserts_registry_and_keeps_note(tmp_path):
+    run_dir, lock = make_run(tmp_path, seeds=(42, 7))
+    reg = registry_path(lock)
+    finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert [r["seed"] for r in registry.read(reg)] == [42, 7, "summary"]
+    finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert [r["seed"] for r in registry.read(reg)] == [42, 7, "summary"]  # one record per seed
+    assert registry.note(reg, lock["run_id"], "beats both baselines on a and b") == 3
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    recs = registry.read(reg)
+    assert [r["seed"] for r in recs] == [42, 7, "summary"] and out["status"] == "done"
+    assert all(r["conclusion"] == "beats both baselines on a and b" and r["complete"] for r in recs)
+    assert lock["run_id"] in registry.table(reg)

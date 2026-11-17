@@ -42,6 +42,28 @@ def test_registry_incomplete_hidden(tmp_path):
     assert "run-open" in registry.table(path)
 
 
+def test_registry_upsert_by_run_and_seed(tmp_path):
+    path = tmp_path / "registry.jsonl"
+    registry.append(path, record("r1", seed=42, conclusion=""))
+    registry.append(path, record("r1", seed=7, conclusion=""))
+    registry.append(path, record("r1", seed="summary", conclusion=""))
+    assert registry.note(path, "r1", "noted by the agent") == 3
+    # re-finalize: same (run_id, seed) keys, empty conclusions, new metrics
+    registry.append(path, record("r1", seed=42, conclusion="", metrics={"auc": 0.8}))
+    registry.append(path, record("r1", seed="summary", conclusion="", metrics={"auc": {"mean": 0.8, "std": 0.0}}))
+    registry.append(path, record("r2", seed=42, conclusion=""))
+    recs = registry.read(path)
+    assert [(r["run_id"], r["seed"]) for r in recs] == [("r1", 42), ("r1", 7), ("r1", "summary"), ("r2", 42)]
+    assert recs[0]["metrics"] == {"auc": 0.8} and recs[0]["conclusion"] == "noted by the agent"
+    assert recs[0]["complete"] is True and recs[2]["conclusion"] == "noted by the agent"
+    assert recs[2]["metrics"]["auc"]["mean"] == 0.8 and recs[3]["complete"] is False
+    # a non-empty new conclusion wins
+    registry.append(path, record("r1", seed=7, conclusion="rewritten"))
+    assert registry.read(path)[1]["conclusion"] == "rewritten"
+    assert len(path.read_text().splitlines()) == 4
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_registry_summary_rendered(tmp_path):
     path = tmp_path / "registry.jsonl"
     registry.append(path, record("r", seed="summary", selected_step=[8, 12],
@@ -55,7 +77,7 @@ import sys
 from harness import registry
 path, tag = sys.argv[1], sys.argv[2]
 for i in range(60):
-    registry.append(path, {"run_id": tag, "i": i, "pad": "x" * 100_000})
+    registry.append(path, {"run_id": tag, "seed": i, "i": i, "pad": "x" * 20_000})
 """
 
 
