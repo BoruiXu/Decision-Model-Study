@@ -21,11 +21,10 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from harness.config import get_field
 from harness.eval_records import nll
-from harness.evaluator.binary_decision import POOLED
+from harness.evaluator.binary_decision import POOLED, TRAIN_DROPPED
+from harness.evaluator.labels import baseline_examples
 from harness.evaluator.metrics import auc, within_group_auc
-from harness.evaluator.text import text_of
 
 
 def load_plugin(path: str) -> ModuleType:
@@ -68,38 +67,17 @@ def default_acceptance(preds: dict, rows: list[dict]) -> dict:
     return {"n": n, "nll": nll(recs), "accuracy": correct / n, "ece": ece}
 
 
-def _num(row, path):
-    try:
-        v = get_field(row, path)
-    except KeyError:
-        return None
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
-
-
 class DefaultBaselines:
-    """TF-IDF and group prior scored against ``fields.label`` (rows without a numeric label are skipped)."""
+    """TF-IDF and group prior scored against ``fields.label`` (unlabeled rows are skipped; skipped train rows
+    are kept in ``skipped``)."""
 
     def __init__(self, train_rows, fields):
         self.fields = fields
-        self.train = self._examples(train_rows)
+        self.train, self.skipped = baseline_examples(train_rows, fields)
         self._tfidf = None
 
     def _examples(self, rows):
-        f, out = self.fields, []
-        for row in rows:
-            rate = _num(row, f.label)
-            if rate is None:
-                continue
-            ex = {"id": row["id"], "rate": rate}
-            if f.group:
-                try:
-                    ex["group"] = get_field(row, f.group)
-                except KeyError:
-                    continue
-            if f.text:
-                ex["text"] = text_of(row, f.text)
-            out.append(ex)
-        return out
+        return baseline_examples(rows, self.fields)[0]
 
     def _metrics(self, examples, scores):
         rates = [e["rate"] for e in examples]
@@ -151,4 +129,6 @@ def evaluate_plugin(module: ModuleType, preds: dict, parts, train_rows: list[dic
     thresholds = (calibrate(preds, parts.select_rows) or {}) if calibrate else {}
     decided = [v for v in verdicts if v is not None]
     gate["passed"] = (all(decided) if decided else None) if evaluator_cfg.gate else None
-    return {"sets": sets, "thresholds": thresholds, "gate": gate, "dropped": {}}
+    skipped = baselines.skipped if isinstance(baselines, DefaultBaselines) else []  # a plugin hook owns its own
+    return {"sets": sets, "thresholds": thresholds, "gate": gate,
+            "dropped": {TRAIN_DROPPED: skipped} if skipped else {}}

@@ -9,20 +9,13 @@ import statistics
 
 from harness.baselines.tfidf import TextBaseline, group_prior
 from harness.config import get_field
+from harness.evaluator.labels import baseline_examples, label_value, num
 from harness.evaluator.metrics import (at_threshold, auc, budget_threshold, ece, fit_threshold,
                                        max_share_at_budget, within_group_auc)
 from harness.evaluator.text import text_of
 
 POOLED = "pooled_select"
-
-
-def _num(row, path):
-    """Numeric field value, or None when absent or not a number."""
-    try:
-        v = get_field(row, path)
-    except KeyError:
-        return None
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+TRAIN_DROPPED = "baseline_train"  # key in ``dropped`` for train rows the baselines could not use
 
 
 def _pct(b) -> int:
@@ -68,8 +61,8 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     for row in parts.select_rows:
         rid = row["id"]
         ref = parts.reference.get(rid, row)
-        rate = _num(ref, fields.label)
-        f = _num(ref, fields.consistency) if has_f else None
+        rate = label_value(ref, fields.label)
+        f = num(ref, fields.consistency) if has_f else None
         group = None
         if has_group:
             try:
@@ -90,20 +83,9 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
             ex["text"] = text_of(row, fields.text)
         examples.append(ex)
 
-    train = []
-    for row in train_rows:
-        rate = _num(row, fields.label)
-        if rate is None:
-            continue
-        ex = {"id": row["id"], "rate": rate}
-        if has_group:
-            try:
-                ex["group"] = get_field(row, fields.group)
-            except KeyError:
-                continue
-        if fields.text:
-            ex["text"] = text_of(row, fields.text)
-        train.append(ex)
+    train, skipped = baseline_examples(train_rows, fields)
+    if skipped:
+        dropped[TRAIN_DROPPED] = skipped
 
     model = TextBaseline(train) if fields.text and train else None
     train_groups = {t["group"] for t in train} if has_group else set()

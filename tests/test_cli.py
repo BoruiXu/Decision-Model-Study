@@ -180,3 +180,14 @@ def test_cleanup_symlinks_and_protected_paths(tmp_path):
     assert (keep / "w.bin").exists() and (outside / "w.bin").exists()
     assert (run_dir / "run.lock.yaml").exists() and (run_dir / "runs").is_dir()
     assert len(skipped) == 3 and all(c["reason"] for c in skipped)
+
+
+def test_report_eval_keeps_hard_negatives(tmp_path):
+    run_dir, lock = _locked(tmp_path)
+    path = Path(lock["eval_sets"]["a"]["train_labels"])
+    rows = read_jsonl(path)
+    assert rows[1]["id"] == "a1"  # a report row
+    rows[1]["target"] = {"no": 1.0}
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    out = report_eval.run(run_dir, allow_report=True, scorer=fake_scorer([]))
+    assert out["dropped"] == {} and out["sets"]["pooled_report"]["questions"] == 30

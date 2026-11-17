@@ -60,8 +60,9 @@ def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evalua
         assign[name] = {"assignment": {r["id"]: ("select" if i % 2 == 0 else "report") for i, r in enumerate(rows)}}
         if drop and name == "a":  # a1 gets no assignment
             del assign[name]["assignment"]["a1"]
-        if drop and name == "b":  # the reference lacks b2, and b4's reference has no positive label
-            ref = [dict(r, target={"no": 1.0}) if r["id"] == "b4" else r for r in rows if r["id"] != "b2"]
+        if drop and name == "b":  # the reference lacks b2, b4's reference has no group, b6 is a hard negative
+            ref = [dict(r, meta={k: v for k, v in r["meta"].items() if k != "cat"}) if r["id"] == "b4"
+                   else dict(r, target={"no": 1.0}) if r["id"] == "b6" else r for r in rows if r["id"] != "b2"]
             evals[name].reference = write_jsonl(src / "b_ref.jsonl", ref)
     split = src / "splits.json"
     split.write_text(json.dumps(assign))
@@ -475,7 +476,7 @@ def test_finalize_records_dropped_ids(tmp_path):
     assert out["status"] == "done", out["failures"]
     dropped = json.loads((run_dir / "dropped.json").read_text())
     assert dropped["eval_parts"] == {"a": [], "unassigned": ["a1"], "b": ["b2"]}
-    assert dropped["evaluate"] == {"42": {"b": ["b4"]}}
+    assert dropped["evaluate"] == {"42": {"b": ["b4"]}}  # b6 ({"no": 1.0}) is a negative, not unlabeled
     card = (run_dir / "RUN_CARD.md").read_text()
     section = card.split("## 被去掉的 id", 1)[1].split("\n## ", 1)[0]
     for s in ("unassigned：1", "a1", "b2", "b4", "dropped.json"):

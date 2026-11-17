@@ -14,6 +14,7 @@ import yaml
 
 from harness import run_files
 from harness.config import get_field
+from harness.evaluator.labels import label_value, num
 from harness.evaluator.metrics import at_threshold, auc, ece, within_group_auc
 from harness.finalize import _gpu_env, exp_from_lock, score_kwargs
 from harness.prepare import _read, build_eval_parts
@@ -24,14 +25,6 @@ POOLED = "pooled_report"
 
 class ReportRefused(RuntimeError):
     """Report halves are read only with --allow-report."""
-
-
-def _num(row, path):
-    try:
-        v = get_field(row, path)
-    except KeyError:
-        return None
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def _metrics(ex: list[dict], thresholds: dict, *, group: bool, cons: bool) -> dict:
@@ -93,8 +86,8 @@ def run(run_dir, *, allow_report: bool, seed=None, allow_test: bool = False, sco
     for r in rows:
         rid = r["id"]
         ref = parts.reference.get(rid, r)
-        rate = _num(ref, fields.label)
-        f = _num(ref, fields.consistency) if has_f else None
+        rate = label_value(ref, fields.label)
+        f = num(ref, fields.consistency) if has_f else None
         try:
             group = get_field(ref, fields.group) if has_group else None
         except KeyError:

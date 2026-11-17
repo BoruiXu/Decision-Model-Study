@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from harness.catalog import sha256_file
-from harness.evaluator.binary_decision import POOLED
+from harness.evaluator.binary_decision import POOLED, TRAIN_DROPPED
 
 
 def write_json(path: Path, obj) -> None:
@@ -177,7 +177,10 @@ def _dropped_lines(dropped: dict) -> list[str]:
         add(key, ids)
     for seed, per_set in (dropped.get("evaluate") or {}).items():
         for key, ids in per_set.items():
-            add(f"评测时缺标签（seed {seed}）· {key}", ids)
+            if key == TRAIN_DROPPED:
+                add(f"基线训练行缺标签或分组（seed {seed}）", ids)
+            else:
+                add(f"评测时缺标签（seed {seed}）· {key}", ids)
     return out + ["- 完整列表见 dropped.json"]
 
 

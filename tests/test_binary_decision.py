@@ -81,7 +81,7 @@ def test_gate_off_reports_but_does_not_decide():
 
 def test_unlabeled_rows_dropped_and_counted():
     preds, parts, train, fields = setup()
-    del parts.reference["r3"]["target"]["yes"]
+    del parts.reference["r3"]["target"]  # no target at all (a missing key alone is a 0, see below)
     del parts.reference["r4"]["meta"]["f"]
     out = evaluate(preds, parts, train, fields, EvaluatorSpec())
     assert sorted(i for v in out["dropped"].values() for i in v) == ["r3", "r4"]
@@ -128,3 +128,49 @@ def test_matches_v1_gate():
     assert t["budget_10"]["threshold"] == pytest.approx(0.75491, abs=1e-5)
     assert t["budget_15"]["threshold"] == pytest.approx(0.43782, abs=1e-5)
     assert t["best_jaccard"]["threshold"] == pytest.approx(0.33459, abs=1e-5)
+
+
+def test_hard_negative_missing_positive_key_reads_zero():
+    import statistics
+    preds, parts, train, fields = setup()
+    parts.reference["r3"]["target"] = {"no": 1.0}  # prepare accepts a subset of labels; OneJev fills 0
+    train[0]["target"] = {"no": 1.0}
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert out["dropped"] == {}
+    pooled = out["sets"]["pooled_select"]
+    assert pooled["questions"] == 40
+    rates = [0.0 if r["id"] == "r3" else r["target"]["yes"] for r in parts.select_rows]
+    assert pooled["positive_rate"] == pytest.approx(statistics.fmean(rates))
+
+
+def test_label_outside_target_missing_is_unlabeled():
+    preds, parts, train, fields = setup(label="meta.rate")
+    for r in parts.select_rows + train:
+        r["meta"]["rate"] = r["target"]["yes"]
+    del parts.reference["r3"]["meta"]["rate"]
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert out["dropped"] == {parts.select_index["r3"]: ["r3"]}
+    assert out["sets"]["pooled_select"]["questions"] == 39
+
+
+def test_skipped_train_rows_counted():
+    preds, parts, train, fields = setup()
+    del train[0]["meta"]["cat"]  # no group
+    del train[2]["target"]  # no target dict: unlabeled
+    train[1]["target"] = {"no": 1.0}  # a hard negative is kept
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert out["dropped"] == {"baseline_train": ["rt0", "rt2"]}
+
+
+def test_plugin_default_baselines_share_label_rules():
+    import types
+    from harness.plugins import evaluate_plugin
+    preds, parts, train, fields = setup()
+    recs = {rid: {"id": rid, "labels": ["yes", "no"], "probs": [p, 1 - p], "target": [p, 1 - p]}
+            for rid, p in preds.items()}
+    parts.select_rows[3]["target"] = {"no": 1.0}
+    del train[0]["meta"]["cat"]
+    train[1]["target"] = {"no": 1.0}
+    out = evaluate_plugin(types.ModuleType("empty"), recs, parts, train, fields, EvaluatorSpec())
+    assert out["dropped"] == {"baseline_train": ["rt0"]}
+    assert {"tfidf", "group_prior"} <= set(out["sets"]["pooled_select"])
