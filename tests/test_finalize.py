@@ -48,14 +48,19 @@ def read_jsonl(path):
 
 
 def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evaluator=None, overrides=None,
-             drop=False):
+             drop=False, allow_test=False, extra_split=False):
     rng = random.Random(0)
     src = tmp_path / "src"
     src.mkdir()
-    train = write_jsonl(src / "train.jsonl", [mk(f"t{i}", rng, "train", f"g{i % 3}") for i in range(80)])
+    train_rows = [mk(f"t{i}", rng, "train", f"g{i % 3}") for i in range(80)]
+    if extra_split:  # rows OneJev skips (--split train)
+        x_rng = random.Random(1)
+        train_rows += [mk(f"x{i}", x_rng, "other", "g3") for i in range(6)]
+    train = write_jsonl(src / "train.jsonl", train_rows)
     evals, assign = {}, {}
     for name in ("a", "b"):
-        rows = [mk(f"{name}{i}", rng, "val", f"g{i % 4}") for i in range(30)]
+        rows = [mk(f"{name}{i}", rng, "test_id" if allow_test and name == "a" else "val", f"g{i % 4}")
+                for i in range(30)]
         evals[name] = EvalSetSpec(train_labels=write_jsonl(src / f"{name}.jsonl", rows))
         assign[name] = {"assignment": {r["id"]: ("select" if i % 2 == 0 else "report") for i, r in enumerate(rows)}}
         if drop and name == "a":  # a1 gets no assignment
@@ -72,7 +77,7 @@ def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evalua
         fields=FieldsSpec(label="target.yes", group="meta.cat", consistency="meta.f", text="messages"),
         evaluator=evaluator or EvaluatorSpec(), seeds=list(seeds), merge=merge, overrides=overrides or {})
     out = tmp_path / "out"
-    prepare(exp, out / "exp" / "prepared")
+    prepare(exp, out / "exp" / "prepared", allow_test=allow_test)
     machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"), out_root=str(out))
     lock_path = resolve(exp, machine, query=lambda uuid=None: "0, GPU-0, NVIDIA A100-SXM4-80GB, 81920\n",
                         plan_runner=lambda lock: "PLAN_OK\n32 steps for 1 ranks\n",
@@ -481,3 +486,33 @@ def test_finalize_records_dropped_ids(tmp_path):
     section = card.split("## 被去掉的 id", 1)[1].split("\n## ", 1)[0]
     for s in ("unassigned：1", "a1", "b2", "b4", "dropped.json"):
         assert s in section, s
+
+
+def test_allow_test_carried_through_finalize(tmp_path):
+    run_dir, lock = make_run(tmp_path, allow_test=True)
+    assert lock["allow_test"] is True
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert out["status"] == "done", out["failures"]
+    (rec,) = registry.read(registry_path(lock))
+    assert rec["allow_test"] is True
+    assert "test 部分：已读" in (run_dir / "RUN_CARD.md").read_text()
+
+
+def test_allow_test_off_recorded(tmp_path):
+    run_dir, lock = make_run(tmp_path)
+    assert lock["allow_test"] is False
+    finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert registry.read(registry_path(lock))[0]["allow_test"] is False
+    assert "test 部分：未读" in (run_dir / "RUN_CARD.md").read_text()
+
+
+def test_baselines_train_on_the_recipe_split_only(tmp_path):
+    plugin = tmp_path / "count_plugin.py"
+    plugin.write_text("def baselines(train_rows, eval_rows):\n"
+                      "    return {'seen': {'n': len(train_rows), 'splits': sorted({r['split'] for r in train_rows})}}\n")
+    run_dir, lock = make_run(tmp_path, extra_split=True, evaluator=EvaluatorSpec(type="plugin", path=str(plugin)))
+    assert lock["flags"]["split"] == "train" and lock["data"]["counts"]["train"] == 86
+    out = finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
+    assert out["status"] == "done", out["failures"]
+    pooled = json.loads((run_dir / "comparison.json").read_text())["42"]["sets"]["pooled_select"]
+    assert pooled["seen"] == {"n": 80, "splits": ["train"]}  # OneJev's --split train skipped the 6 others

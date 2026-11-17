@@ -203,3 +203,21 @@ def test_split_file_present_set_unassigned_dropped(tmp_path):
     p = build_eval_parts(exp)
     assert [r["id"] for r in p.select_rows] == ["a"]
     assert p.dropped["unassigned"] == ["z"]
+
+
+@pytest.mark.filterwarnings("ignore:data.train_sha256 not set")
+def test_test_rows_in_train_refused(tmp_path):
+    exp = make_exp(tmp_path, [row("t1"), row("t2", split="test_catood")], {"val": ([row("a", split="val")], None)},
+                   {"val": {"a": "select"}})
+    with pytest.raises(TestSplitRefused, match="t2"):
+        prepare(exp, tmp_path / "out")
+    assert not (tmp_path / "out" / "train.jsonl").exists()
+    info = prepare(exp, tmp_path / "out", allow_test=True)
+    assert info["allow_test"] is True and info["counts"]["train"] == 2
+
+
+@pytest.mark.filterwarnings("ignore:data.train_sha256 not set")
+def test_prepared_json_records_allow_test(tmp_path):
+    exp = make_exp(tmp_path, [row("t1")], {"val": ([row("a", split="val")], None)}, {"val": {"a": "select"}})
+    assert prepare(exp, tmp_path / "out")["allow_test"] is False
+    assert json.loads((tmp_path / "out" / "prepared.json").read_text())["allow_test"] is False

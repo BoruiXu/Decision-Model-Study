@@ -293,6 +293,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         "eval_sets": {k: asdict(v) for k, v in exp.data.eval.items()},
         "split_file": exp.data.split_file, "fields": asdict(exp.fields),
         "evaluator": asdict(exp.evaluator), "merge": exp.merge,
+        "allow_test": bool(info.get("allow_test", False)),  # prepare --allow-test, carried to finalize
         "base": {"name": exp.base, **{k: v for k, v in base.items() if k != "name"}},
         "onejev": load_lock(), "overrides": recorded,
     }

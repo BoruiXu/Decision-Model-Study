@@ -179,6 +179,11 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
         raise ShaMismatch(f"train sha256 {src_sha} != expected {data.train_sha256}")
 
     train_all = _read(data.adapter, data.train)
+    if not allow_test:
+        tests = [str(r.get("id")) for r in train_all if str(r.get("split", "")).startswith("test")]
+        if tests:
+            raise TestSplitRefused(f"train: {len(tests)} row(s) in a test split ({', '.join(tests[:3])}); "
+                                   "use --allow-test")
     errors = validate_rows(train_all)
     if errors:
         raise ValueError("invalid train rows:\n" + "\n".join(errors[:20]))
@@ -202,6 +207,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     _write_jsonl(out_dir / "select.jsonl", parts.select_rows)
     (out_dir / "select_index.json").write_text(json.dumps(parts.select_index, indent=2))
     info = {
+        "allow_test": bool(allow_test),
         "train_sha256_source": src_sha,
         "train_sha256_prepared": _sha256(out_dir / "train.jsonl"),
         "subset": ({"where": exp.subset.where, "n": exp.subset.n, "seed": exp.subset.seed}

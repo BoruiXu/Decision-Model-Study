@@ -51,6 +51,14 @@ def _jsonl(path) -> list[dict]:
     return read_jsonl(path)
 
 
+def baseline_train_rows(lock: dict, rows: list[dict]) -> list[dict]:
+    """The prepared train rows OneJev trained on: with a ``split`` flag, only rows whose split equals it."""
+    split = lock["flags"].get("split")
+    if split is None or isinstance(split, bool):
+        return rows
+    return [r for r in rows if r.get("split") == str(split)]
+
+
 def label_version(rows: list[dict], path) -> str:
     """The rows' shared ``meta.label_version``, else the first 12 hex chars of the file's sha256."""
     values = set()
@@ -283,6 +291,7 @@ def _records(run_dir, lock, seeds, comparison, manifests, timing, versions, stat
             "baselines": {k: v for k, v in pooled.items() if k != "router" and isinstance(v, dict)}
             if pooled else None,
             "gate": c.get("gate"), "overrides": lock.get("overrides") or {}, "conclusion": "",
+            "allow_test": bool(lock.get("allow_test")),
             "evaluator": lock["evaluator"]["type"], "status": status,
             "failures": run_failures + s["failures"], "finalized_at": now,
         }
@@ -303,7 +312,7 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     train_rows, select_rows = _jsonl(lock["data"]["train"]), _jsonl(lock["data"]["select"])
     run_failures: list[str] = []
 
-    parts = build_eval_parts(exp)
+    parts = build_eval_parts(exp, allow_test=bool(lock.get("allow_test")))
     dropped = {"eval_parts": parts.dropped}
     if sorted(r["id"] for r in parts.select_rows) != sorted(r["id"] for r in select_rows):
         run_failures.append("select ids rebuilt from the source files differ from the prepared select.jsonl: "
@@ -316,9 +325,10 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
             run_failures.append(f"plugin validate: {len(errors)} error(s): " + "; ".join(map(str, errors[:5])))
 
     seeds = {}
+    baseline_rows = baseline_train_rows(lock, train_rows)
     with _gpu_env(run_dir, lock, devices):
         for seed in lock["seeds"]:
-            seeds[str(seed)] = _seed(run_dir, lock, exp, seed, select_rows, train_rows, parts, plugin,
+            seeds[str(seed)] = _seed(run_dir, lock, exp, seed, select_rows, baseline_rows, parts, plugin,
                                      scorer, merger)
     failures = run_failures + [f for s in seeds.values() for f in s["failures"]]
     status = "failed" if failures else "done"

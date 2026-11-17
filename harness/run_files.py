@@ -197,6 +197,7 @@ def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str
              f"- 数据：train.jsonl sha256 `{data['sha256']['train.jsonl']}`；"
              f"源文件 sha256 `{data['source_sha256']}`",
              f"- 标签版本：训练 {versions['train']}；参照 {versions['reference']}",
+             "- test 部分：" + ("已读（prepare --allow-test，须经用户批准）" if lock.get("allow_test") else "未读"),
              f"- 评测器：{ev['type']}{'（' + ev['path'] + '）' if ev.get('path') else ''}",
              f"- GPU 时间：{timing.get('gpu_hours', 0):.2f} h",
              f"- 状态：**{status}**", "", "## 选中的 checkpoint",

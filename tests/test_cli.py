@@ -191,3 +191,13 @@ def test_report_eval_keeps_hard_negatives(tmp_path):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
     out = report_eval.run(run_dir, allow_report=True, scorer=fake_scorer([]))
     assert out["dropped"] == {} and out["sets"]["pooled_report"]["questions"] == 30
+
+
+def test_report_eval_honors_the_runs_allow_test(tmp_path):
+    from test_finalize import make_run as mk_run
+    run_dir, lock = mk_run(tmp_path, allow_test=True)
+    (run_dir / "runs" / "exp-s42" / "final").mkdir(parents=True, exist_ok=True)
+    (run_dir / "thresholds.json").write_text(json.dumps({"42": {"best_jaccard": {"threshold": 0.5}}}))
+    (run_dir / "comparison.json").write_text(json.dumps({"42": {"checkpoint": "runs/exp-s42/final"}}))
+    out = report_eval.run(run_dir, allow_report=True, scorer=fake_scorer([]))
+    assert out["allow_test"] is True and out["sets"]["pooled_report"]["questions"] == 30
