@@ -14,7 +14,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 
-from .config import ConfigError, MachineConfig
+from .config import ConfigError, MachineConfig, check_writable
 
 RETRY_S = 30
 _QUERY = "--query-gpu=index,uuid,name,memory.free"
@@ -146,6 +146,7 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
     if machine.gpu_source != "scan":
         raise ConfigError(f"unsupported gpu_source: {machine.gpu_source!r}")
     if machine.lock_dir:
+        check_writable(machine, machine.lock_dir)
         _prepare_lock_dir(machine.lock_dir)
 
     deadline = clock() + machine.wait_timeout_s

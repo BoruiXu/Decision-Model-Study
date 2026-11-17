@@ -105,6 +105,22 @@ class ExperimentConfig:
     overrides: dict[str, Any] = field(default_factory=dict)
 
 
+def _under(path, root) -> bool:
+    p, r = os.path.realpath(path), os.path.realpath(root)
+    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
+
+
+def check_writable(machine: MachineConfig, *paths) -> None:
+    """Raise ConfigError when a path the harness is about to write is at or below a ``forbidden_write_roots``
+    entry (symlinks resolved). ``None`` entries are skipped."""
+    for p in paths:
+        if p is None:
+            continue
+        for root in machine.forbidden_write_roots:
+            if _under(p, root):
+                raise ConfigError(f"refusing to write {p}: it is under forbidden_write_roots entry {root}")
+
+
 def _load_yaml(path) -> dict:
     with open(path) as f:
         obj = yaml.safe_load(f)

@@ -11,7 +11,7 @@ import yaml
 from harness import (cleanup, fetch_base, finalize, gpu, launch, onejev, prepare, registry, report_eval,
                      resolve, runner, status)
 from harness.catalog import ROOT, sha256_file
-from harness.config import ConfigError, load_experiment, load_machine
+from harness.config import ConfigError, check_writable, load_experiment, load_machine
 from harness.gpu import GpuWaitTimeout
 from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
@@ -56,13 +56,16 @@ def cmd_setup(a) -> int:
 
 def cmd_fetch_base(a) -> int:
     m = load_machine(a.machine)
+    check_writable(m, Path(m.model_dir) / a.name)
     print(fetch_base.fetch_base(a.name, m.model_dir))
     return 0
 
 
 def cmd_prepare(a) -> int:
     m, exp = load_machine(a.machine), load_experiment(a.exp)
-    info = prepare.prepare(exp, Path(m.out_root) / exp.name / "prepared", allow_test=a.allow_test)
+    out = Path(m.out_root) / exp.name / "prepared"
+    check_writable(m, out)
+    info = prepare.prepare(exp, out, allow_test=a.allow_test)
     print(json.dumps(info["counts"], indent=2))
     return 0
 

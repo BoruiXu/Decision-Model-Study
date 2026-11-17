@@ -141,3 +141,17 @@ def test_recipe_falls_back_to_repo_root(tmp_path, monkeypatch):
     # neither exists: relative to the experiment file (the error names that path later)
     e = load_experiment(_write(tmp_path, "e.yaml", _base(recipe="nope.yaml")))
     assert e.recipe == str(tmp_path / "nope.yaml")
+
+
+def test_check_writable(tmp_path):
+    from harness.config import MachineConfig, check_writable
+    ro = tmp_path / "ro"
+    (ro / "sub").mkdir(parents=True)
+    (tmp_path / "rough").mkdir()
+    (tmp_path / "link").symlink_to(ro / "sub", target_is_directory=True)
+    m = MachineConfig(python="py", model_dir="/m", out_root="/o", forbidden_write_roots=[str(ro)])
+    check_writable(m, tmp_path / "rough" / "x", tmp_path / "rw", None)  # a shared name prefix is not "under"
+    for bad in (ro, ro / "sub" / "new" / "deeper", tmp_path / "link" / "x"):
+        with pytest.raises(ConfigError) as e:
+            check_writable(m, tmp_path / "ok", bad)
+        assert str(ro) in str(e.value) and str(bad) in str(e.value)

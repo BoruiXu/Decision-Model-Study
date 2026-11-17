@@ -277,3 +277,10 @@ def test_new_lock_file_is_group_writable(tmp_path):
     finally:
         os.umask(old)
     assert os.stat(os.path.join(m.lock_dir, "GPU-d.lock")).st_mode & stat.S_IWGRP
+
+
+def test_lock_dir_under_forbidden_root_refused(tmp_path):
+    m = machine(tmp_path, forbidden_write_roots=[str(tmp_path)])
+    with pytest.raises(ConfigError, match="forbidden"):
+        acquire(m, 1, query=FakeSmi(CARDS), sleep=no_sleep)
+    assert not (tmp_path / "locks").exists()

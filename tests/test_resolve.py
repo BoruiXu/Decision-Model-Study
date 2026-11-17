@@ -296,3 +296,18 @@ def test_feasibility_recorded_when_checked(tmp_path):
     exp, machine = setup(tmp_path)
     lock = yaml.safe_load(run(exp, machine).read_text())
     assert lock["feasibility"]["checked"] is True and lock["feasibility"]["min_free_gib"] == 80.0
+
+
+@pytest.mark.parametrize("what", ["out_root", "registry", "lock_dir"])
+def test_resolve_refuses_forbidden_write_roots(tmp_path, what):
+    exp, machine = setup(tmp_path)
+    ro = tmp_path / "ro"
+    if what == "out_root":
+        machine.forbidden_write_roots = [str(tmp_path / "out")]
+    elif what == "registry":
+        machine.registry, machine.forbidden_write_roots = str(ro / "registry.jsonl"), [str(ro)]
+    else:
+        machine.lock_dir, machine.forbidden_write_roots = str(ro / "locks"), [str(ro)]
+    with pytest.raises(ConfigError, match="forbidden_write_roots"):
+        run(exp, machine)
+    assert not [p for p in (tmp_path / "out" / "exp").iterdir() if p.name != "prepared"]

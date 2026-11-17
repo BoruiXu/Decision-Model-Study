@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 
 from .catalog import ROOT, load_base, sha256_file
-from .config import ConfigError, ExperimentConfig, MachineConfig
+from .config import ConfigError, ExperimentConfig, MachineConfig, check_writable
 from .gpu import Gpu, _nvidia_smi, parse_nvidia_smi
 from .onejev import load_lock
 
@@ -269,6 +269,8 @@ def _sha(path: Path) -> str:
 
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
             fingerprint=None, now: dt.datetime | None = None) -> Path:
+    out_root = Path(machine.out_root)
+    check_writable(machine, out_root / exp.name, machine.registry_path, machine.lock_dir)
     recipe = copy.deepcopy(_load_recipe(exp.recipe))
     if exp.gpus is not None:
         recipe["gpus"] = exp.gpus
@@ -311,7 +313,6 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         flags["multimodal"] = True
     flags["eval_at_start"] = True
 
-    out_root = Path(machine.out_root)
     lock = {
         "experiment": exp.name, "repo_root": str(ROOT),
         "run_dir": str(out_root / exp.name / "plan"),
@@ -347,6 +348,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     run_id = f"{stamp}-{hashlib.sha256(body.encode()).hexdigest()[:8]}"
     run_dir = out_root / exp.name / run_id
     lock["run_id"], lock["run_dir"] = run_id, str(run_dir)
+    check_writable(machine, run_dir)
     run_dir.mkdir(parents=True)
     path = run_dir / "run.lock.yaml"
     path.write_text(yaml.safe_dump(lock, sort_keys=False))

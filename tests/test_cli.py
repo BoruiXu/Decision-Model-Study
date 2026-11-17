@@ -201,3 +201,33 @@ def test_report_eval_honors_the_runs_allow_test(tmp_path):
     (run_dir / "comparison.json").write_text(json.dumps({"42": {"checkpoint": "runs/exp-s42/final"}}))
     out = report_eval.run(run_dir, allow_report=True, scorer=fake_scorer([]))
     assert out["allow_test"] is True and out["sets"]["pooled_report"]["questions"] == 30
+
+
+def _machine_yaml(tmp_path, **over):
+    d = {"python": "py", "model_dir": str(tmp_path / "models"), "out_root": str(tmp_path / "out"), **over}
+    p = tmp_path / "machine.yaml"
+    p.write_text(yaml.safe_dump(d))
+    return str(p)
+
+
+def test_prepare_refuses_forbidden_out_root(tmp_path, capsys):
+    (tmp_path / "r").mkdir()
+    run_dir, lock = make_run(tmp_path / "r")
+    exp = tmp_path / "e.yaml"
+    exp.write_text(yaml.safe_dump({"name": "fresh", "base": "joey-1", "recipe": "r.yaml",
+                                   "data": {"train": lock["data"]["source"], "eval": {"a": lock["eval_sets"]["a"]},
+                                            "train_sha256": lock["data"]["source_sha256"]},
+                                   "fields": {"label": "target.yes"}}))
+    m = _machine_yaml(tmp_path, forbidden_write_roots=[str(tmp_path / "out")])
+    assert cli.main(["prepare", str(exp), "--machine", m]) == 1
+    err = capsys.readouterr().err
+    assert "ConfigError" in err and str(tmp_path / "out") in err and "fresh" in err
+    assert not (tmp_path / "out").exists()
+
+
+def test_fetch_base_refuses_forbidden_model_dir(tmp_path, monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(cli.fetch_base, "fetch_base", lambda name, d: called.append(name))
+    m = _machine_yaml(tmp_path, forbidden_write_roots=[str(tmp_path / "models")])
+    assert cli.main(["fetch-base", "joey-1", "--machine", m]) == 1
+    assert called == [] and str(tmp_path / "models") in capsys.readouterr().err
