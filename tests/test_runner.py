@@ -179,3 +179,11 @@ def test_child_started_in_own_session(tmp_path):
     FakePopen.codes = [0, 0]
     run(path, acquire=lambda m, n: FakeLease(), popen=FakePopen, finalize=lambda d: None)
     assert FakePopen.calls[0][1]["start_new_session"] is True
+
+
+def test_launch_relative_lock_path_made_absolute(tmp_path, monkeypatch):
+    path, lock, run_dir = make_lock(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    seen = []
+    launch(path.relative_to(tmp_path), tmux=lambda argv: seen.append(argv))
+    assert f"-m harness.runner {path} " in seen[0][7]  # the runner's cwd is the repo, not the caller's cwd

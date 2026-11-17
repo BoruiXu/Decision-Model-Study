@@ -48,7 +48,9 @@ def test_examples_load(tmp_path):
     assert m.gpu_source == "scan" and m.order == "free_desc"
     exp = load_experiment(fill(EXAMPLES / "dynamicserve_v1_repro.yaml", tmp_path / "e.yaml", tmp_path))
     assert exp.data.train_sha256 == V1_SHA
-    assert exp.recipe == "examples/recipes/elephant_full_fsdp.yaml"
+    # the recipe is not next to the experiment file, so it resolves below the repo root
+    assert exp.recipe == str(ROOT / "examples" / "recipes" / "elephant_full_fsdp.yaml")
+    assert exp.data.train == str(tmp_path / "data" / "export_majority75" / "binary" / "train.jsonl")
     assert exp.seeds == [42] and exp.base == "elephant-1"
 
 
@@ -61,7 +63,7 @@ def test_machine_example_lists_every_key():
 
 @pytest.mark.parametrize("recipe", RECIPES, ids=lambda p: p.stem)
 def test_examples_resolve(tmp_path, recipe, monkeypatch):
-    monkeypatch.chdir(ROOT)  # the v1 example names its recipe relative to the repo root
+    monkeypatch.chdir(tmp_path)  # any cwd: config paths are absolute once loaded
     machine = load_machine(fill(EXAMPLES / "machine.example.yaml", tmp_path / "m.yaml", tmp_path))
     exp = load_experiment(fill(EXAMPLES / "dynamicserve_v1_repro.yaml", tmp_path / "e.yaml", tmp_path))
     prepared(Path(machine.out_root), exp.name)

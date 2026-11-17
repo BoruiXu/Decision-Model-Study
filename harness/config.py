@@ -1,11 +1,20 @@
-"""Machine and experiment config loading. Imports without torch."""
+"""Machine and experiment config loading. Imports without torch.
+
+Every path in a config file has ``~`` and ``$VAR`` expanded and is made absolute when loaded: relative paths
+in a machine file are relative to that file's directory, relative paths in an experiment file to the
+experiment file's directory (a recipe that is not there but exists below the repo root, such as
+``examples/recipes/...``, resolves to the repo root). Later stages never depend on the caller's cwd.
+"""
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import yaml
+
+from harness.catalog import ROOT
 
 
 class ConfigError(ValueError):
@@ -117,6 +126,19 @@ def _section(d: dict, key: str) -> dict:
     return v
 
 
+def _expand(p) -> str:
+    return os.path.expanduser(os.path.expandvars(str(p)))
+
+
+def _abs(p, base: Path) -> str:
+    """``p`` with ``~``/``$VAR`` expanded, made absolute against ``base`` when relative."""
+    return os.path.normpath(os.path.join(base, _expand(p)))
+
+
+def _config_dir(path) -> Path:
+    return Path(os.path.abspath(path)).parent
+
+
 def load_machine(path) -> MachineConfig:
     d = _load_yaml(path)
     for k in ("python", "model_dir", "out_root"):
@@ -124,6 +146,16 @@ def load_machine(path) -> MachineConfig:
     unknown = set(d) - set(MachineConfig.__dataclass_fields__)
     if unknown:
         raise ConfigError(f"unknown machine key(s): {sorted(unknown)}")
+    base = _config_dir(path)
+    py = _expand(d["python"])
+    d["python"] = _abs(py, base) if os.sep in py else py  # a bare name such as python3 is looked up on PATH
+    for k in ("model_dir", "out_root", "registry", "lock_dir"):
+        if d.get(k) is not None:
+            d[k] = _abs(d[k], base)
+    roots = d.get("forbidden_write_roots") or []
+    if not isinstance(roots, list):
+        raise ConfigError("forbidden_write_roots must be a list of paths")
+    d["forbidden_write_roots"] = [_abs(r, base) for r in roots]
     return MachineConfig(**d)
 
 
@@ -138,8 +170,18 @@ def _check_keys(d: Any, cls, prefix: str = "") -> dict:
     return d
 
 
+def _recipe_path(p, base: Path) -> str:
+    local = _abs(p, base)
+    if not os.path.exists(local) and not os.path.isabs(_expand(p)):
+        in_repo = _abs(p, ROOT)
+        if os.path.exists(in_repo):
+            return in_repo
+    return local
+
+
 def load_experiment(path) -> ExperimentConfig:
     d = _check_keys(_load_yaml(path), ExperimentConfig)
+    base = _config_dir(path)
     for k in ("name", "base", "recipe"):
         _require(d, k)
     data = _check_keys(_section(d, "data"), DataSpec, "data.")
@@ -153,20 +195,25 @@ def load_experiment(path) -> ExperimentConfig:
     for name, spec in raw_eval.items():
         prefix = f"data.eval.{name}."
         _check_keys(spec, EvalSetSpec, prefix)
+        ref = spec.get("reference")
         eval_sets[name] = EvalSetSpec(
-            train_labels=_require(spec, "train_labels", prefix),
-            reference=spec.get("reference"),
+            train_labels=_abs(_require(spec, "train_labels", prefix), base),
+            reference=_abs(ref, base) if ref is not None else None,
         )
     data_kw = {k: data[k] for k in ("adapter", "train_sha256", "split_file") if k in data}
+    if data_kw.get("split_file") is not None:
+        data_kw["split_file"] = _abs(data_kw["split_file"], base)
     sub = d.get("subset")
     subset = SubsetSpec(**_check_keys(sub, SubsetSpec, "subset.")) if sub is not None else None
     ev = d.get("evaluator")
     evaluator = (EvaluatorSpec(**_check_keys(ev, EvaluatorSpec, "evaluator."))
                  if ev is not None else EvaluatorSpec())
+    if evaluator.path is not None:
+        evaluator.path = _abs(evaluator.path, base)
     kw = {k: d[k] for k in ("seeds", "gpus", "merge", "overrides") if k in d}
     return ExperimentConfig(
-        name=d["name"], base=d["base"], recipe=d["recipe"],
-        data=DataSpec(train=train, eval=eval_sets, **data_kw),
+        name=d["name"], base=d["base"], recipe=_recipe_path(d["recipe"], base),
+        data=DataSpec(train=_abs(train, base), eval=eval_sets, **data_kw),
         fields=FieldsSpec(label=label, **{k: fields_.get(k) for k in ("group", "consistency", "text")}),
         subset=subset, evaluator=evaluator, **kw,
     )

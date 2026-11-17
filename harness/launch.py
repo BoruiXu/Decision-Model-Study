@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import getpass
+import os
 import re
 import shlex
 import subprocess
@@ -19,7 +20,8 @@ def _tmux(argv: list[str]) -> None:
 
 
 def launch(lock_path, *, tmux=_tmux) -> dict:
-    lock_path = Path(lock_path)
+    # absolute: the runner starts in the repo, not in the caller's cwd
+    lock_path = Path(os.path.abspath(os.path.expanduser(str(lock_path))))
     if not lock_path.is_file():
         raise FileNotFoundError(f"lock not found: {lock_path}")
     lock = yaml.safe_load(lock_path.read_text())
