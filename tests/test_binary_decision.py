@@ -69,6 +69,16 @@ def test_gate_fails_when_router_worse():
     assert out["gate"]["passed"] is False and out["gate"]["a"]["auc"] is False
 
 
+def test_gate_off_reports_but_does_not_decide():
+    preds, parts, train, fields = setup()
+    preds = {k: 1 - v for k, v in preds.items()}
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(gate=False))
+    assert out["gate"]["enabled"] is False and out["gate"]["passed"] is None
+    assert out["gate"]["a"]["auc"] is False
+    on = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    assert on["gate"]["enabled"] is True and on["gate"]["passed"] is False
+
+
 def test_unlabeled_rows_dropped_and_counted():
     preds, parts, train, fields = setup()
     del parts.reference["r3"]["target"]["yes"]

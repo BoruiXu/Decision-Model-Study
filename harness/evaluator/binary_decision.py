@@ -53,6 +53,12 @@ def _beats(router, others, key) -> bool:
 
 
 def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
+    """Score `preds` (id -> positive-class probability) on the pooled and per-set select rows.
+
+    A select row is its own reference when `parts.reference` lacks its id (eval sets without a
+    reference file). The gate is always evaluated per set; `gate["enabled"]` mirrors
+    `evaluator_cfg.gate` and `gate["passed"]` is None when the gate is off.
+    """
     has_group = fields.group is not None
     has_f = fields.consistency is not None
     budgets = list(evaluator_cfg.budgets) if has_f else None
@@ -130,7 +136,7 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     result: dict = {"sets": sets, "thresholds": {}, "gate": {}, "dropped": dropped,
                     "tfidf_strength": model.strength if model is not None else None}
     if not examples:
-        result["gate"] = {"passed": False}
+        result["gate"] = {"enabled": bool(evaluator_cfg.gate), "passed": False if evaluator_cfg.gate else None}
         return result
 
     # Thresholds: fitted on pooled select rows with router scores only.
@@ -155,11 +161,11 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     result["thresholds"] = thr
 
     keys = ["auc"] + (["within_group_auc"] if has_group else [])
-    gate = {}
+    gate = {"enabled": bool(evaluator_cfg.gate)}
     for n in names:
         e = sets[n]
         rivals = [e[k] for k in ("tfidf", "group_prior") if k in e]
         gate[n] = {k: _beats(e["router"], rivals, k) for k in keys}
-    gate["passed"] = all(v for n in names for v in gate[n].values())
+    gate["passed"] = all(v for n in names for v in gate[n].values()) if evaluator_cfg.gate else None
     result["gate"] = gate
     return result
