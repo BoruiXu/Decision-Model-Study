@@ -116,4 +116,9 @@ data:
   eval:
     val: {train_labels: holdout/val.jsonl, adapter_args: {split: val}}
 ```
-两个文件都是 jsonl（csv 源的单元格已转成 JSON 值，`label` 可能变成数字 `1` 而不是 `"1"`），适配器用 `json.loads` 读，`split` 参数只用来写行的 `split` 字段。原始行有 `id` 就原样用；没有就派生（如 `f"{path.stem}:{i}"`，两个文件名不同，不会重复）。
+两个文件都是 jsonl，适配器用 `json.loads` 读，`split` 参数只用来写行的 `split` 字段。源文件是 csv 时单元格是文本：`label` 是字符串 `"1"`，`score` 是 `"1.50"`。比较字符串或显式转换，不要和整数比：
+
+```python
+y = float(r["label"])            # 或 y = 1.0 if r["label"] == "1" else 0.0；r["label"] == 1 永远为 False
+```
+原始行有 `id` 就原样用；没有就派生（如 `f"{path.stem}:{i}"`，两个文件名不同，不会重复）。

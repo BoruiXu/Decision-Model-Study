@@ -209,3 +209,30 @@ def test_csv_cells_stay_text_for_ids_and_groups(tmp_path):
     out = select_report([("val", str(tmp_path / "val.csv"))], group="grp", id_field="code")
     assert "1.50" in out["val"]["assignment"] and "1.5" not in out["val"]["assignment"]
     assert set(out["val"]["groups"]["select"]) | set(out["val"]["groups"]["report"]) == {"000", "001", "002", "003"}
+
+
+def test_holdout_of_a_csv_writes_text_cells(tmp_path):
+    import csv
+    with open(tmp_path / "data.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "label", "score", "src"])
+        w.writerows([[f"{i:03d}", i % 2, "1.50", f"s{i % 5}"] for i in range(40)])
+    holdout(str(tmp_path / "data.csv"), tmp_path / "h", group="src", frac=0.2)
+    rows = read_jsonl(tmp_path / "h" / "train.jsonl") + read_jsonl(tmp_path / "h" / "val.jsonl")
+    assert {type(v) for r in rows for v in r.values()} == {str}
+    assert {r["label"] for r in rows} == {"0", "1"} and rows[0]["score"] == "1.50" and rows[0]["id"] == "000"
+
+
+def test_docs_say_holdout_cells_are_text():
+    from harness.cli import MAKE_SPLIT_HELP
+    root = Path(__file__).resolve().parent.parent
+    skill = (root / "skills" / "adapting-data-for-onejev" / "SKILL.md").read_text()
+    formats = (root / "skills" / "adapting-data-for-onejev" / "formats.md").read_text()
+    design = (root / "docs" / "design.md").read_text()
+    assert "JSON value" not in MAKE_SPLIT_HELP and "cells stay text" in MAKE_SPLIT_HELP
+    for text in (skill, formats, design):
+        assert "JSON 值" not in text and "数字 `1`" not in text
+    assert "单元格是文本" in skill and "单元格是文本" in formats and "单元格是文本" in design
+    assert 'r["label"] == "1"' in formats or 'float(r["label"])' in formats
+    selftest = skill.split("## 自测", 1)[1].split("\n## ", 1)[0]
+    assert "ojh inspect" in selftest and "target.yes" in selftest and "全是 0" in selftest

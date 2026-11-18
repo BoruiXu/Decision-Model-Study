@@ -241,7 +241,9 @@ MAKE_SPLIT_HELP = """Deterministic, group-aware splits (same inputs and seed -> 
     manifest.json  {"mode": "holdout", "source", "source_sha256", "group", "seed", "frac",
                     "rows": {"train", "val"}, "groups": {"train": [...], "val": [...]},
                     "sha256": {"train.jsonl", "val.jsonl"}}
-  Rows are copied as read (csv/tsv cells as JSON values); no ids are added or changed, so the adapter
+  Rows are copied as read; csv/tsv cells stay text: a label 1 is written as "1", a score 1.50 as "1.50", so the
+  adapter compares strings (r["label"] == "1") or casts explicitly (float(r["label"])), never == 1. No ids are
+  added or changed, so the adapter
   reads both files the same way and keeps its own id rule. Existing output files are never overwritten.
 
 Test data is refused without --allow-test: rows whose split-like column (split, set, subset, partition,

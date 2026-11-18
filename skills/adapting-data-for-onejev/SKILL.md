@@ -89,7 +89,7 @@ ojh make-split --mode select-report --out <工作区>/splits.json --group <组�
 
 - 两种模式都按组切（同一组永远在同一边），默认 `--seed 20261115 --frac 0.5`，确定性。不要另写切分脚本，不要换 seed 挑结果。已有的输出不会被覆盖：参数变了就换个输出位置。
 - `--group` 是**原始行**上的点分字段（如 `source`），不是 `meta.source`；缺这个字段的行会报错。
-- **holdout**：`--frac` 是 val 的比例，默认 0.5 偏大，按用户在问题 5 里确认的比例传。`--out` 是目录（写成 `.json` 会被拒绝），里面是 `train.jsonl`、`val.jsonl`（原样复制的行，csv 的单元格转成 JSON 值，id 不加不改）和 `manifest.json`。`data.train` 指 `<out>/train.jsonl`，`data.eval.val.train_labels` 指 `<out>/val.jsonl`，适配器用同一套规则读这两个 jsonl（源文件是 csv 时也要按 jsonl 读）。val 全部算 select（没有 report），汇报时说明。
+- **holdout**：`--frac` 是 val 的比例，默认 0.5 偏大，按用户在问题 5 里确认的比例传。`--out` 是目录（写成 `.json` 会被拒绝），里面是 `train.jsonl`、`val.jsonl`（原样复制的行，id 不加不改；源文件是 csv 时单元格是文本：`label` 是 `"1"` 不是整数，适配器写 `r["label"] == "1"` 或 `float(r["label"])`，不要写 `== 1`，否则每行都会被标成 0）和 `manifest.json`。`data.train` 指 `<out>/train.jsonl`，`data.eval.val.train_labels` 指 `<out>/val.jsonl`，适配器用同一套规则读这两个 jsonl（源文件是 csv 时也要按 jsonl 读）。val 全部算 select（没有 report），汇报时说明。
 - **select-report**：每个文件是一个评测集，集名取文件名主干或 `名字=路径`，要和 `data.eval` 的键一致；输出填进 `data.split_file`。`--id <点分字段>`（默认 `id`）指出原始行里的 id 列，make-split 按文本写入，适配器必须产出同样的文本作行 id；原始的 csv、chat jsonl 都可以直接切，不要先转成 OneJev 行（那样会绕过适配器文件、`adapter_args` 和 lock 里的适配器 sha256）。原始数据没有任何 id 列时：不切，全部算 select，并告诉用户。
 
 ## 填 exp.yaml
@@ -100,8 +100,9 @@ ojh make-split --mode select-report --out <工作区>/splits.json --group <组�
 
 1. 小样本：每个源文件取前 200 行放到 `<工作区>/sample/`（csv 用 `head -n 201` 保留表头），复制一份 `exp.sample.yaml` 指向它们，`name` 加 `-sample`。运行 `ojh prepare <工作区>/exp.sample.yaml`。
 2. 按报错修适配器（会列前 20 条：schema、id 重复、target 不合法、train 与评测集 id 重叠）。看 counts（train / select / report）和 `prepared.json` 的 `dropped` 是否合理。
-3. 全量：`ojh prepare <工作区>/exp.yaml`。把打印的源文件 sha256 写进 `data.train_sha256`（完整值）。
-4. 回 `training-with-onejev` 第 3 步。
+3. 核对标签分布：`ojh inspect <out_root>/<实验名>-sample/prepared/train.jsonl` 看 `target.yes` 的取值计数，和 `ojh inspect` 原始文件时标签列的计数逐项对上（例如原始 `good` 120 行、`bad` 80 行，prepared 就该是 `1.0` 120、`0.0` 80）。全是 0 或全是 1 几乎一定是比较写错了（如把文本 `"1"` 和整数 `1` 比），先修适配器。
+4. 全量：`ojh prepare <工作区>/exp.yaml`。把打印的源文件 sha256 写进 `data.train_sha256`（完整值），并同样核对一次全量的标签分布。
+5. 回 `training-with-onejev` 第 3 步。
 
 ## 常见错误
 
