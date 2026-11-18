@@ -276,3 +276,13 @@ def test_finalize_and_eval_report_card_sharing(tmp_path, monkeypatch, gpu_extra,
     assert cli.main(["eval-report", str(run), "--allow-report", *flag]) == 0
     assert [kw["allow_shared"] for kw in seen] == [expected, expected]
     assert all(kw["explicit"] == [0] for kw in seen)
+
+
+def test_check_force_help_does_not_claim_to_overwrite(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["check", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "overwrite data prepared" not in out and "never overwrites" in out
+    with pytest.raises(SystemExit):
+        cli.main(["prepare", "--help"])
+    assert "overwrite data prepared from another experiment file" in " ".join(capsys.readouterr().out.split())

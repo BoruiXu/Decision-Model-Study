@@ -324,7 +324,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
     s.add_argument("--force", action="store_true",
-                   help="overwrite data prepared from another experiment file with the same name")
+                   help="check even if another experiment file prepared data under this name (check never "
+                        "overwrites prepared data: it validates in a scratch dir)")
     s = cmd("launch", cmd_launch, "start a run in tmux and return at once")
     s.add_argument("lock")
     s = cmd("status", cmd_status, "short progress report of a run")
