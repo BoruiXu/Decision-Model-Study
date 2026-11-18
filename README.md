@@ -23,8 +23,10 @@
 ### 步骤
 
 ```bash
-cp examples/env.example.sh ~/ojh-env.sh     # 1. 改其中的 OJH_HOME，指到一块大盘，例如 /big/disk/ojh
-source ~/ojh-env.sh                         #    每个要跑 ojh 的 shell 都先 source 一次
+export OJH_HOME=/big/disk/ojh              # 1. 一块大盘上的目录（不要放在 /home）
+mkdir -p "$OJH_HOME" && cp examples/env.example.sh "$OJH_HOME/ojh-env.sh"
+                                            #    把文件里 OJH_HOME 那一行改成同一个目录
+source $OJH_HOME/ojh-env.sh                 #    每个要跑 ojh 的 shell 都先 source 一次（文件和数据放在一起，不占 home）
 bash setup.sh --dry-run                     # 2. 先看计划：每个目录放在哪、剩余空间、要做哪些步骤（什么都不改）
 bash setup.sh                               #    再执行；重跑会跳过已完成的步骤
 <repo>/.venv/bin/ojh doctor                 # 3. 只读检查：Python、torch/CUDA、GPU、依赖版本、OneJev、tmux、各目录、HF hub

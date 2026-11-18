@@ -139,3 +139,10 @@ def test_docs_reference_existing_examples():
     assert not missing, missing
     on_disk = {f"examples/{p.name}" for p in EXAMPLES.glob("*.*")}
     assert on_disk <= refs, sorted(on_disk - refs)  # every example is documented somewhere
+
+
+def test_env_file_is_kept_on_the_big_disk_not_in_home():
+    for p in (ROOT / "README.md", EXAMPLES / "env.example.sh"):
+        text = p.read_text()
+        assert not re.search(r"cp examples/env\.example\.sh ~", text), p
+        assert "$OJH_HOME/ojh-env.sh" in text, p

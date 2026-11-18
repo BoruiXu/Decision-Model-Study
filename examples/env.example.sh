@@ -1,7 +1,9 @@
 # Put everything onejev-harness writes below one directory (a big disk), then build and use the environment:
 #
-#   cp examples/env.example.sh ~/ojh-env.sh      # or anywhere; edit OJH_HOME below
-#   source ~/ojh-env.sh
+#   export OJH_HOME=/big/disk/ojh                # a big disk, not /home
+#   mkdir -p "$OJH_HOME" && cp examples/env.example.sh "$OJH_HOME/ojh-env.sh"
+#   # edit the OJH_HOME line below to the same directory, then in every shell:
+#   source $OJH_HOME/ojh-env.sh
 #   bash setup.sh                                # uv, Python 3.11, .venv, pinned packages, OneJev
 #   <repo>/.venv/bin/ojh doctor                  # read-only health check
 #
