@@ -151,6 +151,7 @@ repo 里不放任何项目的机器配置、数据路径或任务规则，这些
 | `ojh inspect PATH` | 只读：列出数据文件的事实（第 15 节） | 确定性，不做决定 |
 | `ojh make-split …` | 按组确定性地切 select/report，或从 train 切出 val（第 15 节） | 确定性 |
 | `ojh run EXP --base B --gpus i,j` | prepare → resolve → launch 一次完成，立即返回（第 15 节） | 确定性；基座和卡由用户给 |
+| `ojh check EXP …` | 同 `ojh run` 的检查，但不看卡、不写 lock、不启动（第 15 节） | 确定性 |
 | `bash setup.sh` | 用 uv 装 Python 3.11、建 `.venv`、装固定版本的依赖，再执行 `ojh setup`；`--dry-run` 只打印计划 | 确定性 |
 | `ojh setup [--machine M]` | 拉 OneJev 并打补丁，逐项校验 sha256 | 确定性 |
 | `ojh doctor` | 只读检查环境：Python、torch/CUDA、GPU、依赖版本、OneJev、tmux、各目录的可写性和剩余空间、HF hub；有阻塞问题时退出码 1 并给出提示 | 确定性 |
@@ -471,6 +472,10 @@ test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用
 - `--base`、`--gpus` 覆盖或补上 `exp.yaml` 里的 `base`、`gpus`（`gpus` 可以写卡号列表）。基座从不自动选：两处都没有就报错并列出 catalog 里的基座。
 - 配方：`--recipe` > `exp.yaml` 的 `recipe` > 基座的 `default_recipes`。
 - resolve 判定不可行时退出码 2，打印替代方案；不换基座、不换配方、不启动。
+
+### `ojh check`（不看卡的检查）
+
+参数同 `ojh run`。依次做 prepare、配置和配方、适配器和参数与 prepared 的一致性、plan-only、环境指纹，打印 JSON（每卡显存估算、plan、指纹、数据 sha256），不判断卡、不写 lock、不建 run 目录、不启动。resolve 本身也按这个顺序：卡放在最后检查，卡忙时不会挡住数据或 plan 的错误。
 
 ### 指定的卡（`gpu_source: explicit`）
 

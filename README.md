@@ -83,6 +83,7 @@ ojh inspect <数据位置> [--json]           # 1. 只读的事实：文件、�
 # 2. agent 判断格式和字段，需要时写适配器（adapters/template.py 或一个 .py 文件），
 #    从 examples/exp.template.yaml 复制出 <工作区>/exp.yaml（工作区放在 repo 之外）；
 #    需要切分时：ojh make-split --out <工作区>/splits.json --group <组字段> <val 文件>
+ojh check <工作区>/exp.yaml --base joey-1 --gpus 0 # 可选：不看卡的全部检查（prepare、配置、适配器、plan-only、环境指纹），卡忙时也能先查实验
 ojh run <工作区>/exp.yaml --base joey-1 --gpus 0   # 3. prepare → resolve → launch，立即返回 JSON（run_dir、tmux 会话、日志、DONE、基座、配方、卡、数据 sha256）
 ojh status <RUN>                          # 4. 进度；结束后打印 RESULT.md 的路径
 # 5. 读 <RUN>/RESULT.md（机器可读：result.json）：数据、设置、训练曲线、选中的 checkpoint、带 95% 置信区间的指标表、阈值、门和理由、警告、下一步命令

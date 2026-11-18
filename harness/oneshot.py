@@ -35,9 +35,8 @@ def _n_gpus(gpus) -> int:
     return len(gpus) if isinstance(gpus, list) else int(gpus)
 
 
-def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
-        machine: str | None = None, allow_test: bool = False, query=None, apps_query=None, plan_runner=None,
-        fingerprint=None, tmux=None) -> dict:
+def _prepared(exp_path, base, gpus, recipe, machine, allow_test):
+    """Machine, origin, experiment (base, gpus and recipe filled in) and recipe source, after prepare."""
     m, origin = find_machine(machine)
     exp = load_experiment(exp_path)
     if base:
@@ -62,9 +61,37 @@ def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, rec
     out = Path(m.out_root) / exp.name / "prepared"
     check_writable(m, out)
     prepare.prepare(exp, out, allow_test=allow_test)
-    kw = {k: v for k, v in {"query": query, "apps_query": apps_query, "plan_runner": plan_runner,
-                            "fingerprint": fingerprint}.items() if v is not None}
-    lock_path = resolve.resolve(exp, m, machine_origin=origin, **kw)
+    return m, origin, exp, source
+
+
+def _probes(**kw) -> dict:
+    return {k: v for k, v in kw.items() if v is not None}
+
+
+def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
+          machine: str | None = None, allow_test: bool = False, query=None, apps_query=None, plan_runner=None,
+          fingerprint=None) -> dict:
+    """``ojh check``: what ``ojh run`` validates except the cards (prepare, config, adapter, plan-only,
+    fingerprint). Writes the prepared data like run, but no lock and no run dir; launches nothing."""
+    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test)
+    lock = resolve.check(exp, m, machine_origin=origin, **_probes(
+        query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
+    return {"ok": True, "cards_checked": False, "base": exp.base,
+            "recipe": {"path": exp.recipe, "source": source, "mode": lock["mode"]},
+            "n_gpus": lock["n_gpus"], "parallel": lock["parallel"], "gpus": exp.gpus,
+            "estimate_gib_per_card": lock["estimate_gib"], "plan": lock["plan"],
+            "fingerprint": lock["fingerprint"],
+            "data_sha256": {"source": lock["data"]["source_sha256"], **lock["data"]["sha256"]},
+            "counts": lock["data"].get("counts"), "machine": origin,
+            "next": "ojh run with the same arguments validates the cards and launches"}
+
+
+def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
+        machine: str | None = None, allow_test: bool = False, query=None, apps_query=None, plan_runner=None,
+        fingerprint=None, tmux=None) -> dict:
+    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test)
+    lock_path = resolve.resolve(exp, m, machine_origin=origin, **_probes(
+        query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     started = launch.launch(lock_path, tmux=tmux or launch._tmux)
 
     lock = yaml.safe_load(Path(lock_path).read_text())

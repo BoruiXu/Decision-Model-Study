@@ -134,6 +134,14 @@ def cmd_run(a) -> int:
     return 0
 
 
+def cmd_check(a) -> int:
+    gpus = oneshot.parse_gpus(a.gpus) if a.gpus is not None else None
+    out = oneshot.check(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine,
+                        allow_test=a.allow_test)
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def cmd_launch(a) -> int:
     print(json.dumps(launch.launch(a.lock), indent=2))
     return 0
@@ -277,6 +285,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--base", help="catalog base (overrides or fills base in the experiment; never chosen for you)")
     s.add_argument("--gpus", help="card indices such as 0,1 (overrides or fills gpus in the experiment)")
     s.add_argument("--recipe", help="recipe file (default: the experiment's recipe, else the base's default_recipes)")
+    s.add_argument("--machine", help=MACHINE_HELP)
+    s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
+    s = cmd("check", cmd_check, "validate an experiment like ojh run (prepare, config, adapter, plan-only, "
+                                "fingerprint) without judging the cards; writes no lock and launches nothing")
+    s.add_argument("exp")
+    s.add_argument("--base", help="catalog base (as ojh run)")
+    s.add_argument("--gpus", help="card indices such as 0,1 (as ojh run; only their count is used, the cards are "
+                                  "not checked)")
+    s.add_argument("--recipe", help="recipe file (as ojh run)")
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
     s = cmd("launch", cmd_launch, "start a run in tmux and return at once")

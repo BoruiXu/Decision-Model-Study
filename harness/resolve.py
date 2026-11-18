@@ -333,9 +333,10 @@ def _explicit_cards(exp: ExperimentConfig, machine: MachineConfig) -> list[int] 
     return None
 
 
-def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
-            fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None,
-            apps_query=_nvidia_smi_apps) -> Path:
+def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner, fingerprint, machine_origin,
+           apps_query, check_gpus: bool) -> tuple[dict, Path]:
+    """The lock and the adapter file. Order: config, prepared data and adapter checks, plan-only, fingerprint,
+    and the cards last, so busy cards never hide a data or plan problem (``check_gpus=False`` skips them)."""
     if not exp.base:
         from .catalog import CATALOG_DIR
         raise ConfigError("no base: set base in the experiment or pass --base; catalog bases: "
@@ -366,7 +367,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     parallel = parallel_for(mode, base["params_b"], n, recipe.get("fsdp"))
     if explicit is not None and n != len(explicit):
         raise ConfigError(f"{len(explicit)} card(s) listed but the run needs {n} (an override sets gpus)")
-    need, feasibility = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query)
+    need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
 
     prepared = Path(machine.out_root) / exp.name / "prepared"
     info_path = prepared / "prepared.json"
@@ -429,7 +430,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
                     # where these settings came from (--machine, $OJH_MACHINE, user config or inferred)
                     "origin": machine_origin or {"source": "given", "path": None}},
         "mode": mode, "lora": lora, "n_gpus": n, "parallel": parallel, "seeds": list(exp.seeds),
-        "estimate_gib": round(need, 1), "feasibility": feasibility, "flags": flags, "data": data,
+        "estimate_gib": round(need, 1), "feasibility": None, "flags": flags, "data": data,
         "eval_sets": {k: asdict(v) for k, v in exp.data.eval.items()},
         "split_file": exp.data.split_file, "fields": asdict(exp.fields),
         "evaluator": asdict(exp.evaluator), "merge": exp.merge,
@@ -448,7 +449,28 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     flags["eval_every"] = flags["save_every"] = interval
     lock["plan"] = {"steps": steps, "ranks": ranks, "interval": interval}
     lock["fingerprint"] = (fingerprint or (lambda: _fingerprint(machine)))()
+    if check_gpus:
+        _, lock["feasibility"] = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query)
+    else:
+        lock["feasibility"] = {"checked": False, "reason": "cards not checked (ojh check)"}
+    return lock, afile
 
+
+def check(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
+          fingerprint=None, machine_origin: dict | None = None, apps_query=_nvidia_smi_apps) -> dict:
+    """Everything resolve validates except the cards (config, prepared data, adapter, plan-only,
+    fingerprint); writes nothing and returns the would-be lock."""
+    lock, _ = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
+                     machine_origin=machine_origin, apps_query=apps_query, check_gpus=False)
+    return lock
+
+
+def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
+            fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None,
+            apps_query=_nvidia_smi_apps) -> Path:
+    lock, afile = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
+                         machine_origin=machine_origin, apps_query=apps_query, check_gpus=True)
+    out_root, data = Path(machine.out_root), lock["data"]
     body = json.dumps(lock, sort_keys=True, default=str)
     stamp = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
     run_id = f"{stamp}-{hashlib.sha256(body.encode()).hexdigest()[:8]}"
