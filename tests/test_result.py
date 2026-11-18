@@ -105,3 +105,12 @@ def test_lock_records_recipe_path_and_sha(tmp_path):
     assert lock["recipe"]["path"].endswith("joey_full_1gpu.yaml")
     assert lock["recipe"]["sha256"] == hashlib.sha256(Path(lock["recipe"]["path"]).read_bytes()).hexdigest()
     assert yaml.safe_load((run_dir / "run.lock.yaml").read_text())["recipe"] == lock["recipe"]
+
+
+def test_per_eval_set_tables_with_cis(tmp_path):
+    run_dir, lock, res, md = finalized(tmp_path)
+    by_set = res["seeds"]["42"]["metrics_by_set"]
+    assert set(by_set) == {"a", "b"} and by_set["a"]["questions"] == 15
+    assert by_set["a"]["methods"]["model"]["auc_ci95"] is not None and "tfidf" in by_set["b"]["methods"]
+    assert "### Metrics on eval set a (select part, 15 questions)" in md
+    assert "### Metrics on eval set b (select part, 15 questions)" in md

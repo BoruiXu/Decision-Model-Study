@@ -141,6 +141,8 @@ def build_result(run_dir, lock: dict, *, status: str, failures: list[str], compa
                       "checkpoint_sha256": (manifests.get(key) or {}).get("checkpoint_sha256"),
                       "rescore": c.get("rescore"),
                       "metrics": {"set": POOLED, "questions": pooled.get("questions"), "methods": _methods(pooled)},
+                      "metrics_by_set": {n: {"questions": e.get("questions"), "methods": _methods(e)}
+                                         for n, e in sets.items() if n != POOLED},
                       "thresholds": thr,
                       "gate": {"enabled": bool(gate.get("enabled")), "passed": gate.get("passed"),
                                "reasons": _gate_reasons(gate, sets)}}
@@ -245,6 +247,9 @@ def render_result_md(r: dict) -> str:
         if b and any(k.endswith("_ci95_skipped") for x in m["methods"].values() for k in x):
             lines += ["", "(n/reps skipped): bootstrap replicates where the metric was undefined (one class only); "
                           "the interval uses the rest."]
+        for name, ms in (s.get("metrics_by_set") or {}).items():
+            lines += ["", f"### Metrics on eval set {name} (select part, {ms['questions']} questions)", ""]
+            lines += _metrics_table(ms["methods"], b["reps"] if b else None) if ms["methods"] else ["- not evaluated"]
         lines += ["", "Jaccard: each method at its own best threshold on select. The model's locked thresholds:"]
         lines += ["", "| threshold | value | small share | Jaccard | inconsistency | per set (share / Jaccard) |",
                   "|---|---|---|---|---|---|"]
