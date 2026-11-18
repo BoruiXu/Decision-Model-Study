@@ -109,7 +109,7 @@ if [ -n "$PYTHON_OPT" ]; then
   PY="$PYTHON_OPT"; say "    using --python $PY (opt-in)"
   "$PY" -c 'import sys; assert sys.version_info >= (3, 11), sys.version' \
     || { echo "error: --python $PY is not Python >= 3.11" >&2; exit 1; }
-elif [ -x "$UV" ] && PY="$("$UV" python find --managed-python "$PYTHON_VERSION" 2>/dev/null)"; then
+elif [ -x "$UV" ] && PY="$("$UV" python find --managed-python --system "$PYTHON_VERSION" 2>/dev/null)"; then
   say "    already installed: $PY"
 else
   PY="$PYTHON_VERSION"
