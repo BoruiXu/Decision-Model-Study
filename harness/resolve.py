@@ -360,6 +360,12 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     if prepared_sha is not None and prepared_sha != asha:
         raise ConfigError(f"adapter changed after prepare ({afile}: sha256 {asha[:12]}… vs {prepared_sha[:12]}… "
                           "when prepared); re-run `ojh prepare`")
+    args_now = {"global": exp.data.adapter_args, "train": exp.data.train_adapter_args,
+                "eval": {n: s.adapter_args for n, s in exp.data.eval.items()}}
+    args_then = info.get("adapter_args")
+    if args_then is not None and json.loads(json.dumps(args_then)) != json.loads(json.dumps(args_now)):
+        raise ConfigError(f"adapter_args changed after prepare (prepared with {args_then}, the experiment now "
+                          f"says {args_now}); re-run `ojh prepare` so the prepared data matches")
     data = {"prepared_dir": str(prepared), "source": exp.data.train, "adapter": exp.data.adapter,
             "adapter_file": str(afile), "adapter_sha256": asha,
             "adapter_args": dict(exp.data.adapter_args), "train_adapter_args": dict(exp.data.train_adapter_args),

@@ -155,3 +155,17 @@ def test_tampered_adapter_copy_fails_finalize_and_refuses_eval_report(tmp_path):
     (run_dir / "runs" / "exp-s42" / "final").mkdir(parents=True, exist_ok=True)
     with pytest.raises(ConfigError, match="adapter"):
         report_eval.run(run_dir, allow_report=True, scorer=FakeScorer())
+
+
+@pytest.mark.parametrize("change", ["global", "train", "eval"])
+def test_adapter_args_changed_after_prepare_is_refused(tmp_path, change):
+    ws, exp, m = resolve_ws(tmp_path)
+    if change == "global":
+        exp.data.adapter_args = {"extra": 1}
+    elif change == "train":
+        exp.data.train_adapter_args = {"split": "val"}
+    else:
+        exp.data.eval["val"].adapter_args = {"split": "train"}
+    with pytest.raises(ConfigError, match="adapter_args changed after prepare.*ojh prepare"):
+        resolve(exp, m, query=lambda uuid=None: "0, GPU-0, A100, 81920\n", plan_runner=plan_ok(5, 1),
+                fingerprint=fake_fp)
