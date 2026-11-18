@@ -216,7 +216,7 @@ def test_wait_is_suggested_only_when_the_card_would_fit(tmp_path):
     with pytest.raises(Infeasible) as e:
         resolve_explicit(tmp_path, [2])  # joey full needs 32 GiB; 9000 MiB free + 71000 MiB of pid 4242
     alts = "\n".join(e.value.alternatives)
-    assert "GPU 2 would have enough memory once the listed processes end" in alts
+    assert "once the other processes on GPU 2 end" in alts
 
 
 def test_a_failed_process_query_is_not_an_empty_card():
@@ -266,10 +266,10 @@ def test_alternatives_respect_min_free_mib(tmp_path):
     alts = _alts(tmp_path, "joey-1", "joey_lora_1gpu", [2], min_free_mib=75000)
     text = "\n".join(alts)
     assert "cards with >=" not in text
-    now = [a for a in alts if "once the listed processes end" not in a]  # waiting is about later, not now
+    now = [a for a in alts if "once the other processes" not in a]  # waiting is about later, not now
     picked = {int(g) for a in now for g in re.findall(r"--gpus (\d+)", a)}
     assert picked and all(dict(((0, 80000), (1, 70000), (2, 9000), (3, 81000)))[g] >= 75000 for g in picked)
-    assert any("GPU 2 would have enough memory once the listed processes end" in a for a in alts)
+    assert any("once the other processes on GPU 2 end" in a for a in alts)
 
 
 def test_no_fsdp_suggestion_where_fsdp_does_not_apply(tmp_path):
@@ -307,3 +307,30 @@ def test_runner_passes_the_sharing_choice_in_scan_mode(tmp_path, gpu_extra, expe
     assert run(path, acquire=lambda m, n, **kw: seen.update(source=m.gpu_source, **kw) or FakeLease(),
                popen=FakePopen, finalize=lambda rd: None, killpg=lambda *a: None) == 0
     assert seen == {"source": "scan", "allow_shared": expected}
+
+
+def test_share_line_only_when_every_requested_card_would_pass(tmp_path):
+    # GPU 1 is shared (memory fine); GPU 2 lacks memory: --allow-shared alone would not make [1, 2] pass
+    alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [1, 2])
+    assert not any("--allow-shared" in a for a in alts)
+    waits = [a for a in alts if "once the" in a]  # both cards would pass once their processes end
+    assert len(waits) == 1 and "--gpus 1,2 " in waits[0]
+
+
+def test_share_line_when_sharing_is_the_only_problem(tmp_path):
+    alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [1, 3])
+    (share,) = [a for a in alts if "--allow-shared" in a]
+    assert "--gpus 1,3 " in share and "ask the user" in share
+
+
+def test_fewer_of_the_requested_cards_are_tried(tmp_path):
+    alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [1, 3])
+    fewer = [a for a in alts if a.startswith("fewer cards")]
+    assert len(fewer) == 1 and "--gpus 3 --recipe examples/recipes/joey_full_1gpu.yaml`" in fewer[0]
+
+
+def test_no_wait_line_when_one_card_could_never_fit(tmp_path):
+    # GPU 2 would hold joey once its process ends, but GPU 3 is excluded by the machine config: [2, 3] can
+    # never pass, so waiting is not offered (the old code offered it for GPU 2 alone)
+    alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [2, 3], gpu_exclude=[3])
+    assert not any("once the" in a for a in alts)

@@ -338,9 +338,11 @@ def _command(alt: _Alt, base: str, cards: list[dict], recipe, shared: bool = Fal
     return cmd if len(cards) == alt.n else f"set gpus: {len(cards)} in {exp}, then {cmd}"
 
 
-def _alternatives(alt: _Alt, cards: list[dict], machine: MachineConfig, need: float) -> list[str]:
+def _alternatives(alt: _Alt, cards: list[dict], machine: MachineConfig, need: float,
+                  requested: list[dict] | None = None) -> list[str]:
     """Options that pass the same checks on the cards as they are now, each with its ojh run line: the same
-    run on other cards, more cards where FSDP applies, LoRA, smaller catalog bases with a default recipe."""
+    run on other cards, fewer of the requested cards, more cards where FSDP applies, LoRA, smaller catalog
+    bases with a default recipe."""
     from .catalog import CATALOG_DIR, CatalogError, default_recipe
     p, out = alt.base["params_b"], []
     same = _usable(cards, machine, need, alt)
@@ -348,6 +350,17 @@ def _alternatives(alt: _Alt, cards: list[dict], machine: MachineConfig, need: fl
         listed = ", ".join(f"GPU {c['index']} ({c['free_mib']} MiB free)" for c in same)
         out.append(f"the same run on cards that pass now ({listed}): "
                    f"{_command(alt, alt.base['name'], same[:alt.n], alt.recipe)}")
+    for k in range(alt.n - 1, 0, -1) if requested else ():
+        try:
+            par = parallel_for(alt.mode, p, k, alt.recipe_fsdp)
+        except Infeasible:
+            continue
+        need_k = estimate_gib(p, alt.mode, k, par == "fsdp")
+        ok = _usable(requested, machine, need_k, alt)
+        if len(ok) >= k:
+            out.append(f"fewer cards: {k} of the requested cards ({par}, ~{need_k:.0f} GiB/card): "
+                       f"{_command(alt, alt.base['name'], ok[:k], alt.recipe)}")
+            break
     if alt.mode == "full":
         for k in range(alt.n + 1, len(cards) + 1):
             if parallel_for("full", p, k, alt.recipe_fsdp) != "fsdp":
@@ -397,18 +410,23 @@ def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=
         by_index = {c["index"]: c for c in e.cards}
         requested = [by_index[i] for i in explicit if i in by_index]
         alts = []
-        for i, r in e.reasons.items():
-            c = by_index.get(i)
-            if c is None or alt is None:
-                continue
-            if r.startswith("shared with"):
-                alts.append(f"only if the user agrees (ask the user) to share GPU {i} with the processes listed: "
+        if alt is not None and len(requested) == len(explicit) and all(c["processes"] is not None for c in requested):
+            def allowed(c):
+                return c["index"] not in machine.gpu_exclude and (
+                    machine.gpu_include is None or c["index"] in machine.gpu_include)
+
+            def held(c):  # memory the card's other processes use now
+                return sum(x["used_mib"] or 0 for x in c["processes"])
+            busy = [c for c in requested if c["processes"]]
+            names = ", ".join(f"GPU {c['index']}" for c in busy)
+            # each line is offered only when it would pass for every requested card
+            if busy and all(allowed(c) and c["free_mib"] >= floor for c in requested):
+                alts.append(f"only if the user agrees (ask the user) to share {names} with the processes listed: "
                             f"{_command(alt, alt.base['name'], requested, alt.recipe, shared=True)}")
-            elif "MiB needed" in r and c["processes"] and \
-                    c["free_mib"] + sum(x["used_mib"] or 0 for x in c["processes"]) >= floor:
-                alts.append(f"GPU {i} would have enough memory once the listed processes end (they are not ours: "
-                            f"wait, or ask their owner), then: {_command(alt, alt.base['name'], requested, alt.recipe)}")
-        alts += _alternatives(alt, e.cards, machine, need) if alt is not None else [NO_SWITCH]
+            if busy and all(allowed(c) and c["free_mib"] + held(c) >= floor for c in requested):
+                alts.append(f"once the other processes on {names} end (they are not ours: wait, or ask their owner): "
+                            f"{_command(alt, alt.base['name'], requested, alt.recipe)}")
+        alts += _alternatives(alt, e.cards, machine, need, requested) if alt is not None else [NO_SWITCH]
         raise Infeasible(str(e), alts) from None
     return {"checked": True, "need_gib_per_card": round(need, 1), "need_mib_per_card": cards[0]["need_mib"],
             "min_free_gib": round(min(c["free_mib"] for c in cards) / 1024, 1), "cards": cards}
