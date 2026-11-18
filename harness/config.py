@@ -201,7 +201,9 @@ def load_machine(path) -> MachineConfig:
         raise ConfigError("forbidden_write_roots must be a list of paths")
     d["forbidden_write_roots"] = [_abs(r, base) for r in roots]
     d["env"] = _env(d.get("env"))
-    return MachineConfig(**d)
+    m = MachineConfig(**d)
+    check_outside_repo(m)
+    return m
 
 
 USER_MACHINE = "~/.config/onejev-harness/machine.yaml"
@@ -209,13 +211,25 @@ USER_MACHINE = "~/.config/onejev-harness/machine.yaml"
 
 def inferred_machine() -> MachineConfig:
     """The machine used when no machine file is found: the repo's .venv python, ``$OJH_OUT_ROOT`` or
-    ``./ojh_runs`` (made absolute), ``$OJH_MODEL_DIR`` or ``~/.cache/onejev-harness/models``, the registry
-    under out_root, no lock_dir, and GPUs given explicitly (``ojh run --gpus``)."""
+    ``~/ojh_runs`` (made absolute; never the cwd, which may be the repo), ``$OJH_MODEL_DIR`` or
+    ``~/.cache/onejev-harness/models``, the registry under out_root, no lock_dir, and GPUs given explicitly
+    (``ojh run --gpus``)."""
     cwd = Path.cwd()
-    out_root = _abs(os.environ.get("OJH_OUT_ROOT") or "ojh_runs", cwd)
+    out_root = _abs(os.environ.get("OJH_OUT_ROOT") or "~/ojh_runs", cwd)
     model_dir = _abs(os.environ.get("OJH_MODEL_DIR") or "~/.cache/onejev-harness/models", cwd)
-    return MachineConfig(python=str(ROOT / ".venv" / "bin" / "python"), model_dir=model_dir, out_root=out_root,
-                         gpu_source="explicit")
+    m = MachineConfig(python=str(ROOT / ".venv" / "bin" / "python"), model_dir=model_dir, out_root=out_root,
+                      gpu_source="explicit")
+    check_outside_repo(m)
+    return m
+
+
+def check_outside_repo(machine: MachineConfig) -> None:
+    """Runs and weights never go inside this repo (they would land in its working tree)."""
+    for key in ("out_root", "model_dir"):
+        p = getattr(machine, key)
+        if _under(p, ROOT):
+            raise ConfigError(f"{key} {p} is inside the repo {ROOT}: set $OJH_OUT_ROOT / $OJH_MODEL_DIR or pass "
+                              "--machine with paths outside it")
 
 
 def find_machine(path=None) -> tuple[MachineConfig, dict]:

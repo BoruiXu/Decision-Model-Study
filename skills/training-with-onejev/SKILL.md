@@ -24,6 +24,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
    - 数据位置（文件或目录）。
    - GPU 卡号（如 `0` 或 `2,3`）。没给就问，不要自己挑卡。
    - 基座。没给就列出 `<repo>/catalog/bases/` 里的基座和参数量（`params_b`），请用户选；**不要替用户选**。
+   - 输出位置：run 写到机器配置的 `out_root`；没有机器配置时是 `$OJH_OUT_ROOT`，不设就是 `~/ojh_runs`。用户要放到别处（大盘、共享盘），设 `OJH_OUT_ROOT=<目录>` 或传 `--machine <machine.yaml>`。不能在本 repo 里（`ojh` 会拒绝）。
    - 同时告诉用户实验工作区的位置：默认 `~/onejev-work/<实验名>/`，`<实验名>` = 数据名-基座（数据是文件取文件名去后缀，是目录取目录名；如 `/data/qa.csv` + joey-1 → `qa-joey-1`），用户可以改。工作区**不在本 repo 里**；机器配置的 `forbidden_write_roots` 覆盖了它时，换个位置并告诉用户。
 2. **认数据，写 `exp.yaml`**。**REQUIRED SUB-SKILL:** `adapting-data-for-onejev`。产出是工作区里的 `exp.yaml`，必要时还有 `adapter.py`、`splits.json`。用户对标签含义和判定问题的确认在这一步拿到。
 3. **启动**：

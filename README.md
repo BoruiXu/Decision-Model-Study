@@ -13,7 +13,7 @@ bash setup.sh [<machine.yaml>]      # 建 .venv，装固定版本的依赖（见
 <repo>/.venv/bin/ojh fetch-base joey-1   # 下载固定 revision 的基座权重并校验（放到机器配置的 model_dir）
 ```
 
-机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、`./ojh_runs`（或 `$OJH_OUT_ROOT`）、`~/.cache/onejev-harness/models`（或 `$OJH_MODEL_DIR`），卡由 `--gpus` 指定。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份；`setup.sh <machine.yaml>` 用其中的 python 建 `.venv`，建好后把它的 python 改成 `<repo>/.venv/bin/python`（训练用的环境）。
+机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、输出目录 `$OJH_OUT_ROOT`（不设则 `~/ojh_runs`）、`$OJH_MODEL_DIR`（不设则 `~/.cache/onejev-harness/models`），卡由 `--gpus` 指定。输出目录和模型目录不能在 repo 里（会报 `ConfigError`）；要放到别处，设 `OJH_OUT_ROOT`/`OJH_MODEL_DIR` 或传 `--machine`。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份；`setup.sh <machine.yaml>` 用其中的 python 建 `.venv`，建好后把它的 python 改成 `<repo>/.venv/bin/python`（训练用的环境）。
 
 `setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> <repo>/.venv/bin/ojh …` 调用；记录和登记表都留在 GPU 机器的 `out_root` 下。
 

@@ -477,7 +477,7 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
 
 ### 机器配置可选
 
-按顺序取第一个：`--machine`；`$OJH_MACHINE`（指向的文件必须存在）；`~/.config/onejev-harness/machine.yaml`；推断的默认值：python = `<repo>/.venv/bin/python`，`out_root` = `$OJH_OUT_ROOT` 或 `./ojh_runs`（转成绝对路径），`model_dir` = `$OJH_MODEL_DIR` 或 `~/.cache/onejev-harness/models`，登记表在 `out_root` 下，不加锁，`gpu_source: explicit`。`setup`、`fetch-base`、`prepare`、`resolve`、`run` 都按这个顺序取。lock 的 `machine` 记下实际用的全部设置和 `origin`（来源和文件路径）；已有的机器配置文件照常可用。
+按顺序取第一个：`--machine`；`$OJH_MACHINE`（指向的文件必须存在）；`~/.config/onejev-harness/machine.yaml`；推断的默认值：python = `<repo>/.venv/bin/python`，`out_root` = `$OJH_OUT_ROOT` 或 `~/ojh_runs`（转成绝对路径；不用当前目录，agent 常在 repo 里运行），`model_dir` = `$OJH_MODEL_DIR` 或 `~/.cache/onejev-harness/models`，登记表在 `out_root` 下，不加锁，`gpu_source: explicit`。`out_root` 或 `model_dir` 落在 repo 里时（任何来源）报 `ConfigError`；`.gitignore` 也忽略 `ojh_runs/`。`setup`、`fetch-base`、`prepare`、`resolve`、`run`、`table` 都按这个顺序取。lock 的 `machine` 记下实际用的全部设置和 `origin`（来源和文件路径）；已有的机器配置文件照常可用。
 
 ### 适配器
 

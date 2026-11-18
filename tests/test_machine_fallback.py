@@ -58,9 +58,9 @@ def test_inferred_defaults(clean_env, tmp_path):
     m, origin = find_machine(None)
     assert origin == {"source": "inferred", "path": None}
     assert m.python == str(ROOT / ".venv" / "bin" / "python")
-    assert m.out_root == str(tmp_path / "ojh_runs")
+    assert m.out_root == str(clean_env / "ojh_runs")  # ~/ojh_runs, never the cwd (which may be the repo)
     assert m.model_dir == str(clean_env / ".cache" / "onejev-harness" / "models")
-    assert m.registry_path == str(tmp_path / "ojh_runs" / "registry.jsonl")
+    assert m.registry_path == str(clean_env / "ojh_runs" / "registry.jsonl")
     assert m.lock_dir is None and m.gpu_source == "explicit"
 
 
@@ -84,7 +84,7 @@ def test_prepare_works_without_machine(clean_env, tmp_path):
                                                          "eval": {"val": {"train_labels": "val.jsonl"}}},
                                    "fields": {"label": "target.yes"}}))
     assert cli.main(["prepare", str(exp)]) == 0
-    assert (tmp_path / "ojh_runs" / "e" / "prepared" / "prepared.json").is_file()
+    assert (clean_env / "ojh_runs" / "e" / "prepared" / "prepared.json").is_file()
 
 
 def test_lock_records_machine_origin_and_missing_base_lists_catalog(tmp_path):
@@ -98,3 +98,27 @@ def test_lock_records_machine_origin_and_missing_base_lists_catalog(tmp_path):
     exp.base = None
     with pytest.raises(ConfigError, match="joey-1.*mammoth-1|elephant-1"):
         run(exp, machine)
+
+
+def test_inferred_out_root_is_not_the_repo_even_when_run_there(clean_env, monkeypatch):
+    monkeypatch.chdir(ROOT)
+    m, _ = find_machine(None)
+    assert m.out_root == str(clean_env / "ojh_runs")
+
+
+def test_out_root_or_model_dir_inside_the_repo_is_refused(clean_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("OJH_OUT_ROOT", str(ROOT / "ojh_runs"))
+    with pytest.raises(ConfigError, match="inside the repo"):
+        find_machine(None)
+    monkeypatch.delenv("OJH_OUT_ROOT")
+    monkeypatch.setenv("OJH_MODEL_DIR", str(ROOT / "models"))
+    with pytest.raises(ConfigError, match="model_dir.*inside the repo"):
+        find_machine(None)
+    p = tmp_path / "m.yaml"
+    p.write_text(yaml.safe_dump({"python": "py", "model_dir": "/models", "out_root": str(ROOT / "runs")}))
+    with pytest.raises(ConfigError, match="out_root.*inside the repo"):
+        find_machine(str(p))
+
+
+def test_gitignore_covers_ojh_runs():
+    assert "ojh_runs/" in (ROOT / ".gitignore").read_text().split()
