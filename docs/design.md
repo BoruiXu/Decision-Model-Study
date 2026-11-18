@@ -1,6 +1,6 @@
 # OneJev 训练 Harness 设计
 
-> - 版本：v1 设计（2026-11-17）。
+> - 版本：v1 设计（2026-11-17）；第 15 节一次性流程（2026-11-18）。
 > - 本文件描述 harness 的设计；实现见 `harness/`，验收结果见 `docs/acceptance.md`。
 
 ## 1. 为什么做
@@ -145,6 +145,9 @@ repo 里不放任何项目的机器配置、数据路径或任务规则，这些
 
 | 命令 | 做什么 | 由谁决定 |
 |---|---|---|
+| `ojh inspect PATH` | 只读：列出数据文件的事实（第 15 节） | 确定性，不做决定 |
+| `ojh make-split …` | 按组确定性地切 select/report，或从 train 切出 val（第 15 节） | 确定性 |
+| `ojh run EXP --base B --gpus i,j` | prepare → resolve → launch 一次完成，立即返回（第 15 节） | 确定性；基座和卡由用户给 |
 | `ojh setup --machine M` | 建环境，拉 OneJev 并打补丁，逐项校验 sha256 | 确定性 |
 | `ojh fetch-base NAME --machine M` | 按 catalog 下载固定 revision 的基座权重，并校验 sha256 | 确定性 |
 | `ojh prepare EXP` | 用适配器把数据转成 OneJev 行；校验 schema、id 唯一、target 分布、split 字段；按配置派生训练子集；计算 sha256，和 EXP 里写的值比对，不一致就停 | 确定性；新格式由 agent 写适配器 |
@@ -220,6 +223,7 @@ subset:
 **GPU 来源**：
 - `scan`：扫描 `nvidia-smi`，按配置筛卡、加锁。多人共用一台机器时，锁目录必须配成所有人都能写的共享路径；放在个人 home 下互斥不了。
 - `preassigned`：启动前已设好 `CUDA_VISIBLE_DEVICES`（例如调度系统分配的卡），直接用这些卡，跳过扫描和加锁。
+- `explicit`：用 `ojh run --gpus i,j` 指定的卡（第 15 节）。没有机器配置时默认就是它；`--gpus` 给了卡号时也按它处理。
 
 **基座 catalog**：
 
@@ -326,7 +330,7 @@ subset:
   - **分组先验**：给了分组字段时计算，取训练集每组的平均标签；未见过的组用总体平均。
   - **全选正类**：承接率 100%，报告此时的不一致率。
   - **oracle**：给了一致比例字段时计算，直接用真实的一致比例排序。
-- **门**（可以在实验配置里关掉）：在每个评测集的 select 部分上，路由器的 AUC 和组内 AUC 都要高于 TF-IDF 和分组先验。不过就把 run 标成 `failed`，但记录照常写。
+- **门**（可以在实验配置里关掉）：在每个评测集的 select 部分上，路由器的 AUC 和组内 AUC 都要高于 TF-IDF 和分组先验（第 15 节起：高于注册基线中可用的最好一个，含 length）。不过就把 run 标成 `failed`，但记录照常写。
 - **报告**：对比表把路由器和所有对照组放在一起，按评测集分别列出。
 - **report 和 test**：
   - `ojh eval-report` 只有加 `--allow-report` 才评 report 部分，用的是锁定的 checkpoint 和阈值，不重新调参；
@@ -415,3 +419,92 @@ A1 是“harness 与旧流程等价”的判据。不通过时，harness 仍可�
 - OOM 降参表的具体档位；
 - LoRA 合并用 OneJev 自带的 `--merge` 逻辑还是 peft 直接合并（要求合并后保留读出设置，并通过 A7 的一致性检查）；
 - `char_wb` 等基线细节以复制过来的 v1 代码为准，A3 负责核对。
+
+## 15. 一次性流程（one-shot）
+
+### 分工
+
+repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据位置、要用的 GPU、基座**。
+
+- **认数据、改数据是 skill 的事**：agent 用 `ojh inspect` 看事实，判断格式和字段（标签、分组、一致比例、文本、split），需要时写适配器，填实验配置。
+- **脚本只做机械的事**：只读的事实、确定性的切分、校验、解析、启动、finalize、结果页。
+- **代码里不做自动格式识别，也不自动选基座**。基座、卡、训练方式由用户定；不可行时报原因和替代方案，不自动切换。
+
+主路径：`ojh inspect` → agent 写适配器和 `exp.yaml` → `ojh run --base --gpus` → `ojh status` → 读 `RESULT.md`。
+
+### `ojh inspect <path> [--json] [--rows N]`
+
+只读，不写任何文件，不做判断。`<path>` 是文件或目录（目录递归，跳过隐藏项）。支持 jsonl、json、csv、tsv；装了 pyarrow 时也读 parquet，否则列进 `skipped`。每个文件（`--json` 的键）：
+
+- `type`、`size_bytes`、`rows`；`name_hint`：文件名里的 train/training/val/valid/validation/dev/test/eval；
+- `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格能解析成数就按数统计，空单元格算缺失；
+- `split_columns`：名字像 split（split、set、fold、partition 等）或取值都像 split 名的低基数字段，及各取值的行数；
+- `split_file`：JSON 形如 `{集: {"assignment": {id: "select"|"report"}}}` 时，各集的 select/report 数；
+- `onejev`：`passes`、`errors`、`first_errors`，用 `prepare.validate_rows` 检查是否已是 OneJev 行；
+- `samples`：前 N 行（默认 3），字符串截到 200 字符，列表截到 5 项。
+
+文件名像 test 的文件只数行数（`note` 说明），不读字段和样例；样例从不取 test 开头的 split 的行（`test_rows` 给出这种行的数量）。
+
+### `ojh make-split`
+
+`ojh make-split --out <out> --group <点分字段> [--seed 20261115] [--frac 0.5] [--mode select-report|holdout] [--allow-test] <file>...`
+
+确定性、按组：组键排序后用 `random.Random("<seed>:<集名>")` 打乱，逐组贪心：加入第一部分能让它的行数更接近 `frac × 总行数` 就加入，否则进第二部分。同一组永远在同一边。缺组字段的行直接报错。
+
+- **select-report**（默认）：每个文件是一个评测集，集名取文件名主干，或写成 `名字=路径`。`--frac` 是 select 的比例。`--out` 是切分文件，格式就是 `data.split_file`：`{集: {"assignment": {id: "select"|"report"}, "seed", "frac", "group", "source", "source_sha256", "rows": {"select", "report"}, "groups": {"select": [...], "report": [...]}}}`。每行要有 `id`，即适配器产出的 id。已有的 `--out` 内容不同就拒绝覆盖。
+- **holdout**：只接受一个训练文件，`--frac` 是 val 的比例，`--out` 是**目录**（像 `.json` 文件名的 `--out` 会报错）。写出：
+  - `<out>/train.jsonl`、`<out>/val.jsonl`：原样复制的行，保持源文件顺序，每行一个 JSON 对象（csv/tsv 的单元格转成 JSON 值）；不加也不改 id，适配器用同一套规则读这两个文件；
+  - `<out>/manifest.json`：`{"mode": "holdout", "source", "source_sha256", "group", "seed", "frac", "rows": {"train", "val"}, "groups": {"train": [...], "val": [...]}, "sha256": {"train.jsonl", "val.jsonl"}}`。
+
+  实验配置里 `data.train` 指 `<out>/train.jsonl`，`data.eval.val.train_labels` 指 `<out>/val.jsonl`；不写 `split_file` 时 val 全部算 select。已存在的输出文件不覆盖。
+- split 以 test 开头的行、文件名像 test 的文件，都要 `--allow-test` 才读。
+
+### `ojh run <exp.yaml> --base <名字> --gpus <i,j,...> [--recipe <路径>] [--machine <m.yaml>] [--allow-test]`
+
+一次完成 prepare → resolve → launch，立即返回，打印 JSON：`run_dir`、`session`（tmux 会话）、`log`、`done`（DONE 路径）、`base`、`recipe`（`path`、`source`、`mode`）、`gpus`（每张卡的编号、UUID、型号、空闲显存、需要的显存、上面的进程）、`data_sha256`、`machine`（机器配置的来源）、`result`（`RESULT.md` 将出现的位置）。
+
+- `--base`、`--gpus` 覆盖或补上 `exp.yaml` 里的 `base`、`gpus`（`gpus` 可以写卡号列表）。基座从不自动选：两处都没有就报错并列出 catalog 里的基座。
+- 配方：`--recipe` > `exp.yaml` 的 `recipe` > 基座的 `default_recipes`。
+- resolve 判定不可行时退出码 2，打印替代方案；不换基座、不换配方、不启动。
+
+### 指定的卡（`gpu_source: explicit`）
+
+`--gpus` 列出的每张卡都要：在 nvidia-smi 里存在；不被 `gpu_include`/`gpu_exclude` 排除；空闲显存 ≥ max(resolve 的每卡估算, `min_free_mib`)。失败时逐卡给出原因，并列出卡上的进程（pid、进程名、显存，来自 `--query-compute-apps`）；resolve 把其他空闲显存够的卡作为事实列在替代方案里。lock 记下 `machine.gpu.source: explicit` 和卡号，`feasibility.cards` 记下检查结果。runner 不扫描也不等卡：按 lock 里的卡号重新检查，配了 `lock_dir` 时同样加锁（被别人锁住就失败，`DONE` 的 `stage` 是 `acquire`），然后把这些卡作为预先分配的卡交给训练。`scan` 和 `preassigned` 不变。
+
+### 基座的默认配方
+
+`catalog/bases/<基座>.yaml` 的 `default_recipes`：键是卡数 `N`、范围 `A-B` 或 `A+`，值是相对 repo 根目录的配方路径。现有的：joey-1 1 卡 → `joey_full_1gpu`；elephant-1 2–8 卡 → `elephant_full_fsdp`；mammoth-1 2–8 卡 → `mammoth_lora_ddp`。其余基座没有合适的示例配方，不写。没有对应卡数的默认值时报错，列出该基座的默认值、所有示例配方和 `--recipe`。
+
+### 机器配置可选
+
+按顺序取第一个：`--machine`；`$OJH_MACHINE`（指向的文件必须存在）；`~/.config/onejev-harness/machine.yaml`；推断的默认值：python = `<repo>/.venv/bin/python`，`out_root` = `$OJH_OUT_ROOT` 或 `./ojh_runs`（转成绝对路径），`model_dir` = `$OJH_MODEL_DIR` 或 `~/.cache/onejev-harness/models`，登记表在 `out_root` 下，不加锁，`gpu_source: explicit`。`setup`、`fetch-base`、`prepare`、`resolve`、`run` 都按这个顺序取。lock 的 `machine` 记下实际用的全部设置和 `origin`（来源和文件路径）；已有的机器配置文件照常可用。
+
+### 适配器
+
+`data.adapter` 可以是 `adapters/` 里的模块名，也可以是 `.py` 文件路径（相对实验配置文件）。参数：`data.adapter_args`（所有文件）、`data.train_adapter_args`（训练文件）、`data.eval.<集>.adapter_args`（该评测集的文件），后两者合并在前者之上，以 `adapt(path, **args)` 传入；这样一个带 split 列的文件可以同时作训练和评测来源。适配器给训练行设 `split: "train"`（配方用 `--split train`）。prepare 在 `prepared.json` 记下适配器文件的 sha256 和参数；resolve 发现适配器在 prepare 之后改过就报错，把 sha256 和参数写进 lock，并把文件复制到 `<run>/adapter/`；`RUN_CARD.md` 和 `RESULT.md` 写明适配器和 sha256。确定性检查不变。
+
+### 实验配置模板
+
+`examples/exp.template.yaml`：每个键都有注释（`data.train`、带 `train_labels`/`reference`/`adapter_args` 的评测集、`split_file`、`fields.label/group/consistency/text`、`subset`、`evaluator`、`seeds`、`merge`、`overrides`）。`base`、`gpus`、`recipe` 可以不写，由 `ojh run` 提供。
+
+### 结果页：`RESULT.md` 和 `result.json`
+
+finalize 最后写进 run 目录（`result.json` 是机器可读的同一份内容）：
+
+- 数据：各部分行数（train、select 及各评测集、report）、训练和参照标签版本、sha256、适配器；
+- 基座、配方（lock 记下配方路径和 sha256）、卡和训练墙钟时间、GPU 时间；
+- 训练曲线（每次评测的 select NLL），选中的 step、checkpoint 和 sha256、复评 NLL；
+- select 合并集上的指标表：模型、每个基线、全选正类、oracle 的 AUC、组内 AUC、各预算下的承接率（带 95% bootstrap 置信区间）和各自最佳阈值下的 Jaccard；
+- 锁定的阈值：合并集和各评测集上的承接率、Jaccard、不一致率；
+- 门的结论和逐项理由（模型对最好基线的比较）；失败项、警告（被去掉的 id、未见过的组、select 太少、按题 bootstrap、读了 test、override、门关闭、推断的机器配置）；
+- 下一步命令：`ojh note`、`ojh eval-report --allow-report`、`ojh cleanup`、`ojh cleanup --confirm`，读 report 和删除的两条标明要用户批准。
+
+`ojh status <RUN>` 在 `RESULT.md` 存在时打印它的路径。
+
+### Bootstrap 置信区间
+
+评测器对 AUC、组内 AUC 和各预算下的承接率给出 95% 置信区间（2.5 和 97.5 百分位）：每次重抽先有放回地抽与组数相同个组，再在每个抽到的组里有放回地抽与组大小相同条题；同一组被抽到两次算两个簇（组内 AUC 不跨簇配对）。同一评测集的所有方法用同一组重抽，区间可以成对比较。默认 1000 次、种子 20261115，`evaluator.bootstrap_reps`、`evaluator.bootstrap_seed` 可改，0 关闭。没有分组字段时按题重抽，并在结果里写明。计算用向量化实现，测试核对它与第 10 节移植的 v1 函数一致。
+
+### 基线插件
+
+`harness/baselines` 里有一个小注册表：`Baseline(name, needs, fit, description)`，`needs` 是需要的字段（`text`、`group`），缺了就跳过；`fit(训练样例)` 返回带 `predict(样例) -> [0,1] 概率` 的对象。内置 `tfidf`、`group_prior` 和 `length`（对 log(1+字符长度) 做逻辑回归，软目标同 TF-IDF）；`register()` 可以加。门对每个评测集比较模型和可用基线中最好的一个（每项指标分别取最好），并记下是哪个；没有任何基线的集照旧判不通过。插件评测器的默认基线也用这个注册表。
