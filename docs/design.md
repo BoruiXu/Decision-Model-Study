@@ -473,6 +473,10 @@ test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用
 - 配方：`--recipe` > `exp.yaml` 的 `recipe` > 基座的 `default_recipes`。
 - resolve 判定不可行时退出码 2，打印替代方案；不换基座、不换配方、不启动。
 
+### 实验名和 prepared 目录
+
+prepared 数据放在 `<out_root>/<name>/prepared/`，`prepared.json` 记下生成它的实验文件路径。另一份实验文件用同一个 `name` 再 prepare（包括 `ojh run`、`ojh check`）时拒绝，避免两个实验互相覆盖数据；同一个文件重跑照常覆盖；`--force` 强制覆盖（已经 resolve 的 run 随后会在 sha256 校验时失败）。skill 建议的名字含数据名、基座、训练方式和卡数。
+
 ### `ojh check`（不看卡的检查）
 
 参数同 `ojh run`。依次做 prepare、配置和配方、适配器和参数与 prepared 的一致性、plan-only、环境指纹，打印 JSON（每卡显存估算、plan、指纹、数据 sha256），不判断卡、不写 lock、不建 run 目录、不启动。resolve 本身也按这个顺序：卡放在最后检查，卡忙时不会挡住数据或 plan 的错误。

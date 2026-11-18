@@ -262,3 +262,40 @@ def test_choice_target_message_names_the_criteria():
     ch["target"] = {"c": 1.0}
     (err,) = validate_rows([ch])
     assert "choice" in err and "['a', 'b']" in err and "['c']" in err
+
+
+def test_prepared_dir_of_another_experiment_is_not_overwritten(tmp_path):
+    from harness.config import ConfigError
+    a = make_exp(tmp_path, [row("t1"), row("t2")], evals={"v": ([row("v1", split="val")], None)})
+    out = tmp_path / "out" / "e" / "prepared"
+    info = prepare(a, out, source=str(tmp_path / "a" / "exp.yaml"))
+    assert info["experiment"] == {"name": "e", "path": str(tmp_path / "a" / "exp.yaml")}
+    prepare(a, out, source=str(tmp_path / "a" / "exp.yaml"))  # the same experiment file again: fine
+    with pytest.raises(ConfigError) as e:
+        prepare(a, out, source=str(tmp_path / "b" / "exp.yaml"))
+    msg = str(e.value)
+    assert str(tmp_path / "a" / "exp.yaml") in msg and str(tmp_path / "b" / "exp.yaml") in msg and "--force" in msg
+    info = prepare(a, out, source=str(tmp_path / "b" / "exp.yaml"), force=True)
+    assert info["experiment"]["path"] == str(tmp_path / "b" / "exp.yaml")
+
+
+def test_cli_prepare_and_run_refuse_without_force(tmp_path, monkeypatch, capsys):
+    import yaml
+    from harness import cli
+    monkeypatch.setenv("OJH_OUT_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("OJH_MODEL_DIR", str(tmp_path / "models"))
+    monkeypatch.delenv("OJH_MACHINE", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for d in ("a", "b"):
+        (tmp_path / d).mkdir()
+        write(tmp_path / d / "train.jsonl", [row("t1"), row("t2")])
+        write(tmp_path / d / "val.jsonl", [row("v1", split="val")])
+        (tmp_path / d / "exp.yaml").write_text(yaml.safe_dump({
+            "name": "same", "data": {"train": "train.jsonl", "eval": {"v": {"train_labels": "val.jsonl"}}},
+            "fields": {"label": "target.yes"}}))
+    assert cli.main(["prepare", str(tmp_path / "a" / "exp.yaml")]) == 0
+    assert cli.main(["prepare", str(tmp_path / "b" / "exp.yaml")]) == 1
+    assert "--force" in capsys.readouterr().err
+    assert cli.main(["prepare", str(tmp_path / "b" / "exp.yaml"), "--force"]) == 0
+    assert cli.main(["run", str(tmp_path / "a" / "exp.yaml"), "--base", "joey-1", "--gpus", "0"]) == 1
+    assert "--force" in capsys.readouterr().err

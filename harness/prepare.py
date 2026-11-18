@@ -222,8 +222,24 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(dumps_line(r))
 
 
-def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -> dict:
+def _check_owner(out_dir: Path, exp: ExperimentConfig, source: str | None, force: bool) -> None:
+    """Refuse to overwrite data prepared from another experiment file that shares this experiment name."""
+    info_path = out_dir / "prepared.json"
+    if source is None or force or not info_path.is_file():
+        return
+    old = (json.loads(info_path.read_text()).get("experiment") or {}).get("path")
+    if old and old != source:
+        raise ConfigError(f"{out_dir} holds data prepared from {old}, a different experiment file with the same "
+                          f"name {exp.name!r} (this one is {source}). Give one of them another name, or pass "
+                          "--force to overwrite (runs resolved from the old data then fail their sha256 check)")
+
+
+def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False, source: str | None = None,
+            force: bool = False) -> dict:
+    """``source``: the experiment file; data prepared from another file with the same experiment name is
+    not overwritten unless ``force``."""
     out_dir = Path(out_dir)
+    _check_owner(out_dir, exp, source, force)
     data = exp.data
     src_sha = _sha256(data.train)
     if data.train_sha256 is None:
@@ -265,6 +281,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     (out_dir / "select_index.json").write_text(json.dumps(parts.select_index, indent=2))
     afile = adapter_file(data.adapter)
     info = {
+        "experiment": {"name": exp.name, "path": source},
         "allow_test": bool(allow_test),
         "adapter": {"name": data.adapter, "file": str(afile), "sha256": _sha256(afile)},
         "adapter_args": {"global": data.adapter_args, "train": data.train_adapter_args,

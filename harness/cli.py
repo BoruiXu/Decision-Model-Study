@@ -109,7 +109,7 @@ def cmd_prepare(a) -> int:
     (m, _), exp = find_machine(a.machine), load_experiment(a.exp)
     out = Path(m.out_root) / exp.name / "prepared"
     check_writable(m, out)
-    info = prepare.prepare(exp, out, allow_test=a.allow_test)
+    info = prepare.prepare(exp, out, allow_test=a.allow_test, source=os.path.abspath(a.exp), force=a.force)
     print(json.dumps(info["counts"], indent=2))
     return 0
 
@@ -130,7 +130,7 @@ def cmd_resolve(a) -> int:
 def cmd_run(a) -> int:
     gpus = oneshot.parse_gpus(a.gpus) if a.gpus is not None else None
     out = oneshot.run(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine, allow_test=a.allow_test,
-                      allow_shared=a.allow_shared)
+                      allow_shared=a.allow_shared, force=a.force)
     print(json.dumps(out, indent=2))
     return 0
 
@@ -138,7 +138,7 @@ def cmd_run(a) -> int:
 def cmd_check(a) -> int:
     gpus = oneshot.parse_gpus(a.gpus) if a.gpus is not None else None
     out = oneshot.check(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine,
-                        allow_test=a.allow_test)
+                        allow_test=a.allow_test, force=a.force)
     print(json.dumps(out, indent=2))
     return 0
 
@@ -284,6 +284,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("exp")
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite data prepared from another experiment file with the same name")
     s = cmd("resolve", cmd_resolve, "resolve an experiment into run.lock.yaml")
     s.add_argument("exp")
     s.add_argument("--machine", help=MACHINE_HELP)
@@ -296,6 +298,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--recipe", help="recipe file (default: the experiment's recipe, else the base's default_recipes)")
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite data prepared from another experiment file with the same name")
     s.add_argument("--allow-shared", action="store_true",
                    help="use requested cards that carry other processes (ask the user first; recorded in the lock)")
     s = cmd("check", cmd_check, "validate an experiment like ojh run (prepare, config, adapter, plan-only, "
@@ -307,6 +311,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--recipe", help="recipe file (as ojh run)")
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
+    s.add_argument("--force", action="store_true",
+                   help="overwrite data prepared from another experiment file with the same name")
     s = cmd("launch", cmd_launch, "start a run in tmux and return at once")
     s.add_argument("lock")
     s = cmd("status", cmd_status, "short progress report of a run")

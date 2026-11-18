@@ -7,6 +7,7 @@ An infeasible setup raises ``Infeasible`` with its alternatives and launches not
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -35,7 +36,7 @@ def _n_gpus(gpus) -> int:
     return len(gpus) if isinstance(gpus, list) else int(gpus)
 
 
-def _prepared(exp_path, base, gpus, recipe, machine, allow_test):
+def _prepared(exp_path, base, gpus, recipe, machine, allow_test, force=False):
     """Machine, origin, experiment (base, gpus and recipe filled in) and recipe source, after prepare."""
     m, origin = find_machine(machine)
     exp = load_experiment(exp_path)
@@ -60,7 +61,7 @@ def _prepared(exp_path, base, gpus, recipe, machine, allow_test):
 
     out = Path(m.out_root) / exp.name / "prepared"
     check_writable(m, out)
-    prepare.prepare(exp, out, allow_test=allow_test)
+    prepare.prepare(exp, out, allow_test=allow_test, source=os.path.abspath(exp_path), force=force)
     return m, origin, exp, source
 
 
@@ -69,11 +70,11 @@ def _probes(**kw) -> dict:
 
 
 def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
-          machine: str | None = None, allow_test: bool = False, query=None, apps_query=None, plan_runner=None,
-          fingerprint=None) -> dict:
+          machine: str | None = None, allow_test: bool = False, force: bool = False, query=None, apps_query=None,
+          plan_runner=None, fingerprint=None) -> dict:
     """``ojh check``: what ``ojh run`` validates except the cards (prepare, config, adapter, plan-only,
     fingerprint). Writes the prepared data like run, but no lock and no run dir; launches nothing."""
-    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test)
+    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test, force)
     lock = resolve.check(exp, m, machine_origin=origin, **_probes(
         query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     return {"ok": True, "cards_checked": False, "base": exp.base,
@@ -87,11 +88,11 @@ def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, r
 
 
 def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
-        machine: str | None = None, allow_test: bool = False, allow_shared: bool = False, query=None,
-        apps_query=None, plan_runner=None, fingerprint=None, tmux=None) -> dict:
+        machine: str | None = None, allow_test: bool = False, allow_shared: bool = False, force: bool = False,
+        query=None, apps_query=None, plan_runner=None, fingerprint=None, tmux=None) -> dict:
     """``allow_shared``: the requested cards may carry other users' processes (only after asking the user);
     recorded in the lock."""
-    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test)
+    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test, force)
     lock_path = resolve.resolve(exp, m, machine_origin=origin, allow_shared=allow_shared, **_probes(
         query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     started = launch.launch(lock_path, tmux=tmux or launch._tmux)
