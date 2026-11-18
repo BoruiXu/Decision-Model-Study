@@ -189,3 +189,9 @@ def test_ssh_examples_source_the_env_file():
     for p in (ROOT / "README.md", ROOT / "skills" / "training-with-onejev" / "SKILL.md"):
         text = p.read_text()
         assert "ssh <host> 'source /big/disk/ojh/ojh-env.sh && <repo>/.venv/bin/ojh" in text, p
+
+
+def test_design_switches_to_lora_with_a_recipe():
+    text = (ROOT / "docs" / "design.md").read_text()
+    lora = [line for line in text.splitlines() if "LoRA" in line and ("切换" in line or "提议" in line)]
+    assert lora and not any("override" in line and "--recipe" not in line for line in lora), lora
