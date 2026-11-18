@@ -19,9 +19,10 @@ from harness.resolve import build_command, check_data
 
 
 def lock_allows_sharing(lock: dict) -> bool:
-    """Whether the run's explicit cards may carry other processes: the lock's ``machine.gpu.allow_shared``
-    (ojh run --allow-shared). Locks written before that key existed keep their behaviour of the time, when
-    explicit cards were checked for memory only: sharing allowed."""
+    """Whether the run's cards (explicit or scanned) may carry other compute processes: the lock's
+    ``machine.gpu.allow_shared`` (ojh run --allow-shared). The runner, ojh finalize and ojh eval-report all
+    use this. Locks written before that key existed keep their behaviour of the time, when cards were judged
+    by free memory only: they are treated as shareable everywhere."""
     return bool(lock["machine"]["gpu"].get("allow_shared", True))
 
 
@@ -113,9 +114,13 @@ def _run(lock_path, acquire, popen, finalize, killpg) -> int:
             from harness.gpu import acquire
         stage = "acquire"
         g = lock["machine"]["gpu"]
-        kw = ({"explicit": list(g["explicit"]), "need_mib": math.ceil(float(lock["estimate_gib"]) * 1024),
-               "allow_shared": lock_allows_sharing(lock)}
-              if g["source"] == "explicit" else {})
+        if g["source"] == "explicit":
+            kw = {"explicit": list(g["explicit"]), "need_mib": math.ceil(float(lock["estimate_gib"]) * 1024),
+                  "allow_shared": lock_allows_sharing(lock)}
+        elif g["source"] == "scan":
+            kw = {"allow_shared": lock_allows_sharing(lock)}
+        else:  # preassigned: the cards are given, not chosen
+            kw = {}
         lease = acquire(_machine(lock["machine"]), lock["n_gpus"], **kw)
         _write_json(run_dir / "gpus.json", [{"uuid": u, "name": n} for u, n in zip(lease.uuids, lease.names)])
         repo = lock["repo_root"]

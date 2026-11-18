@@ -159,8 +159,13 @@ def _on_one_gpu(run, fn, allow_shared: bool = False):
     when the lock allows it (runner.lock_allows_sharing) or the command got --allow-shared."""
     lock = _lock_of(run)
     g = lock["machine"]["gpu"]
-    kw = ({"explicit": list(g["explicit"])[:1], "allow_shared": allow_shared or runner.lock_allows_sharing(lock)}
-          if g["source"] == "explicit" else {})
+    shared = allow_shared or runner.lock_allows_sharing(lock)
+    if g["source"] == "explicit":
+        kw = {"explicit": list(g["explicit"])[:1], "allow_shared": shared}
+    elif g["source"] == "scan":
+        kw = {"allow_shared": shared}
+    else:
+        kw = {}
     lease = gpu.acquire(runner._machine(lock["machine"]), 1, **kw)
     try:
         return fn(lease)

@@ -291,3 +291,19 @@ def test_every_alternative_is_a_runnable_ojh_run_line(tmp_path):
     assert "--gpus 3 --recipe examples/recipes/joey_lora_1gpu.yaml" in lora
     smaller = next(a for a in runnable if "smaller base" in a)
     assert "--base joey-1 --gpus 3 --recipe examples/recipes/joey_full_1gpu.yaml" in smaller
+
+
+@pytest.mark.parametrize("gpu_extra,expected", [({}, True), ({"allow_shared": False}, False),
+                                                 ({"allow_shared": True}, True)])
+def test_runner_passes_the_sharing_choice_in_scan_mode(tmp_path, gpu_extra, expected):
+    from test_runner import FakeLease, FakePopen, make_lock
+    from harness.runner import run
+    path, lock, run_dir = make_lock(tmp_path, seeds=(42,))
+    lock["machine"]["gpu"].pop("allow_shared", None)
+    lock["machine"]["gpu"].update(gpu_extra)  # no key: a lock from before the rule (sharing allowed then)
+    path.write_text(yaml.safe_dump(lock))
+    seen = {}
+    FakePopen.codes = [0]
+    assert run(path, acquire=lambda m, n, **kw: seen.update(source=m.gpu_source, **kw) or FakeLease(),
+               popen=FakePopen, finalize=lambda rd: None, killpg=lambda *a: None) == 0
+    assert seen == {"source": "scan", "allow_shared": expected}

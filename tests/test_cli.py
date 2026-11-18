@@ -149,7 +149,7 @@ def test_finalize_and_eval_report_acquire_one_gpu(tmp_path, monkeypatch, capsys)
         def release(self):
             log.append("release")
 
-    monkeypatch.setattr(cli.gpu, "acquire", lambda machine, n: log.append(("acquire", n)) or Lease())
+    monkeypatch.setattr(cli.gpu, "acquire", lambda machine, n, **kw: log.append(("acquire", n)) or Lease())
     monkeypatch.setattr(cli.finalize, "finalize", lambda rd, devices=None: log.append(("fin", devices)) or
                         {"run_id": "r", "status": "done", "failures": []})
     assert cli.main(["finalize", str(run_dir)]) == 0

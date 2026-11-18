@@ -117,7 +117,7 @@ ojh finalize <RUN>                                  # 选 checkpoint、复评、
 
 ## 配置
 
-- **机器配置**（可选）：按顺序取 `--machine`、`$OJH_MACHINE`、`~/.config/onejev-harness/machine.yaml`，都没有就推断（见上）。模板 `examples/machine.example.yaml`（每个键都有说明）。`gpu_source`：`scan`（扫描加锁）、`preassigned`（用 `CUDA_VISIBLE_DEVICES`）、`explicit`（用 `--gpus`；推断时的默认值）。实际用的设置和来源记进 lock。`forbidden_write_roots` 里的目录不会被写：`prepare`（prepared 目录）、`resolve`（run 目录、登记表、`lock_dir`）、`fetch-base`（基座目录）和取卡加锁前都会检查，要写的路径在其下（含经符号链接）就报 `ConfigError`。
+- **机器配置**（可选）：按顺序取 `--machine`、`$OJH_MACHINE`、`~/.config/onejev-harness/machine.yaml`，都没有就推断（见上）。模板 `examples/machine.example.yaml`（每个键都有说明）。`gpu_source`：`scan`（扫描加锁，等到卡满足 `min_free_mib` 且没有别人的进程，最长 `wait_timeout_s`；共用卡要 `--allow-shared`）、`preassigned`（用 `CUDA_VISIBLE_DEVICES`）、`explicit`（用 `--gpus`；推断时的默认值）。实际用的设置和来源记进 lock。`forbidden_write_roots` 里的目录不会被写：`prepare`（prepared 目录）、`resolve`（run 目录、登记表、`lock_dir`）、`fetch-base`（基座目录）和取卡加锁前都会检查，要写的路径在其下（含经符号链接）就报 `ConfigError`。
 - **路径**：配置里的路径可以用 `~` 和 `$VAR`。相对路径按所在配置文件的目录解析：机器配置里的相对机器配置文件，实验配置里的（数据、评测集、`split_file`、适配器文件、配方、评测插件）相对实验配置文件；配方在那里找不到、但在 repo 根目录下存在时（如 `examples/recipes/…`），取 repo 根目录下的。解析后都是绝对路径，和在哪个目录下运行 `ojh` 无关。
 - **实验名**：`name` 决定 `<out_root>/<name>/prepared/`。另一份实验文件用过同一个名字时，prepare（以及 `ojh run`、`ojh check`）拒绝覆盖它的 prepared 数据（`prepared.json` 记下实验文件路径），换个名字，或确认后加 `--force`。
 - **实验配置**：模板 `examples/exp.template.yaml`（每个键都有注释）；复现 DynamicServe v1 elephant 的完整例子是 `examples/dynamicserve_v1_repro.yaml`（路径用占位符，`docs/design.md` 第 7 节逐键说明）。`data.split_file`（可选）把评测集的行分成 select 和 report：不写则所有行都算 select；写了则每个评测集都必须在其中，缺失会报错，集内未分配的 id 被丢弃并记录。每个评测集可以给 `train_labels`（选模算 NLL）和 `reference`（定阈值、AUC、门）两份标签。`evaluator.bootstrap_reps`（默认 1000，0 关闭）和 `bootstrap_seed` 控制置信区间。

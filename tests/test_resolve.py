@@ -418,3 +418,12 @@ def test_resolve_refuses_a_train_file_that_is_not_the_prepared_one(tmp_path):
     (tmp_path / "a" / "train.jsonl").write_text((tmp_path / "a" / "train.jsonl").read_text() + "\n")
     with pytest.raises(ConfigError, match="changed since prepare"):
         _resolve(a, machine, source=str(tmp_path / "a" / "exp.yaml"))
+
+
+def test_scan_resolve_leaves_min_free_mib_to_the_runners_wait(tmp_path):
+    """The cards are below min_free_mib now but hold the estimate: resolve passes, the runner waits."""
+    exp, machine = setup(tmp_path, base="joey-1", recipe="joey_full_1gpu")
+    machine.min_free_mib = 60000
+    lock = yaml.safe_load(resolve(exp, machine, query=lambda uuid=None: smi(1, free_mib=40000),
+                                  plan_runner=plan_ok(10, 1), fingerprint=fake_fp).read_text())
+    assert lock["feasibility"]["checked"] is True and lock["feasibility"]["min_free_gib"] == 39.1

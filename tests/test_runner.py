@@ -99,7 +99,7 @@ def test_runner_writes_done_on_child_failure(tmp_path):
     lease = FakeLease()
     FakePopen.codes = [3]
     fin = []
-    rc = run(path, acquire=lambda m, n: lease, popen=FakePopen, finalize=fin.append)
+    rc = run(path, acquire=lambda m, n, **kw: lease, popen=FakePopen, finalize=fin.append)
     assert rc == 3 and fin == [] and lease.released
     done = json.loads((run_dir / "DONE").read_text())
     assert done["exit_code"] == 3 and done["stage"] == "train" and done["end"].endswith("Z")
@@ -113,7 +113,7 @@ def test_runner_runs_seeds_in_order(tmp_path):
     path, lock, run_dir = make_lock(tmp_path)
     FakePopen.codes = [0, 0]
     fin = []
-    rc = run(path, acquire=lambda m, n: FakeLease(), popen=FakePopen, finalize=fin.append)
+    rc = run(path, acquire=lambda m, n, **kw: FakeLease(), popen=FakePopen, finalize=fin.append)
     assert rc == 0 and fin == [run_dir]
     cmds = [c for c, _ in FakePopen.calls]
     assert [c[c.index("--seed") + 1] for c in cmds] == ["42", "7"]
@@ -135,7 +135,7 @@ def test_runner_runs_seeds_in_order(tmp_path):
 def test_runner_acquire_failure_and_finalize_failure(tmp_path):
     path, _, run_dir = make_lock(tmp_path)
 
-    def boom(m, n):
+    def boom(m, n, **kw):
         raise TimeoutError("no gpus")
 
     assert run(path, acquire=boom, popen=FakePopen, finalize=lambda d: None) != 0
@@ -151,7 +151,7 @@ def test_runner_acquire_failure_and_finalize_failure(tmp_path):
     def bad_fin(d):
         raise RuntimeError("x\nsecond line")
 
-    assert run(path, acquire=lambda m, n: lease, popen=FakePopen, finalize=bad_fin) != 0
+    assert run(path, acquire=lambda m, n, **kw: lease, popen=FakePopen, finalize=bad_fin) != 0
     done = json.loads((run_dir / "DONE").read_text())
     assert done["stage"] == "finalize" and done["exit_code"] != 0 and lease.released
     assert done["error"] == "RuntimeError: x second line"  # one line
@@ -180,7 +180,7 @@ def test_interrupt_terminates_child_before_release_and_writes_done(tmp_path):
         events.append("term")
 
     lease = Lease()
-    rc = run(path, acquire=lambda m, n: lease, popen=lambda c, **kw: Hung(),
+    rc = run(path, acquire=lambda m, n, **kw: lease, popen=lambda c, **kw: Hung(),
              finalize=lambda d: events.append("finalize"), killpg=killpg)
     import signal
     assert rc != 0 and "finalize" not in events
@@ -193,7 +193,7 @@ def test_interrupt_terminates_child_before_release_and_writes_done(tmp_path):
 def test_child_started_in_own_session(tmp_path):
     path, _, _ = make_lock(tmp_path)
     FakePopen.codes = [0, 0]
-    run(path, acquire=lambda m, n: FakeLease(), popen=FakePopen, finalize=lambda d: None)
+    run(path, acquire=lambda m, n, **kw: FakeLease(), popen=FakePopen, finalize=lambda d: None)
     assert FakePopen.calls[0][1]["start_new_session"] is True
 
 
@@ -210,7 +210,7 @@ def test_runner_refuses_changed_prepared_data(tmp_path, capsys, changed):
     path, lock, run_dir = make_lock(tmp_path)
     (Path(lock["data"]["prepared_dir"]) / changed).write_text("re-prepared\n")  # prepare re-ran in place
     acquired = []
-    rc = run(path, acquire=lambda m, n: acquired.append(n) or FakeLease(), popen=FakePopen, finalize=lambda d: None)
+    rc = run(path, acquire=lambda m, n, **kw: acquired.append(n) or FakeLease(), popen=FakePopen, finalize=lambda d: None)
     assert rc == 1 and acquired == [] and FakePopen.calls == []
     done = json.loads((run_dir / "DONE").read_text())
     assert done["exit_code"] == 1 and done["stage"] == "verify" and changed in done["error"]
@@ -244,7 +244,7 @@ def test_second_signal_during_cleanup_is_ignored(tmp_path):
 
     before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
     lease = Lease()
-    rc = run(path, acquire=lambda m, n: lease, popen=lambda c, **kw: Hung(), finalize=lambda d: None,
+    rc = run(path, acquire=lambda m, n, **kw: lease, popen=lambda c, **kw: Hung(), finalize=lambda d: None,
              killpg=killpg)
     assert rc != 0 and lease.released
     assert events == [("killpg", signal.SIGTERM), "reaped", "release"]
@@ -261,7 +261,7 @@ def test_interrupt_inside_popen_still_writes_done(tmp_path):
         signal.raise_signal(signal.SIGTERM)
         raise AssertionError("unreachable")
 
-    assert run(path, acquire=lambda m, n: lease, popen=popen, finalize=lambda d: None) != 0
+    assert run(path, acquire=lambda m, n, **kw: lease, popen=popen, finalize=lambda d: None) != 0
     done = json.loads((run_dir / "DONE").read_text())
     assert done["stage"] == "train" and "Interrupted" in done["error"] and lease.released
 
@@ -277,7 +277,7 @@ def test_command_written_before_each_seed_starts(tmp_path):
             super().__init__(cmd, **kw)
 
     FakePopen.codes = [0, 0]
-    assert run(path, acquire=lambda m, n: FakeLease(), popen=Recording, finalize=lambda d: None) == 0
+    assert run(path, acquire=lambda m, n, **kw: FakeLease(), popen=Recording, finalize=lambda d: None) == 0
     assert [s["seed"] for s in seen] == [42, 7]
     for s, (cmd, kw) in zip(seen, FakePopen.calls):
         assert s["argv"] == cmd and s["cwd"] == kw["cwd"] == lock["repo_root"]
@@ -292,7 +292,7 @@ def test_unreadable_lock_writes_done(tmp_path, text, capsys):
     path = run_dir / "run.lock.yaml"
     path.write_text(text)
     acquired = []
-    assert run(path, acquire=lambda m, n: acquired.append(n), popen=FakePopen, finalize=lambda d: None) == 1
+    assert run(path, acquire=lambda m, n, **kw: acquired.append(n), popen=FakePopen, finalize=lambda d: None) == 1
     done = json.loads((run_dir / "DONE").read_text())
     assert done["exit_code"] == 1 and done["stage"] == "verify" and done["error"]
     assert (run_dir / "status").read_text().strip() == "failed" and acquired == []

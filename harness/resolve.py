@@ -432,7 +432,7 @@ def _check_feasible(machine, base, mode, n, parallel, query, explicit=None,
                          [f"wait or free cards (or relax gpu_include/gpu_exclude)",
                           f"use fewer GPUs (gpus: {len(chosen)})" if chosen else "use another machine"])
     free = min(g.free_mib for g in chosen) / 1024
-    if need <= free and min(g.free_mib for g in chosen) >= machine.min_free_mib:
+    if need <= free:  # min_free_mib and other processes are the runner's to wait for (acquire, wait_timeout_s)
         return need, {"checked": True, "need_gib_per_card": round(need, 1), "min_free_gib": round(free, 1),
                       "cards": [g.uuid for g in chosen]}
     listed = [{"index": g.index, "free_mib": g.free_mib, "processes": None} for g in cards]

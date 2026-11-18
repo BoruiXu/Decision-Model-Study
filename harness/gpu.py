@@ -159,6 +159,7 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
 
 def _explicit(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query,
               allow_shared: bool = False) -> "GpuLease":
+    apps_query = apps_query or _nvidia_smi_apps
     if not explicit:
         raise ConfigError("gpu_source is 'explicit' but no cards were given: pass --gpus i,j,...")
     if len(explicit) != n:
@@ -274,14 +275,18 @@ def _preassigned(n: int, query) -> GpuLease:
 
 def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sleep,
             clock=time.monotonic, explicit: list[int] | None = None, need_mib: int = 0,
-            apps_query=_nvidia_smi_apps, allow_shared: bool = False) -> GpuLease:
+            apps_query=None, allow_shared: bool = False) -> GpuLease:
     """Pick and lock ``n`` GPUs according to ``machine``; hold the returned lease for the whole run.
 
-    ``query(uuid=None)`` returns nvidia-smi csv text for all cards, or for one card when given its uuid.
-    With ``gpu_source: explicit`` the cards are ``explicit`` (nvidia-smi indices): validated with
-    ``check_explicit`` against ``need_mib`` (refused when another process uses one, unless
-    ``allow_shared``), locked when ``lock_dir`` is set, never waited for.
+    ``query(uuid=None)`` returns nvidia-smi csv text for all cards, or for one card when given its uuid;
+    ``apps_query()`` the compute processes (default: nvidia-smi --query-compute-apps).
+    ``gpu_source: scan`` polls every RETRY_S seconds up to ``wait_timeout_s`` for cards allowed by
+    gpu_include/gpu_exclude with at least ``min_free_mib`` free and, unless ``allow_shared``, no other compute
+    process (an unreadable process list counts as unknown, so the card waits too); the timeout names each
+    card's problem at the last check. ``explicit``: the given cards are validated once with
+    ``check_explicit`` against ``need_mib`` and refused at once, never waited for.
     """
+    apps_query = apps_query or _nvidia_smi_apps
     if machine.order != "free_desc":
         raise ConfigError(f"unsupported gpu order: {machine.order!r} (only 'free_desc')")
     if machine.gpu_source == "explicit":
@@ -296,10 +301,30 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
 
     deadline = clock() + machine.wait_timeout_s
     while True:
-        gpus = [g for g in parse_nvidia_smi(query())
-                if (machine.gpu_include is None or g.index in machine.gpu_include)
-                and g.index not in machine.gpu_exclude
-                and g.free_mib >= machine.min_free_mib]
+        reasons: dict[int, str] = {}  # why each candidate card is not taken now (for the timeout message)
+        gpus = []
+        busy: dict[str, list[dict]] = {}
+        apps_error = None
+        if not allow_shared:
+            try:
+                for a in parse_apps(apps_query()):
+                    busy.setdefault(a["uuid"], []).append(a)
+            except Exception as e:
+                apps_error = f"{type(e).__name__}: {e}"
+        for g in parse_nvidia_smi(query()):
+            if (machine.gpu_include is not None and g.index not in machine.gpu_include) \
+                    or g.index in machine.gpu_exclude:
+                continue
+            if g.free_mib < machine.min_free_mib:
+                reasons[g.index] = f"{g.free_mib} MiB free < min_free_mib {machine.min_free_mib}"
+            elif apps_error is not None:
+                reasons[g.index] = f"process list unavailable ({apps_error})"
+            elif busy.get(g.uuid):
+                procs = [{"pid": a["pid"], "user": _process_user(a["pid"]), "name": a["name"],
+                          "used_mib": a["used_mib"]} for a in busy[g.uuid]]
+                reasons[g.index] = f"{len(procs)} other compute process(es): {_procs_text(procs)}"
+            else:
+                gpus.append(g)
         gpus.sort(key=lambda g: g.free_mib, reverse=True)
         got: list[Gpu] = []
         fds: list[int] = []
@@ -309,6 +334,7 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
                 if machine.lock_dir:
                     fd = _try_lock(os.path.join(machine.lock_dir, f"{g.uuid}.lock"))
                     if fd is None:
+                        reasons[g.index] = "locked by another run"
                         continue
                     try:
                         fresh = [x for x in parse_nvidia_smi(query(g.uuid)) if x.uuid == g.uuid]
@@ -316,6 +342,8 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
                         os.close(fd)
                         raise
                     if not fresh or fresh[0].free_mib < machine.min_free_mib:
+                        reasons[g.index] = (f"{fresh[0].free_mib if fresh else '?'} MiB free < min_free_mib "
+                                            f"{machine.min_free_mib} once locked")
                         os.close(fd)
                         continue
                     fds.append(fd)
@@ -328,6 +356,9 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
             for fd in fds:
                 os.close(fd)
         if clock() > deadline:
-            raise GpuWaitTimeout(
-                f"no {n} GPU(s) with >= {machine.min_free_mib} MiB free within {machine.wait_timeout_s} s")
+            rule = ("other compute processes allowed (--allow-shared)" if allow_shared
+                    else "no other compute process (use --allow-shared only after asking the user)")
+            last = "; ".join(f"GPU {i}: {r}" for i, r in sorted(reasons.items())) or "no candidate card"
+            raise GpuWaitTimeout(f"no {n} GPU(s) with >= {machine.min_free_mib} MiB free and {rule} within "
+                                 f"{machine.wait_timeout_s} s; last check: {last}")
         sleep(RETRY_S)

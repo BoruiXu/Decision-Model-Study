@@ -9,6 +9,13 @@ from harness.config import ConfigError, MachineConfig
 from harness.gpu import Gpu, GpuLease, GpuWaitTimeout, acquire, parse_nvidia_smi
 
 
+@pytest.fixture(autouse=True)
+def no_processes(monkeypatch):
+    """The scan tests run without nvidia-smi: by default no card carries another process."""
+    from harness import gpu
+    monkeypatch.setattr(gpu, "_nvidia_smi_apps", lambda: "")
+
+
 def machine(tmp_path, **kw):
     kw.setdefault("lock_dir", str(tmp_path / "locks"))
     return MachineConfig(python="py", model_dir="m", out_root="o", **kw)
@@ -284,3 +291,50 @@ def test_lock_dir_under_forbidden_root_refused(tmp_path):
     with pytest.raises(ConfigError, match="forbidden"):
         acquire(m, 1, query=FakeSmi(CARDS), sleep=no_sleep)
     assert not (tmp_path / "locks").exists()
+
+
+def clocked():
+    t = [0.0]
+
+    def sleep(s):
+        t[0] += s
+    return sleep, lambda: t[0]
+
+
+def test_scan_skips_cards_with_other_processes_unless_allowed(tmp_path):
+    from harness import gpu
+    apps = "GPU-d, 31337, vllm, 55000\n"
+    lease = acquire(machine(tmp_path), 1, query=FakeSmi(CARDS), apps_query=lambda: apps, sleep=no_sleep)
+    assert lease.uuids == ["GPU-b"]  # GPU-d has the most free memory but someone's vLLM runs on it
+    lease.release()
+    lease = acquire(machine(tmp_path), 1, query=FakeSmi(CARDS), apps_query=lambda: apps, sleep=no_sleep,
+                    allow_shared=True)
+    assert lease.uuids == ["GPU-d"]
+    lease.release()
+
+
+def test_scan_waits_then_names_each_cards_problem(tmp_path, monkeypatch):
+    from harness import gpu
+    monkeypatch.setattr(gpu, "_process_user", lambda pid: "bob")
+    sleep, clock = clocked()
+    m = machine(tmp_path, min_free_mib=50000, wait_timeout_s=60)
+    with pytest.raises(GpuWaitTimeout) as e:
+        acquire(m, 2, query=FakeSmi(CARDS), apps_query=lambda: "GPU-d, 31337, vllm, 55000\n", sleep=sleep, clock=clock)
+    msg = str(e.value)
+    assert "within 60 s" in msg and "no other compute process" in msg and "--allow-shared" in msg
+    assert "GPU 0: 10000 MiB free < min_free_mib 50000" in msg and "GPU 2: 40000 MiB free < min_free_mib 50000" in msg
+    assert "GPU 3: 1 other compute process(es): pid 31337 (user bob, vllm, 55000 MiB)" in msg
+    assert "GPU 1" not in msg  # it was fine; one card short
+
+
+def test_scan_with_an_unknown_process_list(tmp_path):
+    def broken():
+        raise OSError("nvidia-smi: no such file")
+    sleep, clock = clocked()
+    with pytest.raises(GpuWaitTimeout, match="process list unavailable"):
+        acquire(machine(tmp_path, wait_timeout_s=30), 1, query=FakeSmi(CARDS), apps_query=broken, sleep=sleep,
+                clock=clock)
+    lease = acquire(machine(tmp_path), 1, query=FakeSmi(CARDS), apps_query=broken, sleep=no_sleep,
+                    allow_shared=True)
+    assert lease.uuids == ["GPU-d"]
+    lease.release()
