@@ -120,3 +120,10 @@ def test_cli_make_split(tmp_path, capsys):
     assert cli.main(["make-split", "--mode", "holdout", "--frac", "0.25", "--out", str(d), "--group", "meta.cat",
                      a]) == 0
     assert (d / "train.jsonl").is_file() and (d / "val.jsonl").is_file() and (d / "manifest.json").is_file()
+
+
+def test_holdout_out_must_be_a_directory(tmp_path):
+    path = write(tmp_path / "train.jsonl", rows("t", 20, 4, split="train"))
+    with pytest.raises(ConfigError, match="directory"):
+        holdout(path, tmp_path / "splits.json", group="meta.cat", frac=0.2)
+    assert not (tmp_path / "splits.json").exists()

@@ -130,11 +130,14 @@ def write_split_file(obj: dict, out) -> Path:
 def holdout(path, out_dir, *, group: str, seed: int = SEED, frac: float = 0.5, allow_test: bool = False) -> dict:
     """Carve ``val.jsonl`` (whole groups, about ``frac`` of the rows) out of one train file."""
     _check_frac(frac)
+    out_dir = Path(out_dir)
+    if out_dir.suffix.lower() in (".json", ".jsonl") or out_dir.is_file():
+        raise ConfigError(f"--mode holdout writes a directory (train.jsonl, val.jsonl, manifest.json); "
+                          f"--out {out_dir} looks like a file: pass a directory such as <workspace>/holdout")
     rows = _rows(path, allow_test)
     groups = _groups(rows, group, path)
     val, train = _assign(groups, frac, f"{seed}:holdout")
     val_idx = {i for k in val for i in groups[k]}
-    out_dir = Path(out_dir)
     for name in ("train.jsonl", "val.jsonl", "manifest.json"):
         if (out_dir / name).exists():
             raise ConfigError(f"{out_dir / name} exists; choose an empty --out directory")
