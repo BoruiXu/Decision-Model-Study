@@ -13,7 +13,7 @@
 
 题型和合法标签：`noul` → `yes`/`no`（`criteria` 是 `{"yes": 说明, "no": 说明}`）；`choice` → `criteria` 的键；`score` → `"0"`、`"1"`…，个数等于 `criteria` 列表长度。`fields.label` 写正类的键，二分类就是 `target.yes`。
 
-下面各例只写 `adapt` 的主体；`Q` 是用户确认过的 `question` 字典，`POS` 是用户确认的正类取值。
+下面各例只写 `adapt` 的主体；`Q` 是用户确认过的 `question` 字典，`POS` 是用户确认的正类取值，`SPLIT` 来自 `adapter_args`（训练文件 `{split: train}`，评测集 `{split: val}`，见例 6）。
 
 ## 1. 已是 OneJev 行
 
@@ -57,20 +57,23 @@ row["meta"]["f"] = p                               # fields.consistency: meta.f
 
 ## 5. 单文件带 split 列
 
-适配器每次只拿到一个路径。给同一个文件起两个名字，让适配器按文件名取行：
+同一个文件既作训练又作评测，用 `adapter_args` 告诉适配器取哪一部分：
 
-```bash
-ln -s <数据>/data.csv <工作区>/train.csv
-ln -s <数据>/data.csv <工作区>/val.csv
+```yaml
+data:
+  adapter: ./adapter.py
+  train: <数据>/data.csv
+  train_adapter_args: {split: train}
+  eval:
+    val: {train_labels: <数据>/data.csv, adapter_args: {split: val}}
 ```
 ```python
-want = path.stem                                   # "train" 或 "val"
-for i, r in enumerate(csv.DictReader(open(path, encoding="utf-8", newline=""))):
-    if r["split"] != want:                         # test 行在这里被跳过，不看内容
-        continue
-    ...  # 同例 3，"split": want，id 用 f"{r['split']}:{i}" 或数据里的 id
+def adapt(path, split):
+    for i, r in enumerate(csv.DictReader(open(path, encoding="utf-8", newline=""))):
+        if r["split"] != split:                    # test 行在这里被跳过，不看内容
+            continue
+        ...  # 同例 3；"split": "train" if split == "train" else "val"；id 用数据里的 id，没有就 f"{path.name}:{i}"
 ```
-`exp.yaml`：`data.train: train.csv`，`data.eval.val.train_labels: val.csv`。sha256 按链接指向的源文件算。
 
 ## 6. 多个文件按名字
 
@@ -83,13 +86,20 @@ data:
     dev: {train_labels: <数据>/dev.jsonl}
   # test.jsonl 不写；只有用户批准 --allow-test 才另行处理
 ```
-适配器按 `path.stem` 设 `split`：`"train"` 或 `"val"`。
+再加 `train_adapter_args: {split: train}` 和 `dev` 的 `adapter_args: {split: val}`，适配器把它写进行的 `split` 字段。
 
 ## 7. 没有验证集（holdout）
 
 ```bash
-ln -s <数据>/train.jsonl <工作区>/train.jsonl
-ln -s <数据>/train.jsonl <工作区>/val.jsonl
-ojh make-split --out <工作区>/splits.json --group <组字段> --mode holdout <数据>/train.jsonl
+ojh make-split --mode holdout --out <工作区>/holdout --group source --frac 0.2 <数据>/data.csv
+# 写出 <工作区>/holdout/{train.jsonl, val.jsonl, manifest.json}
 ```
-适配器读 `splits.json`（路径相对适配器文件），按 `path.stem` 只 yield 分到这一边的行。按 `ojh make-split --help` 核对文件结构和 id 的写法，让适配器产出的 `id` 和它一致。
+```yaml
+data:
+  adapter: ./adapter.py
+  train: holdout/train.jsonl                       # 相对 exp.yaml
+  train_adapter_args: {split: train}
+  eval:
+    val: {train_labels: holdout/val.jsonl, adapter_args: {split: val}}
+```
+两个文件都是 jsonl（csv 源的单元格已转成 JSON 值，`label` 可能变成数字 `1` 而不是 `"1"`），适配器用 `json.loads` 读，`split` 参数只用来写行的 `split` 字段。原始行有 `id` 就原样用；没有就派生（如 `f"{path.stem}:{i}"`，两个文件名不同，不会重复）。

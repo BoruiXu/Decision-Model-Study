@@ -30,8 +30,9 @@ description: Use when a user wants a OneJev decision model, router or predictor 
    ```bash
    ojh run <工作区>/exp.yaml --base <基座> --gpus <i,j,...>
    ```
-   - 它依次 prepare → resolve → launch，**立即返回**一段 JSON：`run_dir`、`session`、`log`、`DONE`。
-   - 配方由 `ojh run` 按基座的 catalog 条目和卡数自动取，agent 不挑；只有用户要求时才加 `--recipe`。
+   - 它依次 prepare → resolve → launch，**立即返回**一段 JSON：`run_dir`、`session`、`log`、`done`（DONE 路径）、`result`（`RESULT.md` 将出现的位置），以及实际用的 `base`、`recipe`、`gpus`、`machine`。
+   - 配方按 `--recipe` > `exp.yaml` 的 `recipe` > 基座 catalog 的 `default_recipes`（按卡数）取，agent 不挑。现有默认：joey-1 1 卡全参；elephant-1 2–8 卡全参 FSDP；mammoth-1 2–8 卡 **LoRA**（DDP）。其余基座（Qwen3.5 系列等）和不在范围内的卡数没有默认，`ojh run` 会报错并列出示例配方：把它们给用户，用户选定后才加 `--recipe`。
+   - 选了 mammoth-1 时告诉用户默认是 LoRA；它的结果不能和全参的放在一起比。
    - 非零退出：把报错原因和列出的替代方案原样告诉用户，**问用户选哪个**。不要自己换基座、配方、卡或训练方式再跑。
 4. **交回，不轮询**（见下节）。
 5. **结束后读 `<run_dir>/RESULT.md`**（机器可读的在 `result.json`），按下面的汇报格式回报。
@@ -40,7 +41,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 ## 启动之后：交回，不轮询
 
 - **被编排的子 agent**：把 `ojh run` 的 JSON 原样交回调用方，立即结束本轮。
-- **独立运行**：把 `session`、`log`、`DONE` 路径告诉用户，然后停下。之后用户问起才 `ojh status <run_dir>` 看一次。
+- **独立运行**：把 `session`、`log`、`done`、`result` 路径告诉用户，然后停下。之后用户问起才 `ojh status <run_dir>` 看一次。
 - 用户明确要你盯着时，也只偶尔看：两次 `ojh status` 之间至少隔 30 分钟，按它给的剩余时间定下次。
 - 任何情况下都不写 `sleep`/`while`/`watch` 循环，不隔几秒查一次。
 - `DONE` 存在就结束了：`exit_code` 为 0 读 `RESULT.md`；否则看 `stage` 和 `error`，查故障表。
@@ -50,7 +51,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 1. 选中的 step 和 checkpoint；复评 NLL 是否对上。
 2. 指标对比表：路由器 vs 基线（TF-IDF、分组先验、长度）和 oracle，每项带 bootstrap 置信区间，按评测集分列。置信区间大面积重叠时说“没有显著差别”，不说“更好”。
 3. 阈值：各预算下的阈值、实际不一致率和承接率；最佳 Jaccard 阈值。
-4. 门的结论（通过/未通过）和原因。
+4. 门的结论（通过/未通过）和逐项理由：每个评测集的门条目带 `best`，即每项指标上最强的那条基线；说清模型比的是哪条、差多少。
 5. `RESULT.md` 里的所有警告，原样列出。
 6. 下一步建议（例如是否值得跑 report）。跑 report/test 要先问用户。
 
@@ -89,10 +90,11 @@ overrides:
 | plan-only 失败 | 多半是数据或适配器的问题：回 `adapting-data-for-onejev` 自测，修好后重跑 |
 | prepare 报 `data.train_sha256` 不一致 | 数据文件变了。告诉用户，问是否是新数据版本；确认后才更新 `train_sha256` |
 | `DONE` 的 `stage: verify`，prepared 的 sha256 和 lock 对不上 | 启动后又有人 prepare 了同名实验。重新 `ojh run`，不要改 lock |
-| `DONE` 的 `stage: acquire`（等卡超时） | 告诉用户，问等多久或换卡 |
+| `DONE` 的 `stage: acquire`（卡被别人锁住、复查显存不够或等卡超时） | 告诉用户原因，问等一等还是换卡 |
+| `ojh run` 报没有默认配方 | 把列出的示例配方给用户选，选定后 `--recipe` |
 | `DONE` 的 `stage: train` | 看 `runner.log` 末尾：OOM / FLA kernel（提议 override `onejev.disable_fla_kernels: true`）/ NCCL 超时（查别人的进程，或提议减卡） |
 | `DONE` 的 `stage: finalize`；复评 NLL 对不上 | 不手改任何数字，如实报告；可以 `ojh finalize <run_dir>` 重跑收尾 |
-| 门没过 | 记录照常写。如实说路由器没超过哪条基线；不改评测配置去凑 |
+| 门没过 | 记录照常写。如实说路由器没超过哪条基线（门条目的 `best`）；不改评测配置去凑 |
 | 基座权重不存在 | `ojh fetch-base <基座>` 后重跑 |
 | `ojh` 没有 `run`/`inspect`/`make-split` 子命令，或找不到 `examples/exp.template.yaml` | GPU 机器上的 repo 版本旧。告诉用户更新并重装；不要自己补代码，也不要退回分步命令拼流程 |
 

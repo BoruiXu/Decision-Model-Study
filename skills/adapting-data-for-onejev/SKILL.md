@@ -32,9 +32,9 @@ description: Use when a user's dataset (jsonl, csv, chat logs, a directory of sp
 | `onejev.passes: true` | 已是 OneJev 行 | `data.adapter: onejev_rows`，不写代码 |
 | 有 `messages`（role/content 列表）+ 一个标签字段 | 对话 + 标签 | `state.messages` 直接用 `messages` |
 | 一个文本字段（prompt/text/question…）+ 标签字段，jsonl 或 csv | 文本 + 标签 | `state.messages = [{"role": "user", "content": 文本}]` |
-| 一个文件，`split_columns` 非空（train/val/test） | 单文件带 split 列 | 适配器按 split 列取行，见 `formats.md` |
+| 一个文件，`split_columns` 非空（train/val/test） | 单文件带 split 列 | 同一文件既作 `data.train` 又作评测集，用 `adapter_args` 告诉适配器取哪个 split，见 `formats.md` |
 | 多个文件，`name_hint` 是 train/validation/test | 按文件名分 | train → `data.train`，val/dev → `data.eval`；**test 文件不写进配置** |
-| 只有一份数据，没有 split 列也没有验证集 | 缺验证集 | 全部当 train，用 `ojh make-split --mode holdout` 切出 val；没有 test 就不造 test |
+| 只有一份数据，没有 split 列也没有验证集 | 缺验证集 | `ojh make-split --mode holdout` 切出 `train.jsonl`/`val.jsonl` 两个文件；没有 test 就不造 test |
 | 有验证集但没有 select/report 切分 | 缺 report | 验证集够大（约 ≥200 行）时 `--mode select-report`；太小就不切，全部算 select，并告诉用户 |
 | 标签是 [0,1] 的小数 | 软标签 | `target = {"yes": p, "no": 1 - p}` |
 | 标签是 0/1、true/false、两种字符串 | 硬标签 | `target = {"yes": 1.0, "no": 0.0}` 或反过来，按用户确认的正类 |
@@ -67,11 +67,12 @@ description: Use when a user's dataset (jsonl, csv, chat logs, a directory of sp
 
 ## 写适配器
 
-- 复制 `<repo>/adapters/template.py` 到 `<工作区>/adapter.py`，实现 `adapt(path) -> Iterator[dict]`：读一个源文件，逐行 yield OneJev 行。`exp.yaml` 里写 `data.adapter: ./adapter.py`（相对 `exp.yaml`；sha256 会记进 lock）。
+- 复制 `<repo>/adapters/template.py` 到 `<工作区>/adapter.py`，实现 `adapt(path, **args) -> Iterator[dict]`：读一个源文件，逐行 yield OneJev 行。`exp.yaml` 里写 `data.adapter: ./adapter.py`（相对 `exp.yaml`）。适配器文件的 sha256 和参数都记进 lock；prepare 之后再改适配器，resolve 会报错，要重新 prepare。
+- 参数：`data.adapter_args`（所有文件）、`data.train_adapter_args`（训练文件）、`data.eval.<集名>.adapter_args`（该评测集），后两者合并在前者之上，以 `adapt(path, **args)` 传入。用它区分同一文件的不同角色（如 `{split: val}`），不要靠文件名或符号链接。
 - OneJev 行：`id`、`state`、`question`、`target`、`meta`、`split`（字段表见 `formats.md`）。
 - `question` 对每行都相同：`{"type": "noul", "instructions": <用户确认的问题>, "criteria": {"yes": ..., "no": ...}}`。
 - `split`：训练文件的行写 `"train"`（示例配方用 `--split train` 取训练行），评测文件的行写 `"val"`。
-- `id`：用数据里的 id 字段；没有就用 `<文件名>:<行号>`。train 和评测集之间不能重复。
+- `id`：数据里有 `id` 字段就原样用（`ojh make-split` 认的就是它）；没有就派生稳定的 id（如 `<文件名>:<行号>`，或文本的哈希）。train 和评测集之间不能重复。
 - 分组字段、一致比例字段放进 `meta`。
 - **确定性**：不用随机数、时间、无序的 set/dict 遍历；同一文件每次产出同样的行和顺序。
 - **不重新打标签**：只按用户确认的映射换写法。缺标签的行跳过，并把条数告诉用户；不要补、不要猜。
@@ -80,21 +81,20 @@ description: Use when a user's dataset (jsonl, csv, chat logs, a directory of sp
 ## 切分：`ojh make-split`
 
 ```bash
-# 没有验证集：从 train 按组切出 val
-ojh make-split --out <工作区>/splits.json --group <组字段> --mode holdout <train 文件>
-# 有验证集：对半分 select / report
-ojh make-split --out <工作区>/splits.json --group <组字段> --mode select-report <val 文件>
+# 没有验证集：从训练文件按组切出 val，--out 是目录
+ojh make-split --mode holdout --out <工作区>/holdout --group <组字段> --frac <val 比例> <训练文件>
+# 有验证集：按组分 select / report，--out 是切分文件
+ojh make-split --mode select-report --out <工作区>/splits.json --group <组字段> <集名>=<val 文件>
 ```
 
-- 默认 `--seed 20261115 --frac 0.5`，确定性；重跑同样的参数得到同样的文件。
-- holdout 的 `--frac` 是 val 的比例，默认 0.5 偏大：按用户在问题 5 里确认的比例传。holdout 出来的 val 全部算 select（没有 report 部分），汇报时说明。
-- 不要另写切分脚本，不要换 seed 挑结果。
-- select/report 的 `splits.json` 填进 `data.split_file`；核对文件里的集名和 `data.eval` 的键一致（不一致 prepare 会报 `ConfigError`）。
-- holdout 的结果由适配器读：同一源文件的 train/val 两种角色按 `splits.json` 取行（`formats.md` 有例子）。输出格式以 `ojh make-split --help` 为准。
+- 两种模式都按组切（同一组永远在同一边），默认 `--seed 20261115 --frac 0.5`，确定性。不要另写切分脚本，不要换 seed 挑结果。已有的输出不会被覆盖：参数变了就换个输出位置。
+- `--group` 是**原始行**上的点分字段（如 `source`），不是 `meta.source`；缺这个字段的行会报错。
+- **holdout**：`--frac` 是 val 的比例，默认 0.5 偏大，按用户在问题 5 里确认的比例传。`--out` 是目录（写成 `.json` 会被拒绝），里面是 `train.jsonl`、`val.jsonl`（原样复制的行，csv 的单元格转成 JSON 值，id 不加不改）和 `manifest.json`。`data.train` 指 `<out>/train.jsonl`，`data.eval.val.train_labels` 指 `<out>/val.jsonl`，适配器用同一套规则读这两个 jsonl（源文件是 csv 时也要按 jsonl 读）。val 全部算 select（没有 report），汇报时说明。
+- **select-report**：每个文件是一个评测集，集名取文件名主干或 `名字=路径`，要和 `data.eval` 的键一致；输出填进 `data.split_file`。每行必须有 `id` 字段，且等于适配器产出的 id。原始数据没有 `id` 时二选一：先把适配器的输出写成 OneJev 行文件，在它上面切（实验也改用 `onejev_rows` 读这些文件，`adapter.py` 留在工作区备查）；或者不切，全部算 select。
 
 ## 填 exp.yaml
 
-从 `examples/exp.template.yaml` 复制，按注释填：`name`、`data.adapter`、`data.train`、`data.eval.<集名>.train_labels`（可选 `reference`）、`data.split_file`、`fields.label: target.yes`、`fields.group`、`fields.consistency`、`fields.text: messages`。`base`、`gpus`、`recipe` 不填，由 `ojh run --base --gpus` 给。不认识的键 prepare 会报错。
+从 `examples/exp.template.yaml` 复制，按注释填：`name`、`data.adapter`（及需要的 `adapter_args`）、`data.train`、`data.eval.<集名>.train_labels`（可选 `reference`）、`data.split_file`、`fields.label: target.yes`、`fields.group`、`fields.consistency`、`fields.text: messages`。`base`、`gpus`、`recipe` 不填，由 `ojh run --base --gpus` 给。不认识的键 prepare 会报错。
 
 ## 自测
 
@@ -113,6 +113,8 @@ ojh make-split --out <工作区>/splits.json --group <组字段> --mode select-r
 | 有同源字段却按行随机切，同一题落在两边 | `--group` 用同源字段 |
 | 把 test 文件写进 `data.eval`，或用 `head`/`cat` 看 test 内容 | test 不进配置、不看 |
 | holdout 用默认 `--frac 0.5`，一半数据进了 val | 用问题 5 里用户确认的比例 |
+| 原始行没有 `id` 就直接跑 select-report，或适配器改了 id | make-split 的 id 必须等于适配器的 id |
+| 用符号链接或文件名区分同一文件的 train/val | 用 `train_adapter_args` / `eval.<集名>.adapter_args` |
 | 缺标签的行填 0 或按多数类补 | 跳过并报条数 |
 | 适配器里 `random.shuffle` 或遍历 set | 保持源文件顺序 |
 | 把 `adapter.py`、`exp.yaml` 写进 repo 的 `adapters/` | 写在工作区 |
