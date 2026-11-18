@@ -12,7 +12,7 @@ from harness.resolve import Infeasible
 sys.path.insert(0, str(Path(__file__).parent))
 from test_finalize import make_run, read_jsonl  # noqa: E402
 
-SUBCOMMANDS = ["inspect", "make-split", "run", "setup", "fetch-base", "prepare", "resolve", "launch", "status", "finalize", "eval-report",
+SUBCOMMANDS = ["doctor", "inspect", "make-split", "run", "setup", "fetch-base", "prepare", "resolve", "launch", "status", "finalize", "eval-report",
                "table", "cleanup", "note"]
 
 

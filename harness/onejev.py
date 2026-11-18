@@ -41,3 +41,23 @@ def ensure_onejev(dest: Path, lock: dict, patch_path: Path) -> Path:
         if not target.is_file() or sha256_file(target) != expected:
             raise OneJevMismatch(f"Unexpected SHA-256 for {target}")
     return dest
+
+
+def verify_onejev(dest: Path, lock: dict) -> list[str]:
+    """Read-only check of a checkout (``ojh doctor``): HEAD at the locked revision and every patched file
+    at its locked sha256. Returns the problems; nothing is cloned, checked out or patched."""
+    dest = Path(dest)
+    if not dest.is_dir():
+        return [f"{dest} is missing: run setup.sh (or ojh setup)"]
+    problems = []
+    got = _git(dest, "rev-parse", "HEAD", check=False)
+    head = got.stdout.strip() if got.returncode == 0 else "unknown"
+    if head != lock["revision"]:
+        problems.append(f"HEAD {head[:12]} but expected {lock['revision'][:12]}")
+    for rel, expected in lock["patched_sha256"].items():
+        target = dest / rel
+        if not target.is_file():
+            problems.append(f"{rel}: missing (sha256 expected {expected[:12]}…)")
+        elif sha256_file(target) != expected:
+            problems.append(f"{rel}: sha256 differs from the lock (expected {expected[:12]}…)")
+    return problems

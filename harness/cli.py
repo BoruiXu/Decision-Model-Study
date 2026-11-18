@@ -9,8 +9,8 @@ from pathlib import Path
 
 import yaml
 
-from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, oneshot,
-                     prepare, registry, report_eval, resolve, runner, status)
+from harness import (cleanup, doctor, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev,
+                     oneshot, prepare, registry, report_eval, resolve, runner, status)
 from harness.catalog import ROOT, CatalogError, sha256_file
 from harness.config import ConfigError, check_writable, find_machine, load_experiment
 from harness.gpu import GpuUnavailable, GpuWaitTimeout
@@ -79,6 +79,12 @@ def cmd_make_split(a) -> int:
                       "sets": {k: {"rows": v["rows"], "groups": {s: len(g) for s, g in v["groups"].items()}}
                                for k, v in obj.items()}}, indent=2))
     return 0
+
+
+def cmd_doctor(a) -> int:
+    checks = doctor.run_checks(doctor.default_probes(), network=not a.no_network, timeout=a.timeout)
+    print(json.dumps(doctor.as_json(checks), indent=2) if a.json else doctor.render(checks))
+    return doctor.exit_code(checks)
 
 
 def cmd_setup(a) -> int:
@@ -249,6 +255,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="select-report: select share; holdout: val share (default 0.5)")
     s.add_argument("--mode", choices=("select-report", "holdout"), default="select-report")
     s.add_argument("--allow-test", action="store_true", help="read test* rows and files (needs approval)")
+    s = cmd("doctor", cmd_doctor, "read-only environment check (python, torch/CUDA, GPUs, pins, OneJev, tmux, "
+                                  "directories, HF hub); exit 1 on a blocking problem")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--no-network", action="store_true", help="skip the Hugging Face hub check")
+    s.add_argument("--timeout", type=float, default=5.0, help="network timeout in seconds (default 5)")
     s = cmd("setup", cmd_setup, "fetch OneJev and the patch, verify sha256")
     s.add_argument("--machine", help=MACHINE_HELP)
     s = cmd("fetch-base", cmd_fetch_base, "download a catalog base model and verify it")
