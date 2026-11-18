@@ -8,6 +8,14 @@ from harness import cli
 from harness.inspect_data import inspect_path, render
 
 
+@pytest.fixture
+def tmp_path(tmp_path):
+    """A work dir below pytest's tmp dir, whose own name (test_<name>0) would read as a test path."""
+    d = tmp_path / "work"
+    d.mkdir()
+    return d
+
+
 def write_jsonl(path, rows):
     Path(path).write_text("".join(json.dumps(r) + "\n" for r in rows))
     return Path(path)
@@ -131,3 +139,31 @@ def test_render_mentions_key_facts(tmp_path):
     write_jsonl(tmp_path / "rows.jsonl", [onejev_row(i) for i in range(6)])
     text = render(inspect_path(tmp_path))
     assert "rows.jsonl" in text and "OneJev rows: yes" in text and "meta.cat" in text
+
+
+def test_test_rows_never_reach_fields_values_or_samples(tmp_path):
+    rows = [dict(chat_row(i), set="train") for i in range(6)]
+    rows += [dict(chat_row(i), set="Test", label="TESTONLYLABEL", secret="S" * 30) for i in range(4)]
+    rows += [dict(chat_row(i), kind="test", label="KINDLABEL") for i in range(2)]
+    for r in rows[:6]:
+        r["kind"] = "train"
+    write_jsonl(tmp_path / "mixed.jsonl", rows)
+    report = inspect_path(tmp_path)
+    dumped = json.dumps(report)
+    assert "TESTONLYLABEL" not in dumped and "KINDLABEL" not in dumped and "SSSS" not in dumped
+    f = files_of(report)["mixed.jsonl"]
+    assert f["rows"] == 12 and f["test_rows"] == 6
+    assert f["split_columns"]["set"] == {"train": 6, "Test": 4} and f["split_columns"]["kind"] == {"train": 6,
+                                                                                                    "test": 2}
+    assert {v["value"] for v in f["fields"]["label"]["values"]} <= {"good", "bad"}
+    assert "secret" not in f["fields"] and "TESTONLYLABEL" not in render(report)
+
+
+@pytest.mark.parametrize("rel", ["test/part-0.jsonl", "testset.jsonl", "a/TestOOD/x.jsonl"])
+def test_test_paths_are_counted_only(tmp_path, rel):
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(p, [dict(chat_row(i), label="HIDDEN") for i in range(3)])
+    f = inspect_path(tmp_path)["files"][0]
+    assert f["rows"] == 3 and f["fields"] is None and f["samples"] == [] and "test" in f["note"]
+    assert "HIDDEN" not in json.dumps(f)

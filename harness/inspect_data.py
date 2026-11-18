@@ -7,8 +7,9 @@ fields; whether numeric fields lie in [0, 1]; average length of strings; a few t
 split-like columns and file names; split-file-shaped JSON; whether the rows already pass the OneJev row
 schema (``prepare.validate_rows``).
 
-Files whose name looks like a test split are counted but their contents are not shown, and sample rows
-never come from a test split. Imports without torch.
+Test data (``harness.heldout``) is counted only: files or directories named like a test split are not
+read beyond a row count, and rows in a test split (any split-like column, any case) are dropped before
+fields, values, samples and the schema check; only their split-column counts are shown. Imports without torch.
 """
 from __future__ import annotations
 
@@ -18,14 +19,14 @@ import os
 import re
 from pathlib import Path
 
-from harness.jsonl import iter_jsonl
+from harness.heldout import is_test_path, is_test_value, row_is_test, split_values
 from harness.prepare import validate_rows
 
 EXTS = {".jsonl": "jsonl", ".json": "json", ".csv": "csv", ".tsv": "tsv", ".parquet": "parquet"}
 MAX_DISTINCT = 20  # a field with at most this many distinct scalar values lists them with counts
 TEXT_LEN = 20  # strings at least this long on average are reported as text-like
 TRUNC = 200  # sample string truncation
-SPLIT_NAMES = {"split", "splits", "set", "subset", "fold", "partition", "part", "dataset_split"}
+MAX_DEPTH = 4
 SPLIT_VALUE = re.compile(r"^(train|training|val|valid|validation|dev|test|eval|holdout)([_\-.].*)?$", re.I)
 NAME_HINTS = ("train", "training", "val", "valid", "validation", "dev", "test", "eval")
 
@@ -55,10 +56,6 @@ def name_hint(path) -> str | None:
         if t in NAME_HINTS:
             return t
     return None
-
-
-def _is_test_hint(hint) -> bool:
-    return hint is not None and hint.startswith("test")
 
 
 def _csv_cell(v: str):
@@ -211,19 +208,40 @@ def field_facts(rows: list[dict]) -> dict:
     return {p: f.facts(len(rows)) for p, f in fields.items()}
 
 
-def split_columns(fields: dict) -> dict:
-    """Low-cardinality fields named like a split, or whose values all look like split names."""
-    out = {}
-    for path, f in fields.items():
-        vals = f.get("values")
-        if not vals:
-            continue
-        last = path.replace("[]", "").rsplit(".", 1)[-1].lower()
-        named = last in SPLIT_NAMES
-        looks = all(isinstance(v["value"], str) and SPLIT_VALUE.match(v["value"]) for v in vals)
-        if named or looks:
-            out[path] = {v["value"]: v["count"] for v in vals}
-    return out
+def _dict_scalars(row, prefix: str = "", depth: int = 0):
+    """(dotted path, value) for string values at dict paths (not inside lists)."""
+    if not isinstance(row, dict) or depth > MAX_DEPTH:
+        return
+    for k, v in row.items():
+        path = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, dict):
+            yield from _dict_scalars(v, path, depth + 1)
+        elif isinstance(v, str):
+            yield path, v
+
+
+def split_columns(rows) -> dict:
+    """Split-like columns with their value counts over all rows (counts are the only facts shown for test
+    rows): keys named like a split (``harness.heldout.SPLIT_KEYS``, any case), and low-cardinality string
+    columns whose values all look like split names."""
+    named: dict[str, dict] = {}
+    other: dict[str, dict] = {}
+    for r in rows:
+        for path, v in split_values(r):
+            if isinstance(v, (str, int, float, bool)):
+                named.setdefault(path, {})
+                named[path][v] = named[path].get(v, 0) + 1
+        for path, v in _dict_scalars(r):
+            if path in named:
+                continue
+            c = other.setdefault(path, {})
+            if c is not None and len(c) <= MAX_DISTINCT:
+                c[v] = c.get(v, 0) + 1
+    out = dict(named)
+    for path, c in other.items():
+        if path not in named and c and len(c) <= MAX_DISTINCT and all(SPLIT_VALUE.match(v) for v in c):
+            out[path] = c
+    return {p: dict(sorted(c.items(), key=lambda kv: (-kv[1], str(kv[0])))) for p, c in out.items()}
 
 
 def _truncate(v):
@@ -237,27 +255,15 @@ def _truncate(v):
     return v
 
 
-def _is_test_row(row, split_cols) -> bool:
-    for path in split_cols:
-        if "[]" in path or not isinstance(row, dict):
-            continue
-        cur = row
-        for part in path.split("."):
-            cur = cur.get(part) if isinstance(cur, dict) else None
-        if isinstance(cur, str) and cur.lower().startswith("test"):
-            return True
-    return False
-
-
-def inspect_file(path, rows: int = 3) -> dict:
+def inspect_file(path, rows: int = 3, root=None) -> dict:
     path = Path(path)
     hint = name_hint(path)
     out = {"path": str(path.resolve()), "type": EXTS[path.suffix.lower()], "size_bytes": path.stat().st_size,
            "name_hint": hint, "rows": None, "fields": None, "split_columns": {}, "samples": [],
            "onejev": None, "split_file": None}
-    if _is_test_hint(hint):
+    if is_test_path(path, root):
         out["rows"] = _count_rows(path)
-        out["note"] = "test-like file name: contents not inspected (rows counted only)"
+        out["note"] = "test-like file or directory name: contents not inspected (rows counted only)"
         return out
     try:
         data, extra = load_rows(path)
@@ -268,17 +274,17 @@ def inspect_file(path, rows: int = 3) -> dict:
     if data is None:
         return out
     out["rows"] = len(data)
-    fields = field_facts(data)
-    out["fields"] = fields
-    out["split_columns"] = split_columns(fields)
     dict_rows = [r for r in data if isinstance(r, dict)]
-    shown = [r for r in dict_rows if not _is_test_row(r, out["split_columns"])]
-    out["samples"] = [_truncate(r) for r in shown[:max(0, rows)]]
-    test_rows = len(dict_rows) - len(shown)
-    if test_rows:
-        out["test_rows"] = test_rows
-    errors = validate_rows(dict_rows) if len(dict_rows) == len(data) else ["not every row is a JSON object"]
-    out["onejev"] = {"passes": bool(data) and not errors, "errors": len(errors), "first_errors": errors[:5]}
+    out["split_columns"] = split_columns(dict_rows)
+    test_cols = [p for p, c in out["split_columns"].items() if any(is_test_value(v) for v in c)]
+    kept = [r for r in data if not (isinstance(r, dict) and row_is_test(r, test_cols))]
+    if len(kept) < len(data):
+        out["test_rows"] = len(data) - len(kept)  # counted only: no fields, values or samples from them
+    out["fields"] = field_facts(kept)
+    kept_dicts = [r for r in kept if isinstance(r, dict)]
+    out["samples"] = [_truncate(r) for r in kept_dicts[:max(0, rows)]]
+    errors = validate_rows(kept_dicts) if len(kept_dicts) == len(kept) else ["not every row is a JSON object"]
+    out["onejev"] = {"passes": bool(kept) and not errors, "errors": len(errors), "first_errors": errors[:5]}
     return out
 
 
@@ -323,7 +329,8 @@ def data_files(path) -> tuple[list[Path], list[dict]]:
 
 def inspect_path(path, rows: int = 3) -> dict:
     files, skipped = data_files(path)
-    return {"path": str(Path(path).resolve()), "files": [inspect_file(f, rows) for f in files],
+    root = Path(path) if Path(path).is_dir() else None
+    return {"path": str(Path(path).resolve()), "files": [inspect_file(f, rows, root) for f in files],
             "skipped": skipped}
 
 
