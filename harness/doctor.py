@@ -74,6 +74,21 @@ def _fingerprint(machine) -> dict:
     return fp(machine)
 
 
+def uv_pin() -> str | None:
+    """The uv version setup.sh pins (``UV_VERSION="${OJH_UV_VERSION:-X}"``)."""
+    import re
+
+    m = re.search(r'UV_VERSION="\$\{OJH_UV_VERSION:-([^}"]+)\}"', (ROOT / "setup.sh").read_text())
+    return m.group(1) if m else None
+
+
+def _setup_stamp() -> dict | None:
+    from harness.resolve import setup_stamp
+
+    venv = os.environ.get("OJH_VENV") or str(ROOT / ".venv")
+    return setup_stamp(os.path.join(venv, "bin", "python"))
+
+
 def _onejev() -> list[str]:
     from harness.onejev import load_lock, verify_onejev
 
@@ -121,6 +136,7 @@ class Probes:
     env: dict = field(default_factory=lambda: dict(os.environ))
     machine: Any = None  # (MachineConfig, origin); None: found with ``env`` like any ojh command
     fingerprint: Callable[[Any], dict] = _fingerprint  # what resolve records in the lock
+    setup_stamp: Callable[[], dict | None] = _setup_stamp  # setup.sh's record in the venv
 
 
 def default_probes() -> Probes:
@@ -249,6 +265,16 @@ def run_checks(p: Probes, *, network: bool = True, timeout: float = 5.0) -> list
                 "move it to a bigger disk (examples/env.example.sh)")
         else:
             add(f"dir {label}", "ok", f"{path}: {_gib(free)}")
+
+    pin, stamp = uv_pin(), p.setup_stamp()
+    if stamp is None:
+        add("uv", "warn", f"no setup record in the venv (pinned uv {pin})",
+            f"the venv was not built by this setup.sh; {SETUP}")
+    elif stamp.get("uv_version") != pin:
+        add("uv", "warn", f"venv built with uv {stamp.get('uv_version')}, setup.sh pins {pin}",
+            f"re-run setup.sh to rebuild with the pinned uv")
+    else:
+        add("uv", "ok", f"venv built with the pinned uv {pin}, Python {stamp.get('python_version')}")
 
     endpoint = p.env.get("HF_ENDPOINT") or "https://huggingface.co"
     if not network or p.env.get("HF_HUB_OFFLINE") in ("1", "true", "True"):

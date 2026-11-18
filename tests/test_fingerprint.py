@@ -39,3 +39,15 @@ def test_fingerprint_without_nvidia_smi_records_none(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     m = MachineConfig(python=sys.executable, model_dir="/m", out_root="/o")
     assert _fingerprint(m)["driver_version"] is None
+
+
+def test_fingerprint_carries_the_setup_stamp(tmp_path):
+    import json
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = executable(venv / "bin" / "python", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (venv / ".ojh-setup.json").write_text(json.dumps({"uv_version": "0.13.9", "python_version": "3.11.18"}))
+    fp = _fingerprint(MachineConfig(python=str(py), model_dir="/m", out_root="/o"))
+    assert fp["setup"] == {"uv_version": "0.13.9", "python_version": "3.11.18"}
+    (venv / ".ojh-setup.json").unlink()
+    assert _fingerprint(MachineConfig(python=str(py), model_dir="/m", out_root="/o"))["setup"] is None

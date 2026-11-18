@@ -194,12 +194,27 @@ def _driver_version() -> str | None:
     return out[0] if out else None
 
 
+SETUP_STAMP = ".ojh-setup.json"  # written into the venv by setup.sh: uv version, python, torch index, ...
+
+
+def setup_stamp(python: str) -> dict | None:
+    """setup.sh's record of how the venv of ``python`` (``<venv>/bin/python``, symlinks not resolved) was
+    built, or None when there is none (a venv not made by setup.sh, or a bare interpreter)."""
+    p = Path(python).parent.parent / SETUP_STAMP
+    try:
+        return json.loads(p.read_text()) if p.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
 def _fingerprint(machine: MachineConfig) -> dict:
     """Environment fingerprint for the lock: the training python's packages (importlib.metadata, so it works
-    in a venv without pip) and the NVIDIA driver version (None without nvidia-smi)."""
+    in a venv without pip), the NVIDIA driver version (None without nvidia-smi) and setup.sh's stamp (uv
+    version, python, torch index)."""
     pkgs = installed_packages(machine.python)
     return {"packages_sha256": hashlib.sha256("\n".join(pkgs).encode()).hexdigest(), "packages": len(pkgs),
-            "packages_source": "importlib.metadata", "driver_version": _driver_version()}
+            "packages_source": "importlib.metadata", "driver_version": _driver_version(),
+            "setup": setup_stamp(machine.python)}
 
 
 def _load_recipe(path: str) -> dict:

@@ -31,7 +31,7 @@ bash setup.sh                               #    再执行；重跑会跳过已�
 <repo>/.venv/bin/ojh fetch-base joey-1      # 4. 下载固定 revision 的基座权重并校验（到 OJH_MODEL_DIR）
 ```
 
-在 A100 节点（Ubuntu 22.04，系统 Python 3.10，无 conda）上从零跑完约 4 分钟，重跑约 1 秒；`/home` 下不写任何文件。`setup.sh` 的五步：① uv：PATH 上有就用，否则用 `UV_UNMANAGED_INSTALL` 装到 `$OJH_TOOLS_DIR/uv`（不改 shell 配置文件，不往 `~/.local/bin` 放东西）；② `uv python install 3.11` 到 `$UV_PYTHON_INSTALL_DIR`；③ `uv venv` 建 `.venv`（`OJH_VENV` 在别处时，`<repo>/.venv` 是指向它的符号链接）；④ 先从 CUDA 12.8 的 wheel 源装 `torch==2.8.0`、`torchvision==0.23.0`，再按 `constraints.txt` 装其余固定版本，最后 `uv pip check`；⑤ `ojh setup`：拉 OneJev 到固定 revision、打 `serve.patch`、逐项校验 sha256。已有的 Python ≥3.11 可以用 `--python <路径>` 显式指定（opt-in）；`--machine <machine.yaml>` 传给 `ojh setup`。
+在 A100 节点（Ubuntu 22.04，系统 Python 3.10，无 conda）上从零跑完约 4 分钟，重跑约 1 秒；`/home` 下不写任何文件。`setup.sh` 的五步：① uv，版本固定（`setup.sh` 里的 `UV_VERSION`，现在是 0.13.9）：PATH 上的 uv 正好是这个版本才用，否则用 `UV_UNMANAGED_INSTALL` 把固定版本装到 `$OJH_TOOLS_DIR/uv`（不改 shell 配置文件，不往 `~/.local/bin` 放东西）；② `uv python install 3.11` 到 `$UV_PYTHON_INSTALL_DIR`；③ `uv venv` 建 `.venv`（`OJH_VENV` 在别处时，`<repo>/.venv` 是指向它的符号链接）；④ 先从 CUDA 12.8 的 wheel 源装 `torch==2.8.0`、`torchvision==0.23.0`，再按 `constraints.txt` 装其余固定版本，最后 `uv pip check`；⑤ `ojh setup`：拉 OneJev 到固定 revision、打 `serve.patch`、逐项校验 sha256；最后把 uv 版本、Python 版本和 torch 源写进 venv 的 `.ojh-setup.json`，`ojh resolve` 把它记进 lock 的 `fingerprint.setup`，`ojh doctor` 核对 uv 版本。已有的 Python ≥3.11 可以用 `--python <路径>` 显式指定（opt-in）；`--machine <machine.yaml>` 传给 `ojh setup`。
 
 ### 放到大盘上
 

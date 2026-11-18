@@ -28,7 +28,8 @@ def good(tmp_path, **over):
         onejev=lambda: [], disk_free=lambda path: 500 * 2**30, writable=lambda path: True,
         http=lambda url, timeout: 200, env=env, machine=None,
         fingerprint=lambda m: {"packages_sha256": "ab" * 32, "packages": 72, "packages_source": "importlib.metadata",
-                               "driver_version": "570.124.06"})
+                               "driver_version": "570.124.06"},
+        setup_stamp=lambda: {"uv_version": doctor.uv_pin(), "python_version": "3.11.18"})
     return replace(p, **over)
 
 
@@ -43,7 +44,7 @@ def test_all_good_exits_zero(tmp_path):
     for n in ("python", "venv", "torch", "cuda", "gpus", "transformers", "flash-linear-attention", "peft",
               "onejev", "tmux", "machine config", "dir runs (out_root)", "dir base weights (model_dir)",
               "dir uv cache (UV_CACHE_DIR)", "dir python (UV_PYTHON_INSTALL_DIR)", "dir HF cache (HF_HOME)",
-              "dir temp (TMPDIR)", "hf hub", "fingerprint"):
+              "dir temp (TMPDIR)", "hf hub", "fingerprint", "uv"):
         assert n in names, n
     gpus = next(c for c in checks if c.name == "gpus")
     assert "A100" in gpus.detail and "2 card" in gpus.detail
@@ -130,3 +131,12 @@ def test_verify_onejev_is_read_only(tmp_path):
 def test_default_probes_build_without_torch():
     p = doctor.default_probes()
     assert p.python_version[:2] >= (3, 11) and callable(p.torch_info)
+
+
+def test_uv_version_against_the_pin(tmp_path):
+    assert doctor.uv_pin() and doctor.uv_pin()[0].isdigit()
+    s = statuses(doctor.run_checks(good(tmp_path, setup_stamp=lambda: {"uv_version": "0.1.0"})))
+    assert s["uv"] == "warn"
+    checks = doctor.run_checks(good(tmp_path, setup_stamp=lambda: None))
+    c = next(c for c in checks if c.name == "uv")
+    assert c.status == "warn" and "setup.sh" in c.hint and doctor.exit_code(checks) == 0

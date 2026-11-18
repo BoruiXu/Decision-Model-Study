@@ -28,7 +28,8 @@ set -euo pipefail
 TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 TORCH_PKGS=(torch==2.8.0 torchvision==0.23.0)
 PYTHON_VERSION="3.11"
-UV_INSTALLER_URL="https://astral.sh/uv${OJH_UV_VERSION:+/$OJH_UV_VERSION}/install.sh"
+UV_VERSION="${OJH_UV_VERSION:-0.13.9}"   # the uv setup.sh installs and uses (a uv on PATH only when it is this version)
+UV_INSTALLER_URL="https://astral.sh/uv/$UV_VERSION/install.sh"
 
 DRY=0
 PYTHON_OPT=""
@@ -86,14 +87,17 @@ case "$MODEL_DIR/" in "$REPO"/*) say "error: OJH_MODEL_DIR is inside the repo; c
 [ "$DRY" = 1 ] || mkdir -p "$OJH_TOOLS_DIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$HF_HOME" "$TMPDIR"
 
 # 1. uv
-say "[1/5] uv"
-if command -v uv >/dev/null 2>&1; then
-  UV="$(command -v uv)"; say "    found on PATH: $UV"
-elif [ -x "$UV_HOME/uv" ]; then
+uv_version() { "$1" --version 2>/dev/null | awk '{print $2}'; }
+say "[1/5] uv $UV_VERSION (pinned)"
+PATH_UV="$(command -v uv 2>/dev/null || true)"
+if [ -n "$PATH_UV" ] && [ "$(uv_version "$PATH_UV")" = "$UV_VERSION" ]; then
+  UV="$PATH_UV"; say "    found on PATH: $UV ($UV_VERSION, pinned)"
+elif [ -x "$UV_HOME/uv" ] && [ "$(uv_version "$UV_HOME/uv")" = "$UV_VERSION" ]; then
   UV="$UV_HOME/uv"; say "    already installed: $UV"
 else
   UV="$UV_HOME/uv"
-  say "    installing into $UV_HOME (UV_UNMANAGED_INSTALL: no shell profile or ~/.local/bin changes)"
+  if [ -n "$PATH_UV" ]; then say "    uv on PATH is $(uv_version "$PATH_UV"), not the pinned $UV_VERSION: not used"; fi
+  say "    installing uv $UV_VERSION into $UV_HOME (UV_UNMANAGED_INSTALL: no shell profile or ~/.local/bin changes)"
   if [ "$DRY" = 1 ]; then
     say "    would run: curl -LsSf $UV_INSTALLER_URL | UV_UNMANAGED_INSTALL=$UV_HOME sh"
   else
@@ -145,5 +149,18 @@ fi
 # 5. OneJev
 say "[5/5] OneJev (pinned revision + serve.patch, sha256 verified)"
 run "$VENV/bin/ojh" setup ${MACHINE:+--machine "$MACHINE"}
+
+# what built this venv: resolve copies it into the lock's fingerprint, ojh doctor checks it
+if [ "$DRY" != 1 ]; then
+  "$VENV/bin/python" - "$VENV/.ojh-setup.json" "$("$UV" --version)" "$UV_VERSION" "$TORCH_INDEX_URL" \
+      "${TORCH_PKGS[*]}" "$PKG_KEY" <<'PY'
+import json, platform, sys
+path, uv_full, uv_pin, index, torch, key = sys.argv[1:]
+json.dump({"uv_version": uv_full.split()[1] if len(uv_full.split()) > 1 else uv_full, "uv_pin": uv_pin,
+           "python_version": platform.python_version(), "torch_index_url": index, "torch": torch.split(),
+           "packages_key": key}, open(path, "w"), indent=2)
+PY
+  say "    recorded $VENV/.ojh-setup.json"
+fi
 
 say "done. next: $REPO/.venv/bin/ojh doctor"
