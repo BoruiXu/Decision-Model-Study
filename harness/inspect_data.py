@@ -275,9 +275,13 @@ class _Facts:
         return {p: f.facts(self.n) for p, f in self.fields.items()}
 
     def value_sets(self) -> dict[str, set]:
-        """Distinct values of the candidate group fields (kept out of the printed report)."""
-        return {p: {v for _, v in f.distinct} for p, f in self.fields.items()
-                if not f.overflow and f.facts(self.n).get("group_candidate")}
+        """Distinct values of every str/int field with at most GROUP_MAX of them (kept out of the printed
+        report); the cross-file comparison uses the fields that are group candidates in a train file."""
+        return {p: {v for t, v in f.distinct if t in ("str", "int")} for p, f in self.fields.items()
+                if not f.overflow and f.distinct}
+
+    def candidates(self) -> set[str]:
+        return {p for p, f in self.fields.items() if f.facts(self.n).get("group_candidate")}
 
 
 TRAIN_VALUE = re.compile(r"^(train|training)([_\-.].*)?$", re.I)
@@ -386,7 +390,7 @@ def _scan(out: dict, rows_fn, n_samples: int) -> None:
     if tests:
         out["test_rows"] = tests
     out["fields"], out["samples"] = facts.result(), samples
-    out["_value_sets"] = facts.value_sets()
+    out["_value_sets"], out["_candidates"] = facts.value_sets(), facts.candidates()
     if non_dict:
         n_err += 1
         errors = (errors + ["not every row is a JSON object"])[:5]
@@ -466,21 +470,22 @@ def data_files(path) -> tuple[list[Path], list[dict]]:
 
 
 def _cross_file(reports: list[dict]) -> None:
-    """For each non-train file: how many values of each candidate group field never occur in the
-    train-named files (name hint train/training); the value sets themselves are dropped."""
+    """For each other file: how many values of the train-named files' candidate group fields (name hint
+    train/training) never occur in train. The other file's field need not repeat its values itself (a small
+    val file rarely does). The value sets themselves are dropped from the report."""
     train = [r for r in reports if r.get("name_hint") in ("train", "training") and r.get("_value_sets")]
     seen: dict[str, set] = {}
     for r in train:
-        for path, vals in r["_value_sets"].items():
-            seen.setdefault(path, set()).update(vals)
+        for path in r.get("_candidates") or ():
+            if path in r["_value_sets"]:
+                seen.setdefault(path, set()).update(r["_value_sets"][path])
     for r in reports:
         sets = r.pop("_value_sets", None) or {}
-        if train and r not in train:
+        r.pop("_candidates", None)
+        if seen and not any(r is t for t in train):
             outside = {p: len(v - seen[p]) for p, v in sets.items() if p in seen}
             if outside:
                 r["values_not_in_train_files"] = outside
-    for r in train:
-        r.pop("_value_sets", None)
 
 
 def inspect_path(path, rows: int = 3) -> dict:

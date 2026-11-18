@@ -268,3 +268,15 @@ def test_values_only_outside_train_rows_and_files(tmp_path):
     assert fs["dev.csv"]["values_not_in_train_files"] == {"source": 5}
     assert "values_not_in_train_files" not in fs["train.csv"]
     assert "_value_sets" not in json.dumps(inspect_path(tmp_path))
+
+
+def test_small_val_file_gets_its_unseen_count(tmp_path):
+    write_csv(tmp_path / "train.csv", ["id", "text", "source", "label"],
+              [[f"t{i}", f"text {i}", f"src{i % 60}", i % 2] for i in range(400)])
+    # 60 rows over 40 sources (each 1-2 rows): too few repeats to be a candidate on its own
+    write_csv(tmp_path / "val.csv", ["id", "text", "source", "label"],
+              [[f"v{i}", f"text {i}", f"src{60 + i % 40}", i % 2] for i in range(60)])
+    fs = files_of(inspect_path(tmp_path))
+    assert fs["val.csv"]["fields"]["source"].get("group_candidate") is not True
+    assert fs["val.csv"]["values_not_in_train_files"]["source"] == 40
+    assert "id" not in fs["val.csv"]["values_not_in_train_files"]  # ids are not a group field in train
