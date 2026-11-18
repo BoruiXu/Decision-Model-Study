@@ -73,7 +73,7 @@ bash setup.sh                               #    再执行；重跑会跳过已�
 
 ### 用法约定
 
-`setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> <repo>/.venv/bin/ojh …` 调用；记录和登记表都留在 GPU 机器的 `out_root` 下。
+`setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> <repo>/.venv/bin/ojh …` 调用；记录和登记表都留在 GPU 机器的 `out_root` 下。很多服务器会拒绝短时间内反复新建的 ssh 连接，所以复用一条：`ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=2h <host> …`（或写进 `~/.ssh/config`）。
 
 机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、输出目录 `$OJH_OUT_ROOT`（不设则 `~/ojh_runs`）、`$OJH_MODEL_DIR`（不设则 `~/.cache/onejev-harness/models`），卡由 `--gpus` 指定。输出目录和模型目录不能在 repo 里（会报 `ConfigError`）；要放到别处，设 `OJH_OUT_ROOT`/`OJH_MODEL_DIR` 或传 `--machine`。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份（其中的 `python` 写 `<repo>/.venv/bin/python`）。
 

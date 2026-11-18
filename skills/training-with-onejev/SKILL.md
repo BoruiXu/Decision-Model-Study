@@ -14,6 +14,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 ## 在哪里运行
 
 - `ojh` 在 GPU 机器上运行，写全路径 `<repo>/.venv/bin/ojh`（下文简写 `ojh`）。不在 GPU 机器上就 `ssh <host> <repo>/.venv/bin/ojh …`。
+- 远程时只开一条 ssh 连接反复用：短时间内连续新建连接，服务器可能拒绝（`Connection refused`、`kex_exchange_identification`）。用 ControlMaster：`ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=2h <host> …`（第一条命令建立连接，之后的命令复用它），或者在一个持久的 ssh/tmux 会话里依次执行。不要循环轮询。
 - 数据要在 GPU 机器上读得到；用户给的路径在哪台机器上不清楚时，在第 1 步一起问。
 - 第一次用：按 `README.md` 的“环境配置”节（`source` 环境变量文件 → `bash setup.sh` → `ojh doctor` → `ojh fetch-base <基座>`，下载权重不需要审批）。`/home` 小的机器先把 `OJH_HOME` 指到大盘。
 - 环境出问题（导入错误、CUDA 不可用、版本不对、目录写不了、没有 tmux）先跑 `ojh doctor`，按它的 hint 和 README 的故障排查表处理；要装系统软件或升级驱动时告诉用户，不要自己改环境。

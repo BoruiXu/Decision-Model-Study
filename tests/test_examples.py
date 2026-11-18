@@ -152,3 +152,9 @@ def test_readme_disk_needs_explain_the_cache_venv_split():
     text = (ROOT / "README.md").read_text()
     row = next(line for line in text.splitlines() if line.startswith("| 磁盘 |"))
     assert "硬链接" in row and "11 GB" in row and "95 MB" in row and "5.2 GB" in row
+
+
+def test_remote_use_recommends_one_ssh_connection():
+    for p in (ROOT / "skills" / "training-with-onejev" / "SKILL.md", ROOT / "README.md"):
+        text = p.read_text()
+        assert "ControlMaster" in text and "ControlPersist" in text, p
