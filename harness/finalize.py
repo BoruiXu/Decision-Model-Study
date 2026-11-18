@@ -37,12 +37,35 @@ from harness.select import checkpoint_dir, eval_events, select_step
 TOL = 1e-3
 
 
+def adapter_problem(lock: dict) -> str | None:
+    """Why the run dir's adapter copy cannot be used (missing, or sha256 differs from the lock), else None.
+    Locks written before the copy existed have nothing to check."""
+    d = lock["data"]
+    copy, want = d.get("adapter_copy"), d.get("adapter_sha256")
+    if not copy:
+        return None
+    if not Path(copy).is_file():
+        return f"the run's adapter copy {copy} is missing"
+    got = sha256_file(copy)
+    if want and got != want:
+        return f"the run's adapter copy {copy} has sha256 {got[:12]}… but the lock recorded {want[:12]}…"
+    return None
+
+
+def check_adapter(lock: dict) -> None:
+    problem = adapter_problem(lock)
+    if problem:
+        raise ConfigError(problem + "; the eval labels are only read with the adapter the run was resolved with")
+
+
 def exp_from_lock(lock: dict) -> ExperimentConfig:
-    """The parts of the experiment config that evaluation needs, rebuilt from the run lock."""
+    """The parts of the experiment config that evaluation needs, rebuilt from the run lock. The adapter is
+    the copy in the run dir (as resolved), not the original file, which may have changed since."""
     d = lock["data"]
     return ExperimentConfig(
         name=lock["experiment"], base=lock["base"]["name"], recipe="",
-        data=DataSpec(train=d["source"], adapter=d["adapter"], split_file=lock.get("split_file"),
+        data=DataSpec(train=d["source"], adapter=d.get("adapter_copy") or d["adapter"],
+                      split_file=lock.get("split_file"),
                       adapter_args=dict(d.get("adapter_args") or {}),
                       train_adapter_args=dict(d.get("train_adapter_args") or {}),
                       eval={n: EvalSetSpec(**s) for n, s in lock["eval_sets"].items()}),
@@ -315,10 +338,13 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     train_rows, select_rows = _jsonl(lock["data"]["train"]), _jsonl(lock["data"]["select"])
     run_failures: list[str] = []
 
-    parts = build_eval_parts(exp, allow_test=bool(lock.get("allow_test")))
-    dropped = {"eval_parts": parts.dropped}
+    bad_adapter = adapter_problem(lock)
+    parts = None if bad_adapter else build_eval_parts(exp, allow_test=bool(lock.get("allow_test")))
+    dropped = {"eval_parts": parts.dropped if parts is not None else {}}
     changed = data_changes(lock)
-    if changed:
+    if bad_adapter:
+        run_failures.append(bad_adapter + ": eval labels not read, nothing evaluated")
+    elif changed:
         run_failures.append("prepared data changed after resolve (sha256 differs from the lock; the run did "
                             "not train on these files): " + "; ".join(changed))
         parts = None
@@ -351,7 +377,8 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     run_files.write_json(run_dir / "comparison.json", comparison)
     dropped["evaluate"] = {k: (s["evaluation"] or {}).get("dropped") or {} for k, s in seeds.items()}
     run_files.write_json(run_dir / "dropped.json", dropped)
-    versions = label_versions(lock, exp, train_rows)
+    versions = (label_versions(lock, exp, train_rows) if not bad_adapter
+                else {"train": label_version(train_rows, lock["data"]["train"]), "reference": None})
     records = _records(run_dir, lock, seeds, comparison, manifests, timing, versions, status, run_failures,
                        failures)
     for rec in records:

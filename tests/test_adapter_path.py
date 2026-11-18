@@ -129,3 +129,29 @@ def test_run_card_names_the_adapter(tmp_path):
     finalize(run_dir, scorer=FakeScorer())
     card = (run_dir / "RUN_CARD.md").read_text()
     assert lock["data"]["adapter_sha256"] in card and "onejev_rows" in card
+
+
+def test_finalize_reads_through_the_run_dirs_adapter_copy(tmp_path):
+    from harness.finalize import exp_from_lock
+    ws, exp, m = resolve_ws(tmp_path)
+    lock = yaml.safe_load(resolve(exp, m, query=lambda uuid=None: "0, GPU-0, A100, 81920\n", plan_runner=plan_ok(5, 1),
+                                  fingerprint=fake_fp).read_text())
+    (ws / "adapters_local" / "my_adapter.py").write_text("def adapt(path, **kw):\n    raise RuntimeError('edited')\n")
+    again = exp_from_lock(lock)
+    assert again.data.adapter == lock["data"]["adapter_copy"]
+    from harness.prepare import read_train
+    assert len(read_train(again.data)) == 20  # the original was edited; the copy is what the run used
+
+
+def test_tampered_adapter_copy_fails_finalize_and_refuses_eval_report(tmp_path):
+    from test_finalize import FakeScorer, make_run
+    from harness import report_eval
+    from harness.finalize import finalize
+    run_dir, lock = make_run(tmp_path)
+    copy = Path(lock["data"]["adapter_copy"])
+    copy.write_text(copy.read_text() + "\n# tampered\n")
+    out = finalize(run_dir, scorer=FakeScorer())
+    assert out["status"] == "failed" and any("adapter" in f and "sha256" in f for f in out["failures"])
+    (run_dir / "runs" / "exp-s42" / "final").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(ConfigError, match="adapter"):
+        report_eval.run(run_dir, allow_report=True, scorer=FakeScorer())

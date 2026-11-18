@@ -16,7 +16,7 @@ from harness import run_files
 from harness.config import get_field
 from harness.evaluator.labels import label_value, num
 from harness.evaluator.metrics import at_threshold, auc, ece, within_group_auc
-from harness.finalize import _gpu_env, exp_from_lock, score_kwargs
+from harness.finalize import _gpu_env, check_adapter, exp_from_lock, score_kwargs
 from harness.prepare import build_eval_parts, read_eval
 from harness.score import score_checkpoint
 
@@ -49,6 +49,7 @@ def run(run_dir, *, allow_report: bool, seed=None, allow_test: bool = False, sco
         raise ReportRefused("report halves are read only with --allow-report")
     run_dir = Path(run_dir).absolute()
     lock = yaml.safe_load((run_dir / "run.lock.yaml").read_text())
+    check_adapter(lock)
     seed = lock["seeds"][0] if seed is None else seed
     if seed not in lock["seeds"]:
         raise ValueError(f"seed {seed} is not in the run's seeds {lock['seeds']}")
