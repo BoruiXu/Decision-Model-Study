@@ -410,6 +410,7 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
         "allow_test": bool(info.get("allow_test", False)),  # prepare --allow-test, carried to finalize
         "base": {"name": exp.base, **{k: v for k, v in base.items() if k != "name"}},
         "onejev": load_lock(), "overrides": recorded,
+        "recipe": {"path": exp.recipe, "sha256": sha256_file(exp.recipe)},
     }
 
     out = (plan_runner or _default_plan_runner)(lock)

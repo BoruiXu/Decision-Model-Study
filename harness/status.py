@@ -42,8 +42,10 @@ def status(run_dir) -> dict:
             state = sf.read_text().strip() if sf.is_file() and sf.read_text().strip() else "done"
     gp = run_dir / "gpus.json"
     gpus = json.loads(gp.read_text()) if gp.is_file() else []
+    res = run_dir / "RESULT.md"
     return {"state": state, "seed": f"{idx}/{len(seeds)}", "step": step, "total_steps": total,
-            "last_eval": evals[-1] if evals else None, "eta_s": eta, "gpus": gpus}
+            "last_eval": evals[-1] if evals else None, "eta_s": eta, "gpus": gpus,
+            "result": str(res) if res.is_file() else None}
 
 
 def render(s: dict) -> str:
@@ -55,4 +57,6 @@ def render(s: dict) -> str:
         lines.append(f"last eval: {e['set']} step {e['step']} n={e['n']} nll={e['nll']}")
     if s["gpus"]:
         lines.append("gpus: " + ", ".join(g["name"] for g in s["gpus"]))
+    if s.get("result"):
+        lines.append(f"result: {s['result']}")
     return "\n".join(lines[:6])

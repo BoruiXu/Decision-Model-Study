@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 
-from harness import registry, run_files
+from harness import registry, result, run_files
 from harness.catalog import sha256_file
 from harness.config import (ConfigError, DataSpec, EvalSetSpec, EvaluatorSpec, ExperimentConfig, FieldsSpec,
                             get_field)
@@ -359,6 +359,11 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     run_files.write_run_card(run_dir, lock, status=status, failures=failures, comparison=comparison,
                              thresholds=thresholds, timing=timing, candidates=candidates, versions=versions,
                              manifests=manifests, dropped=dropped)
+    boot = next(((s["evaluation"] or {}).get("bootstrap") for s in seeds.values() if s["evaluation"]), None)
+    result.write_result(run_dir, result.build_result(
+        run_dir, lock, status=status, failures=failures, comparison=comparison, thresholds=thresholds,
+        timing=timing, versions=versions, manifests=manifests, dropped=dropped, candidates=candidates,
+        bootstrap=boot))
     (run_dir / "status").write_text(status + "\n")
     return {"run_id": lock["run_id"], "status": status, "failures": failures, "seeds": comparison,
             "records": records}

@@ -175,7 +175,11 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
         incons = [1 - e["f"] for e in examples]
         for b in budgets:
             thr[f"budget_{_pct(b)}"] = budget_threshold(r, incons, b)
+    pooled_incons = [1 - e["f"] for e in examples] if has_f else [0.0] * len(examples)
     for t in thr.values():
+        t["pooled"] = at_threshold(r, labels, pooled_incons, t["threshold"])
+        if not has_f:
+            t["pooled"].pop("inconsistency")
         t["per_set"] = {}
         for n in names:
             ex = by_set[n]
