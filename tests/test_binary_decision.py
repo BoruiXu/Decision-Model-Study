@@ -123,7 +123,12 @@ def test_matches_v1_gate():
                 assert got[gk] == pytest.approx(v, abs=1e-3), f"{path}.{k}"
     check(out["sets"], want["sets"], "sets")
     for n, d in want["pass"].items():
-        assert {KEYS.get(k, k): x for k, x in d.items()} == out["gate"][n]
+        got = dict(out["gate"][n])
+        best = got.pop("best")  # added after v1: the strongest baseline per key
+        assert {KEYS.get(k, k): x for k, x in d.items()} == got
+        for k, (name, value) in best.items():
+            rivals = {m: out["sets"][n][m][k] for m in ("tfidf", "group_prior", "length") if m in out["sets"][n]}
+            assert name in rivals and value == max(rivals.values())
     assert out["gate"]["passed"] == want["passed"]
     t = out["thresholds"]
     assert t["budget_10"]["threshold"] == pytest.approx(0.75491, abs=1e-5)
