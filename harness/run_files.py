@@ -147,7 +147,7 @@ def _e(v) -> str:
 def _metric_table(entry: dict) -> list[str]:
     methods = [k for k, v in entry.items() if isinstance(v, dict)]
     methods.sort(key=lambda k: k != "router")
-    cols = list(dict.fromkeys(c for m in methods for c in entry[m]))
+    cols = list(dict.fromkeys(c for m in methods for c in entry[m] if not isinstance(entry[m][c], dict)))
     out = ["| 方法 | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
     out += [f"| {m} | " + " | ".join(_f(entry[m].get(c)) for c in cols) + " |" for m in methods]
     return out

@@ -21,6 +21,7 @@ from harness.resolve import resolve
 
 ROOT = Path(__file__).resolve().parent.parent
 RECIPES = ROOT / "examples" / "recipes"
+FAST_REPS = 20  # bootstrap replicates in tests (the default 1000 is for real runs)
 WORDS = ["alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta"]
 STEPS = [0, 4, 8, 10]  # saves at 4 and 8; step 10 is the end of training (final/ or adapter/)
 NOISE = {0: 0.45, 4: 0.25, 8: 0.05, 10: 0.15}  # step 8 has the lowest select NLL
@@ -75,7 +76,7 @@ def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evalua
         name="exp", base="joey-1", recipe=str(RECIPES / f"{recipe}.yaml"),
         data=DataSpec(train=train, train_sha256=_sha256(train), eval=evals, split_file=str(split)),
         fields=FieldsSpec(label="target.yes", group="meta.cat", consistency="meta.f", text="messages"),
-        evaluator=evaluator or EvaluatorSpec(), seeds=list(seeds), merge=merge, overrides=overrides or {})
+        evaluator=evaluator or EvaluatorSpec(bootstrap_reps=FAST_REPS), seeds=list(seeds), merge=merge, overrides=overrides or {})
     out = tmp_path / "out"
     prepare(exp, out / "exp" / "prepared", allow_test=allow_test)
     machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"), out_root=str(out))

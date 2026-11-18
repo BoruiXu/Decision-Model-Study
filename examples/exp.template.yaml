@@ -39,6 +39,8 @@ evaluator:                                # 评测器
   # path: <WORK>/my_plugin.py             # type: plugin 时的插件文件，接口见 plugins/README.md
   budgets: [0.10, 0.15]                   # 不一致率预算（需要 fields.consistency）
   gate: true                              # 门：每个评测集上 AUC（和组内 AUC）都要高于最好的基线；false 只报告
+  # bootstrap_reps: 1000                  # 95% 置信区间的 bootstrap 次数（先抽组、再在组内抽题；没有分组字段时按题抽）；0 关闭
+  # bootstrap_seed: 20261115              # bootstrap 种子（固定，结果可复现）
   # bootstrap_reps: 1000                  # bootstrap 次数（95% 置信区间）；0 关闭
   # bootstrap_seed: 20261115              # bootstrap 种子（固定，结果可复现）
 

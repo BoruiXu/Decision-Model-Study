@@ -9,6 +9,7 @@ import statistics
 
 from harness.baselines.tfidf import TextBaseline, group_prior
 from harness.config import get_field
+from harness.evaluator.bootstrap import LEVEL_GROUPED, LEVEL_ITEM, bootstrap_cis
 from harness.evaluator.labels import baseline_examples, label_value, num
 from harness.evaluator.metrics import (at_threshold, auc, budget_threshold, ece, fit_threshold,
                                        max_share_at_budget, within_group_auc)
@@ -114,6 +115,7 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     model = TextBaseline(train) if fields.text and train else None
     train_groups = {t["group"] for t in train} if has_group else set()
 
+    reps = int(getattr(evaluator_cfg, "bootstrap_reps", 0) or 0)
     names = list(dict.fromkeys(e["set"] for e in examples))
     by_set = {n: [e for e in examples if e["set"] == n] for n in names}
     by_set[POOLED] = examples
@@ -137,11 +139,22 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
             entry["unseen_groups"] = len({e["group"] for e in ex} - train_groups)
         for name, s in sc.items():
             entry[name] = _summary(ex, s, budgets, group=has_group, with_ece=name == "router")
+        if reps > 0:
+            cis = bootstrap_cis(ex, sc, budgets=budgets, has_group=has_group, has_f=has_f, reps=reps,
+                                seed=evaluator_cfg.bootstrap_seed, salt=n)
+            for name, ci in cis.items():
+                entry[name]["ci95"] = ci
         sets[n] = entry
 
     all_sets = list(dict.fromkeys(parts.select_index[r["id"]] for r in parts.select_rows))
     result: dict = {"sets": sets, "thresholds": {}, "gate": _gate(all_sets, sets, has_group, evaluator_cfg),
-                    "dropped": dropped, "tfidf_strength": model.strength if model is not None else None}
+                    "dropped": dropped, "tfidf_strength": model.strength if model is not None else None,
+                    "bootstrap": None}
+    if reps > 0:
+        result["bootstrap"] = {"reps": reps, "seed": evaluator_cfg.bootstrap_seed, "ci": 0.95,
+                               "level": LEVEL_GROUPED if has_group else LEVEL_ITEM}
+        if not has_group:
+            result["bootstrap"]["note"] = "no group field: items are resampled directly (item level)"
     if not examples:
         return result
 

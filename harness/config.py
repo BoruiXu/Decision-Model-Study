@@ -96,6 +96,8 @@ class EvaluatorSpec:
     budgets: list[float] = field(default_factory=lambda: [0.10, 0.15])
     gate: bool = True
     path: str | None = None
+    bootstrap_reps: int = 1000  # 95% CIs by two-level bootstrap (groups, then items); 0 turns them off
+    bootstrap_seed: int = 20261115
 
 
 @dataclass

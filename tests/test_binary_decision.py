@@ -9,6 +9,7 @@ from harness.config import (DataSpec, EvalSetSpec, EvaluatorSpec, ExperimentConf
 from harness.evaluator.binary_decision import evaluate
 from harness.prepare import EvalParts, build_eval_parts
 
+FAST_REPS = 20  # bootstrap replicates in tests (the default 1000 is for real runs)
 WORDS = ["alpha", "beta", "gamma", "delta", "eps", "zeta", "eta", "theta"]
 
 
@@ -34,7 +35,7 @@ def setup(n=40, seed=0, **over):
 
 def test_full_shape():
     preds, parts, train, fields = setup()
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert set(out["sets"]) == {"a", "b", "pooled_select"}
     e = out["sets"]["pooled_select"]
     assert {"router", "tfidf", "group_prior", "all_positive", "oracle"} <= set(e)
@@ -48,7 +49,7 @@ def test_full_shape():
 
 def test_no_consistency_no_budgets():
     preds, parts, train, fields = setup(consistency=None)
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     e = out["sets"]["pooled_select"]
     assert "oracle" not in e and not any(k.startswith("share_at_budget") for k in e["router"])
     assert set(out["thresholds"]) == {"best_jaccard"}
@@ -56,7 +57,7 @@ def test_no_consistency_no_budgets():
 
 def test_no_group_no_prior():
     preds, parts, train, fields = setup(group=None)
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     e = out["sets"]["pooled_select"]
     assert "group_prior" not in e and "within_group_auc" not in e["router"] and "groups" not in e
     assert set(out["gate"]["a"]) == {"auc"}
@@ -65,7 +66,7 @@ def test_no_group_no_prior():
 def test_gate_fails_when_router_worse():
     preds, parts, train, fields = setup()
     preds = {k: 1 - v for k, v in preds.items()}
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["gate"]["passed"] is False and out["gate"]["a"]["auc"] is False
 
 
@@ -75,7 +76,7 @@ def test_gate_off_reports_but_does_not_decide():
     out = evaluate(preds, parts, train, fields, EvaluatorSpec(gate=False))
     assert out["gate"]["enabled"] is False and out["gate"]["passed"] is None
     assert out["gate"]["a"]["auc"] is False
-    on = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    on = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert on["gate"]["enabled"] is True and on["gate"]["passed"] is False
 
 
@@ -83,7 +84,7 @@ def test_unlabeled_rows_dropped_and_counted():
     preds, parts, train, fields = setup()
     del parts.reference["r3"]["target"]  # no target at all (a missing key alone is a 0, see below)
     del parts.reference["r4"]["meta"]["f"]
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert sorted(i for v in out["dropped"].values() for i in v) == ["r3", "r4"]
     assert out["sets"]["pooled_select"]["questions"] == 38
 
@@ -109,7 +110,7 @@ def test_matches_v1_gate():
     preds = {}
     for n in ("val_id", "val_catood"):
         preds.update({r["id"]: r["p_agree"] for r in map(json.loads, open(v1 / f"train/predictions_select_elephant_{n}.jsonl"))})
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     want = json.loads((v1 / "train/gate_elephant.json").read_text())
     assert out["tfidf_strength"] == want["tfidf_strength"]
 
@@ -135,7 +136,7 @@ def test_hard_negative_missing_positive_key_reads_zero():
     preds, parts, train, fields = setup()
     parts.reference["r3"]["target"] = {"no": 1.0}  # prepare accepts a subset of labels; OneJev fills 0
     train[0]["target"] = {"no": 1.0}
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["dropped"] == {}
     pooled = out["sets"]["pooled_select"]
     assert pooled["questions"] == 40
@@ -148,7 +149,7 @@ def test_label_outside_target_missing_is_unlabeled():
     for r in parts.select_rows + train:
         r["meta"]["rate"] = r["target"]["yes"]
     del parts.reference["r3"]["meta"]["rate"]
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["dropped"] == {parts.select_index["r3"]: ["r3"]}
     assert out["sets"]["pooled_select"]["questions"] == 39
 
@@ -158,7 +159,7 @@ def test_skipped_train_rows_counted():
     del train[0]["meta"]["cat"]  # no group
     del train[2]["target"]  # no target dict: unlabeled
     train[1]["target"] = {"no": 1.0}  # a hard negative is kept
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["dropped"] == {"baseline_train": ["rt0", "rt2"]}
 
 
@@ -171,14 +172,14 @@ def test_plugin_default_baselines_share_label_rules():
     parts.select_rows[3]["target"] = {"no": 1.0}
     del train[0]["meta"]["cat"]
     train[1]["target"] = {"no": 1.0}
-    out = evaluate_plugin(types.ModuleType("empty"), recs, parts, train, fields, EvaluatorSpec())
+    out = evaluate_plugin(types.ModuleType("empty"), recs, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["dropped"] == {"baseline_train": ["rt0"]}
     assert {"tfidf", "group_prior"} <= set(out["sets"]["pooled_select"])
 
 
 def test_gate_without_rival_baseline_cannot_pass():
     preds, parts, train, fields = setup(text=None, group=None)
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert out["gate"]["passed"] is False
     for n in ("a", "b"):
         assert out["gate"][n]["passed"] is False and "no rival baseline" in out["gate"][n]["reason"]
@@ -190,11 +191,11 @@ def test_gate_fails_for_a_set_whose_rows_were_all_dropped():
     for r in parts.select_rows:
         if parts.select_index[r["id"]] == "a":
             del r["meta"]["f"]
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     assert "a" not in out["sets"] and set(out["gate"]["b"]) == {"auc", "within_group_auc"}
     assert out["gate"]["a"]["passed"] is False and "dropped" in out["gate"]["a"]["reason"]
     assert out["gate"]["passed"] is False
     for r in parts.select_rows:
         r["meta"].pop("f", None)
-    out = evaluate(preds, parts, train, fields, EvaluatorSpec())  # nothing left at all
+    out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))  # nothing left at all
     assert out["gate"]["passed"] is False and {"a", "b"} <= set(out["gate"])
