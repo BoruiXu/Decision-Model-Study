@@ -96,3 +96,19 @@ def test_docs_call_ojh_from_the_venv():
         text = p.read_text()
         assert "<repo>/.venv/bin/ojh" in text and "ssh <host> <repo>/.venv/bin/ojh" in text, p
         assert not re.search(r"ssh <host> ojh", text), p
+
+
+def test_exp_template_loads_and_covers_every_field(tmp_path):
+    from harness.config import (DataSpec, EvalSetSpec, EvaluatorSpec, ExperimentConfig, FieldsSpec,
+                                SubsetSpec)
+    path = EXAMPLES / "exp.template.yaml"
+    text = path.read_text()
+    for cls in (ExperimentConfig, DataSpec, EvalSetSpec, FieldsSpec, EvaluatorSpec, SubsetSpec):
+        for key in cls.__dataclass_fields__:
+            assert re.search(rf"^\s*#?\s*{key}:", text, re.M), f"{cls.__name__}.{key}"
+    exp = load_experiment(fill(path, tmp_path / "exp.yaml", tmp_path))
+    assert exp.base is None and exp.recipe is None and exp.gpus is None  # ojh run supplies them
+    assert exp.data.train == str(tmp_path / "data" / "train.jsonl")
+    assert set(exp.data.eval) == {"val"} and exp.fields.label == "target.yes"
+    assert all(line.startswith("#") or not line.strip() or "#" in line
+               for line in text.splitlines()), "every active line carries a comment"

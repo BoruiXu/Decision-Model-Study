@@ -1,0 +1,47 @@
+# 实验配置模板：复制到 repo 之外的工作区（例如 <WORK>/exp.yaml）后按数据填写。
+# 用法：ojh inspect <数据> 看清格式和字段 → 需要时写适配器 → 填本文件 → ojh run exp.yaml --base <基座> --gpus <i,j>
+# 路径可以用 ~ 和 $VAR；相对路径相对本文件所在的目录。注释掉的键是可选的。
+
+name: my_experiment                       # 实验名：输出在 <out_root>/<name>/ 下（prepared/ 和每个 run 的目录）
+
+# ---- 由 ojh run 提供，可以不写 ----
+# base: joey-1                            # 基座（catalog/bases/ 里的名字）；ojh run --base 覆盖它。不会自动选
+# gpus: [0]                               # 用哪几张卡（nvidia-smi 编号）；ojh run --gpus 0,1 覆盖它。也可以写卡数（scan 机器）
+# recipe: examples/recipes/joey_full_1gpu.yaml   # 配方；不写时 ojh run 用 --recipe，再不然用基座的 default_recipes
+
+data:                                     # 数据：只读这里列出的文件
+  adapter: onejev_rows                    # 适配器：adapters/ 里的模块名，或一个 .py 文件路径（相对本文件），见 adapters/template.py
+  # adapter_args: {}                      # 传给 adapt(path, **args) 的参数，所有文件都用
+  # train_adapter_args: {split: train}    # 只给训练文件的参数（合并在 adapter_args 之上），例如单文件按 split 列过滤
+  train: <DATA>/train.jsonl               # 训练文件
+  # train_sha256: <64 位十六进制>          # 训练文件的 sha256；写了就核对，不一致 prepare 停下；不写只记录
+  eval:                                   # 评测集：名字 → 文件；select 部分用于选 checkpoint 和定阈值
+    val:                                  # 评测集名（随意取，会出现在报告里）
+      train_labels: <DATA>/val.jsonl      # 和训练同一版本的标签：选模时算 NLL
+      # reference: <DATA>/val_ref.jsonl   # 参照标签：定阈值、AUC、门和一致比例用；不写就等于 train_labels
+      # adapter_args: {split: val}        # 只给这个评测集的参数（合并在 adapter_args 之上）
+  # split_file: <WORK>/splits.json        # 可选：{评测集: {"assignment": {id: "select"|"report"}}}，可用 ojh make-split 生成
+                                          # 不写：评测集全部算 select；写了：每个评测集都要在里面，未分配的 id 被丢弃
+
+fields:                                   # 字段：都是点分路径，在适配器产出的 OneJev 行上取
+  label: target.yes                       # 正类在 target 里的键（必填）
+  # group: meta.category                  # 分组：组内 AUC、分组先验基线、按组 bootstrap
+  # consistency: meta.f                   # 逐题一致比例（[0,1]）：预算下的承接率、预算阈值、oracle
+  # text: messages                        # 基线文本：messages（state.messages 拼成 "role: content"）或 state_json
+
+# subset:                                 # 可选：从训练文件派生子集（消融、规模对比）
+#   where: {meta.pair_design: full}       # 按字段取值过滤
+#   n: 1000                               # 抽样条数
+#   seed: 7                               # 抽样种子
+
+evaluator:                                # 评测器
+  type: binary_decision                   # binary_decision（内置）或 plugin（配 path）
+  # path: <WORK>/my_plugin.py             # type: plugin 时的插件文件，接口见 plugins/README.md
+  budgets: [0.10, 0.15]                   # 不一致率预算（需要 fields.consistency）
+  gate: true                              # 门：每个评测集上 AUC（和组内 AUC）都要高于最好的基线；false 只报告
+  # bootstrap_reps: 1000                  # bootstrap 次数（95% 置信区间）；0 关闭
+  # bootstrap_seed: 20261115              # bootstrap 种子（固定，结果可复现）
+
+seeds: [42]                               # 训练种子；多个就依次各训一次
+# merge: false                            # LoRA 配方：finalize 时把选中的 adapter 合并进基座另存一份
+overrides: {}                             # 偏离配方：{键: {value: ..., reason: ...}}，每项必须写原因，要先问用户
