@@ -351,3 +351,23 @@ def test_runner_treats_an_explicit_lock_from_before_allow_shared_as_shareable(tm
     assert seen["allow_shared"] is True
     design = (Path(__file__).resolve().parents[1] / "docs" / "design.md").read_text()
     assert "runner、`ojh finalize` 和 `ojh eval-report` 都按当时的规则处理" in design
+
+
+def test_explicit_cards_can_be_waited_for_on_request():
+    state = {"polls": 0}
+
+    def apps_then_free():
+        state["polls"] += 1
+        return "GPU-a, 4242, vllm, 55000\n" if state["polls"] == 1 else ""
+    t = [0.0]
+    lease = acquire(machine(wait_timeout_s=600), 1, explicit=[0], need_mib=1000, query=query,
+                    apps_query=apps_then_free, wait=True, sleep=lambda s: t.__setitem__(0, t[0] + s),
+                    clock=lambda: t[0])
+    assert lease.uuids == ["GPU-a"] and state["polls"] == 2 and t[0] == 30
+    with pytest.raises(GpuUnavailable, match="shared"):  # the default for explicit cards: no waiting
+        acquire(machine(), 1, explicit=[0], need_mib=1000, query=query,
+                apps_query=lambda: "GPU-a, 4242, vllm, 55000\n", sleep=no_sleep_allowed)
+
+
+def no_sleep_allowed(s):
+    raise AssertionError("explicit cards are not waited for by default")

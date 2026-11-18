@@ -154,9 +154,11 @@ def cmd_status(a) -> int:
     return 0
 
 
-def _on_one_gpu(run, fn, allow_shared: bool = False):
+def _on_one_gpu(run, fn, allow_shared: bool = False, wait: bool = False, retry: str | None = None):
     """Score on one card: the run's first explicit card (or one picked like the run's). A shared card is used
-    when the lock allows it (runner.lock_allows_sharing) or the command got --allow-shared."""
+    when the lock allows it (runner.lock_allows_sharing) or the command got --allow-shared. A foreground
+    command checks once and never blocks: without ``wait`` (--wait) a busy card is refused with each card's
+    problem and the runnable ``retry`` lines."""
     lock = _lock_of(run)
     g = lock["machine"]["gpu"]
     shared = allow_shared or runner.lock_allows_sharing(lock)
@@ -166,7 +168,16 @@ def _on_one_gpu(run, fn, allow_shared: bool = False):
         kw = {"allow_shared": shared}
     else:
         kw = {}
-    lease = gpu.acquire(runner._machine(lock["machine"]), 1, **kw)
+    machine = runner._machine(lock["machine"])
+    try:
+        lease = gpu.acquire(machine, 1, wait=wait, **kw)
+    except GpuUnavailable as e:
+        hint = []
+        if retry and not wait:
+            hint.append(f"wait for a card (every {gpu.RETRY_S} s, up to {machine.wait_timeout_s} s): `{retry} --wait`")
+        if retry and not kw.get("allow_shared") and any("process" in r for r in e.reasons.values()):
+            hint.append(f"only if the user agrees to share the card with those processes: `{retry} --allow-shared`")
+        raise GpuUnavailable(e.reasons, e.cards, head=e.head, hint=e.hint + hint) from None
     try:
         return fn(lease)
     finally:
@@ -175,7 +186,7 @@ def _on_one_gpu(run, fn, allow_shared: bool = False):
 
 def cmd_finalize(a) -> int:
     out = _on_one_gpu(a.run, lambda lease: finalize.finalize(Path(a.run), devices=lease.uuids),
-                      allow_shared=a.allow_shared)
+                      allow_shared=a.allow_shared, wait=a.wait, retry=f"ojh finalize {a.run}")
     print(f"{out['run_id']}: {out['status']}")
     for f in out["failures"]:
         print(f"  {f}", file=sys.stderr)
@@ -191,9 +202,11 @@ def cmd_note(a) -> int:
 def cmd_eval_report(a) -> int:
     if not a.allow_report:
         raise ReportRefused("report halves are read only with --allow-report")
+    retry = (f"ojh eval-report {a.run} --allow-report" + (" --allow-test" if a.allow_test else "")
+             + (f" --seed {a.seed}" if a.seed is not None else ""))
     out = _on_one_gpu(a.run, lambda lease: report_eval.run(
         Path(a.run), allow_report=True, seed=a.seed, allow_test=a.allow_test, devices=lease.uuids),
-        allow_shared=a.allow_shared)
+        allow_shared=a.allow_shared, wait=a.wait, retry=retry)
     print(f"wrote {Path(a.run) / 'report_eval.json'} (seed {out['seed']})")
     return 0
 
@@ -332,6 +345,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("run")
     s = cmd("finalize", cmd_finalize, "select, rescore, evaluate and register a run")
     s.add_argument("run")
+    s.add_argument("--wait", action="store_true",
+                   help="wait for a free card (polls up to the machine's wait_timeout_s); without it the command "
+                        "checks once and never blocks")
     s.add_argument("--allow-shared", action="store_true",
                    help="score on the run's card even if other processes use it (ask the user first)")
     s = cmd("note", cmd_note, "set the conclusion of a run in the registry")
@@ -339,6 +355,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("text")
     s = cmd("eval-report", cmd_eval_report, "evaluate the report halves with the locked checkpoint")
     s.add_argument("run")
+    s.add_argument("--wait", action="store_true",
+                   help="wait for a free card (polls up to the machine's wait_timeout_s); without it the command "
+                        "checks once and never blocks")
     s.add_argument("--allow-shared", action="store_true",
                    help="score on the run's card even if other processes use it (ask the user first)")
     s.add_argument("--allow-report", action="store_true", help="required: read report halves")

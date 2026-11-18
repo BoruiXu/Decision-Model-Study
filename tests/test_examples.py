@@ -195,3 +195,8 @@ def test_design_switches_to_lora_with_a_recipe():
     text = (ROOT / "docs" / "design.md").read_text()
     lora = [line for line in text.splitlines() if "LoRA" in line and ("切换" in line or "提议" in line)]
     assert lora and not any("override" in line and "--recipe" not in line for line in lora), lora
+
+
+def test_docs_say_foreground_commands_never_wait():
+    for p in (ROOT / "README.md", ROOT / "docs" / "design.md", ROOT / "skills" / "training-with-onejev" / "SKILL.md"):
+        assert "--wait" in p.read_text(), p

@@ -26,12 +26,15 @@ class GpuWaitTimeout(RuntimeError):
 
 
 class GpuUnavailable(RuntimeError):
-    """One or more explicitly requested cards cannot be used; ``reasons`` maps card index -> reason."""
+    """Cards cannot be used now; ``reasons`` maps card index -> reason, ``hint`` adds runnable next steps."""
 
-    def __init__(self, reasons: dict, cards: list | None = None):
+    def __init__(self, reasons: dict, cards: list | None = None, head: str = "requested GPU(s) not usable",
+                 hint: list[str] | None = None):
         self.reasons = dict(reasons)
         self.cards = list(cards or [])  # every card nvidia-smi listed, with its processes
-        super().__init__("requested GPU(s) not usable:\n" + "\n".join(f"GPU {i}: {r}" for i, r in reasons.items()))
+        self.head, self.hint = head, list(hint or [])
+        lines = [f"GPU {i}: {r}" for i, r in reasons.items()] or ["no candidate card (gpu_include/gpu_exclude)"]
+        super().__init__(head + ":\n" + "\n".join(lines + self.hint))
 
 
 @dataclass(frozen=True)
@@ -158,8 +161,24 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
 
 
 def _explicit(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query,
-              allow_shared: bool = False) -> "GpuLease":
+              allow_shared: bool = False, wait: bool = False, sleep=time.sleep, clock=time.monotonic) -> "GpuLease":
+    """Explicit cards: checked and locked at once; with ``wait``, retried every RETRY_S seconds up to
+    ``wait_timeout_s`` (only when a caller asks, e.g. ojh finalize --wait)."""
     apps_query = apps_query or _nvidia_smi_apps
+    if not wait:
+        return _explicit_once(machine, n, explicit, need_mib, query, apps_query, allow_shared)
+    deadline = clock() + machine.wait_timeout_s
+    while True:
+        try:
+            return _explicit_once(machine, n, explicit, need_mib, query, apps_query, allow_shared)
+        except GpuUnavailable:
+            if clock() > deadline:
+                raise
+        sleep(RETRY_S)
+
+
+def _explicit_once(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query,
+                   allow_shared: bool) -> "GpuLease":
     if not explicit:
         raise ConfigError("gpu_source is 'explicit' but no cards were given: pass --gpus i,j,...")
     if len(explicit) != n:
@@ -273,9 +292,9 @@ def _preassigned(n: int, query) -> GpuLease:
     return GpuLease(ids, names)
 
 
-def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sleep,
-            clock=time.monotonic, explicit: list[int] | None = None, need_mib: int = 0,
-            apps_query=None, allow_shared: bool = False) -> GpuLease:
+def acquire(machine: MachineConfig, n: int, *, query=None, sleep=None, clock=None,
+            explicit: list[int] | None = None, need_mib: int = 0, apps_query=None, allow_shared: bool = False,
+            wait: bool | None = None) -> GpuLease:
     """Pick and lock ``n`` GPUs according to ``machine``; hold the returned lease for the whole run.
 
     ``query(uuid=None)`` returns nvidia-smi csv text for all cards, or for one card when given its uuid;
@@ -283,14 +302,19 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
     ``gpu_source: scan`` polls every RETRY_S seconds up to ``wait_timeout_s`` for cards allowed by
     gpu_include/gpu_exclude with at least ``min_free_mib`` free and, unless ``allow_shared``, no other compute
     process (an unreadable process list counts as unknown, so the card waits too); the timeout names each
-    card's problem at the last check. ``explicit``: the given cards are validated once with
-    ``check_explicit`` against ``need_mib`` and refused at once, never waited for.
+    card's problem at the last check. ``explicit``: the given cards are validated with ``check_explicit``
+    against ``need_mib`` and refused at once.
+
+    ``wait``: None keeps each mode's default (scan waits, explicit does not), which the background runner
+    uses. Foreground commands pass ``wait=False`` so scan tries once and raises GpuUnavailable with each
+    card's problem instead of blocking; ``wait=True`` (their --wait) polls in either mode.
     """
     apps_query = apps_query or _nvidia_smi_apps
+    query, sleep, clock = query or _nvidia_smi, sleep or time.sleep, clock or time.monotonic
     if machine.order != "free_desc":
         raise ConfigError(f"unsupported gpu order: {machine.order!r} (only 'free_desc')")
     if machine.gpu_source == "explicit":
-        return _explicit(machine, n, explicit, need_mib, query, apps_query, allow_shared)
+        return _explicit(machine, n, explicit, need_mib, query, apps_query, allow_shared, bool(wait), sleep, clock)
     if machine.gpu_source == "preassigned":
         return _preassigned(n, query)
     if machine.gpu_source != "scan":
@@ -355,9 +379,12 @@ def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sle
         finally:
             for fd in fds:
                 os.close(fd)
+        rule = ("other compute processes allowed (--allow-shared)" if allow_shared
+                else "no other compute process (use --allow-shared only after asking the user)")
+        if wait is False:  # a foreground command: one check, then the reasons, never a wait
+            raise GpuUnavailable(dict(sorted(reasons.items())),
+                                 head=f"no {n} GPU(s) with >= {machine.min_free_mib} MiB free and {rule} now")
         if clock() > deadline:
-            rule = ("other compute processes allowed (--allow-shared)" if allow_shared
-                    else "no other compute process (use --allow-shared only after asking the user)")
             last = "; ".join(f"GPU {i}: {r}" for i, r in sorted(reasons.items())) or "no candidate card"
             raise GpuWaitTimeout(f"no {n} GPU(s) with >= {machine.min_free_mib} MiB free and {rule} within "
                                  f"{machine.wait_timeout_s} s; last check: {last}")

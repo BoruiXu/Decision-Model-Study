@@ -286,3 +286,48 @@ def test_check_force_help_does_not_claim_to_overwrite(capsys):
     with pytest.raises(SystemExit):
         cli.main(["prepare", "--help"])
     assert "overwrite data prepared from another experiment file" in " ".join(capsys.readouterr().out.split())
+
+
+def _scan_lock(tmp_path, monkeypatch, apps="GPU-a, 4242, vllm, 55000\n"):
+    from harness import gpu
+    run = _explicit_lock(tmp_path, allow_shared=False)
+    lock = yaml.safe_load((run / "run.lock.yaml").read_text())
+    lock["machine"]["gpu"].update(source="scan", explicit=None, wait_timeout_s=3600)
+    (run / "run.lock.yaml").write_text(yaml.safe_dump(lock))
+    monkeypatch.setattr(gpu, "_nvidia_smi", lambda uuid=None: "0, GPU-a, NVIDIA A100-SXM4-80GB, 80000\n")
+    monkeypatch.setattr(gpu, "_nvidia_smi_apps", lambda: apps)
+    monkeypatch.setattr(gpu, "_process_user", lambda pid: "bob")
+
+    def no_wait(s):
+        raise AssertionError("a foreground command waited for a card")
+    monkeypatch.setattr(gpu.time, "sleep", no_wait)
+    return run
+
+
+def test_foreground_finalize_and_eval_report_never_wait(tmp_path, monkeypatch, capsys):
+    run = _scan_lock(tmp_path, monkeypatch)
+    assert cli.main(["finalize", str(run)]) == 1
+    err = capsys.readouterr().err
+    assert "GPU 0: 1 other compute process(es): pid 4242 (user bob, vllm, 55000 MiB)" in err
+    assert f"`ojh finalize {run} --wait`" in err and f"`ojh finalize {run} --allow-shared`" in err
+    assert cli.main(["eval-report", str(run), "--allow-report", "--seed", "42"]) == 1
+    err = capsys.readouterr().err
+    assert f"`ojh eval-report {run} --allow-report --seed 42 --wait`" in err
+
+
+def test_wait_is_opt_in_for_foreground_commands(tmp_path, monkeypatch):
+    run = _scan_lock(tmp_path, monkeypatch)
+    seen = []
+
+    class Lease:
+        uuids = ["GPU-a"]
+
+        def release(self):
+            pass
+    monkeypatch.setattr(cli.gpu, "acquire", lambda m, n, **kw: seen.append(kw) or Lease())
+    monkeypatch.setattr(cli.finalize, "finalize", lambda rd, devices=None: {"run_id": "r", "status": "done",
+                                                                           "failures": []})
+    monkeypatch.setattr(cli.report_eval, "run", lambda rd, **kw: {"seed": 1})
+    assert cli.main(["finalize", str(run)]) == 0 and cli.main(["finalize", str(run), "--wait"]) == 0
+    assert cli.main(["eval-report", str(run), "--allow-report", "--wait"]) == 0
+    assert [kw["wait"] for kw in seen] == [False, True, True]

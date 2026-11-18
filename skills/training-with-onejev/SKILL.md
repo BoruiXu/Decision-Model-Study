@@ -101,6 +101,7 @@ overrides:
 | `DONE` 的 `stage: finalize`；复评 NLL 对不上 | 不手改任何数字，如实报告；可以 `ojh finalize <run_dir>` 重跑收尾 |
 | 门没过 | 记录照常写。如实说路由器没超过哪条基线（门条目的 `best`）；不改评测配置去凑 |
 | 基座权重不存在 | `ojh fetch-base <基座>` 后重跑 |
+| `ojh finalize` / `ojh eval-report` 报卡不可用（前台命令只查一次，不会等） | 把每张卡的原因告诉用户，问：现在不跑、加 `--wait` 等卡（最长 `wait_timeout_s`，会占住这个前台会话），还是同意共用后加 `--allow-shared` |
 | `ojh` 没有 `run`/`inspect`/`make-split` 子命令，或找不到 `examples/exp.template.yaml` | GPU 机器上的 repo 版本旧。告诉用户更新并重装；不要自己补代码，也不要退回分步命令拼流程 |
 
 ## 常见错误
