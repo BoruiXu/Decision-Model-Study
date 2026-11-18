@@ -98,7 +98,7 @@ def test_docs_call_ojh_from_the_venv():
     # setup.sh never activates .venv, so a bare `ojh` is not on PATH (over ssh in particular)
     for p in (ROOT / "README.md", ROOT / "skills" / "training-with-onejev" / "SKILL.md"):
         text = p.read_text()
-        assert "<repo>/.venv/bin/ojh" in text and "ssh <host> <repo>/.venv/bin/ojh" in text, p
+        assert "<repo>/.venv/bin/ojh" in text and "&& <repo>/.venv/bin/ojh" in text and "ssh <host> '" in text, p
         assert not re.search(r"ssh <host> ojh", text), p
 
 
@@ -162,3 +162,30 @@ def test_remote_use_recommends_one_ssh_connection():
     for p in (ROOT / "skills" / "training-with-onejev" / "SKILL.md", ROOT / "README.md"):
         text = p.read_text()
         assert "ControlMaster" in text and "ControlPersist" in text, p
+
+
+def test_skill_switches_to_lora_with_a_recipe_not_a_mode_override():
+    text = (ROOT / "skills" / "training-with-onejev" / "SKILL.md").read_text()
+    assert "`mode` override" not in text  # a mode override breaks recipes such as elephant's (fsdp: true)
+    lora_lines = [line for line in text.splitlines() if "LoRA" in line and ("同意" in line or "提议" in line)]
+    assert lora_lines and all("--recipe" in line for line in lora_lines), lora_lines
+
+
+def test_design_fingerprint_matches_the_code():
+    assert "pip freeze" not in (ROOT / "docs" / "design.md").read_text()
+
+
+def test_env_file_is_sourced_by_its_literal_path():
+    # a fresh shell has no OJH_HOME until the env file sets it, so "source $OJH_HOME/..." cannot work there
+    for p in (ROOT / "README.md", EXAMPLES / "env.example.sh"):
+        text = p.read_text()
+        assert not re.search(r"source \"?\$OJH_HOME", text), p
+        assert re.search(r"source /big/disk/ojh/ojh-env\.sh", text), p
+    assert "sets OJH_HOME" in (EXAMPLES / "env.example.sh").read_text()
+    assert "本身设置 `OJH_HOME`" in (ROOT / "README.md").read_text()
+
+
+def test_ssh_examples_source_the_env_file():
+    for p in (ROOT / "README.md", ROOT / "skills" / "training-with-onejev" / "SKILL.md"):
+        text = p.read_text()
+        assert "ssh <host> 'source /big/disk/ojh/ojh-env.sh && <repo>/.venv/bin/ojh" in text, p

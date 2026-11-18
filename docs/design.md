@@ -279,7 +279,7 @@ subset:
 - OneJev 的完整命令行、卡数、seed 列表；
 - 数据路径和 sha256（包括派生子集的规则）；
 - 基座的 revision 和 sha256；OneJev 的 revision 和补丁的 sha256；
-- 环境指纹：pip freeze 的哈希、驱动版本；
+- 环境指纹：训练用 python 的已装包列表（`importlib.metadata`，所以 uv 建的没有 pip 的 venv 也行）的哈希和个数、驱动版本、`setup.sh` 写进 venv 的记录（uv 版本等）；
 - 评测器的配置；
 - `overrides` 及每项的原因。
 

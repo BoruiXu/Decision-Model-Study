@@ -66,7 +66,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 | 任何带 `--allow-test` 的命令 | 读 test；会记进 lock、`RESULT.md` 和登记表 |
 | `ojh run … --allow-shared` | 和卡上已有的进程（常是别人的）共用卡；会记进 lock。先把进程列表（pid、用户、显存）给用户看 |
 | `ojh cleanup <RUN> --confirm` | 先不带 `--confirm` 跑，把候选和大小给用户看 |
-| 任何 override（含换卡数、改 batch、全参↔LoRA） | 见下节 |
+| 任何 override（含换卡数、改 batch） | 见下节 |
 | 换基座、换配方（`--recipe`）、换卡 | 用户给的输入，只有用户能改 |
 | `git push` 本 repo | |
 
@@ -80,7 +80,7 @@ overrides:
 - 键只能是 `mode`、`gpus`、`fsdp`、`onejev.<flag>`、`lora.<字段>`；harness 自己推导的标志（`full_finetune`、`fsdp`、`attention`、`readout`、`eval_every`、`save_every`、`seed`、`model` 等）不能写在 `onejev.` 下。
 - 冒烟短跑：`onejev.max_steps`（评测间隔仍按完整 epoch 算，中途只评一次）。
 - 写好后重新 `ojh run`，得到新 lock。**不要改 `run.lock.yaml`**，执行时只读它。
-- 全参放不下时，替代方案里会有 LoRA；向用户提议，同意后才写 `mode` override。全参和 LoRA 的结果分开比，不混在一张对比里。
+- 全参放不下时，`ojh run` 的替代方案里会有一条 LoRA，连同完整命令（`ojh run … --recipe <LoRA 配方>`）；向用户提议，用户同意后用 `--recipe` 换成那份 LoRA 配方重跑。不要用 override 改训练方式：配方里的其他设置（如 elephant 的 `fsdp: true`）和 LoRA 不兼容。全参和 LoRA 的结果分开比，不混在一张对比里。
 
 ## 故障表
 
@@ -109,7 +109,7 @@ overrides:
 |---|---|
 | 用户没说基座，agent 挑了一个“合适的” | 列出 catalog，请用户选 |
 | GPU 校验失败后自己换了别的卡或减了卡数 | 报原因，问用户 |
-| 不可行时自己切到 LoRA | 提议，用户同意后写 `mode` override |
+| 不可行时自己切到 LoRA | 提议，用户同意后用 `--recipe <LoRA 配方>` 重跑（替代方案里给了完整命令） |
 | `ojh run` 之后 `sleep 600` 再查，或循环查 `status` | 交回 JSON 或告诉用户路径，停下 |
 | 只报路由器 AUC，不报基线和置信区间 | 按汇报格式：对比基线、oracle，带 CI |
 | OOM 后直接改 `run.lock.yaml` | 写带原因的 override，问用户，重跑 |
