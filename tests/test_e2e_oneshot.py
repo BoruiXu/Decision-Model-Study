@@ -32,7 +32,7 @@ def adapt(path, split="train"):
             yes = 1.0 if r["label"] == "good" else 0.0
             yield {"id": r["id"], "split": split, "state": {"messages": r["conversation"]},
                    "question": {"type": "noul", "instructions": "Is this reply good?",
-                                "criteria": {"yes": "good", "no": "bad"}},
+                                "criteria": {"true": "good", "false": "bad"}},
                    "target": {"yes": yes, "no": 1.0 - yes}, "meta": {"topic": r["topic"]}}
 '''
 

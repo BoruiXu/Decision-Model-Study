@@ -75,7 +75,7 @@ def test_inferred_defaults_from_env(clean_env, tmp_path, monkeypatch):
 def test_prepare_works_without_machine(clean_env, tmp_path):
     import json
     row = {"id": "a", "split": "train", "state": {"messages": [{"role": "user", "content": "hi"}]},
-           "question": {"type": "noul", "instructions": "?", "criteria": {"yes": "y", "no": "n"}},
+           "question": {"type": "noul", "instructions": "?", "criteria": {"true": "y", "false": "n"}},
            "target": {"yes": 1.0}}
     (tmp_path / "train.jsonl").write_text(json.dumps(row) + "\n")
     (tmp_path / "val.jsonl").write_text(json.dumps(dict(row, id="b", split="val")) + "\n")

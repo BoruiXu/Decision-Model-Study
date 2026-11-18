@@ -3,8 +3,12 @@
 An adapter reads one source file and yields OneJev rows, each a dict with:
   id        unique string id
   state     {"messages": [{"role": ..., "content": ...}, ...]}  the model input
-  question  {"type": str, "instructions": str, "criteria": {label: description}}
-  target    {label: probability}; keys must be in ``criteria`` and sum to 1
+  question  {"type": "noul" | "choice" | "score", "instructions": str, "criteria": ...}
+              noul:   criteria {"true": <describes yes>, "false": <describes no>} (optional); labels yes, no
+              choice: criteria {label: description, ...}; the labels are its keys
+              score:  criteria [level 0 description, level 1 description, ...]; labels "0", "1", ...
+  target    {label: probability} over those labels, values in [0, 1], summing to 1
+              (a noul target is {"yes": p, "no": 1 - p}, never keyed true/false)
   meta      free-form dict (fields referenced by the experiment config live here)
   split     split name; names starting with "test" are never read without --allow-test
 

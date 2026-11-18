@@ -25,7 +25,7 @@ def onejev_row(i, split="train"):
     p = (i % 5) / 5
     return {"id": f"r{i}", "split": split,
             "state": {"messages": [{"role": "user", "content": f"question number {i} about something long"}]},
-            "question": {"type": "noul", "instructions": "agree?", "criteria": {"yes": "y", "no": "n"}},
+            "question": {"type": "noul", "instructions": "agree?", "criteria": {"true": "y", "false": "n"}},
             "target": {"yes": p, "no": 1 - p}, "meta": {"f": 0.5 + p / 2, "cat": f"g{i % 3}"}}
 
 

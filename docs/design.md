@@ -396,7 +396,7 @@ finalize 完成后，往登记表追加一行，包含：
   - 复评 NLL 对不上。
 
 **数据 skill `adapting-data-for-onejev`**：
-- OneJev 行格式：`id`、`state`、`question{type,instructions,criteria}`、`target`（在 criteria 上的分布）、`meta`、`split`；
+- OneJev 行格式：`id`、`state`、`question{type,instructions,criteria}`、`target`（在标签上的分布）、`meta`、`split`。标签：noul 固定 `yes`/`no`（`criteria` 可省略，写则是 `{"true": …, "false": …}`），choice 是 `criteria` 的键，score 是 `"0"`…；prepare 按这个校验，noul 的 `criteria` 用了别的键（如 `yes`/`no`，OneJev 会忽略）直接报错；
 - 怎么写适配器、怎么自测。
 
 skill 只描述流程和判断，所有参数都来自机器配置、实验配置和 lock。

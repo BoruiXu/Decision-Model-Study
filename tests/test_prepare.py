@@ -233,3 +233,32 @@ def test_empty_select_set_refused(tmp_path):
     with pytest.raises(ConfigError, match="no eval sets"):
         prepare(make_exp(tmp_path, [row("t1")]), tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+def test_noul_criteria_are_true_false_and_target_yes_no():
+    swapped = row("a")
+    swapped["question"]["criteria"] = {"yes": "agree", "no": "disagree"}  # OneJev would ignore these silently
+    (err,) = validate_rows([swapped])
+    assert "noul" in err and "criteria keys" in err and "true/false" in err and "['no', 'yes']" in err
+    other = row("b")
+    other["question"]["criteria"] = {"true": "t", "maybe": "m"}
+    assert any("true/false" in e for e in validate_rows([other]))
+    text = row("c")
+    text["question"]["criteria"] = "just text"
+    assert any("true/false" in e for e in validate_rows([text]))
+    for crit in (None, {}, {"true": "only the yes side"}):
+        ok = row("d")
+        ok["question"]["criteria"] = crit
+        assert validate_rows([ok]) == [], crit
+    tf_target = row("e")
+    tf_target["target"] = {"true": 1.0, "false": 0.0}
+    (err,) = validate_rows([tf_target])
+    assert "noul target keys are yes/no" in err
+
+
+def test_choice_target_message_names_the_criteria():
+    ch = row("h")
+    ch["question"] = {"type": "choice", "criteria": {"a": "x", "b": "y"}}
+    ch["target"] = {"c": 1.0}
+    (err,) = validate_rows([ch])
+    assert "choice" in err and "['a', 'b']" in err and "['c']" in err

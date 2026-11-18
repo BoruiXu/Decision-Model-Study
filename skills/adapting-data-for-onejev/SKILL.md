@@ -70,7 +70,7 @@ description: Use when a user's dataset (jsonl, csv, chat logs, a directory of sp
 - 复制 `<repo>/adapters/template.py` 到 `<工作区>/adapter.py`，实现 `adapt(path, **args) -> Iterator[dict]`：读一个源文件，逐行 yield OneJev 行。`exp.yaml` 里写 `data.adapter: ./adapter.py`（相对 `exp.yaml`）。适配器文件的 sha256 和参数都记进 lock；prepare 之后再改适配器，resolve 会报错，要重新 prepare。
 - 参数：`data.adapter_args`（所有文件）、`data.train_adapter_args`（训练文件）、`data.eval.<集名>.adapter_args`（该评测集），后两者合并在前者之上，以 `adapt(path, **args)` 传入。用它区分同一文件的不同角色（如 `{split: val}`），不要靠文件名或符号链接。
 - OneJev 行：`id`、`state`、`question`、`target`、`meta`、`split`（字段表见 `formats.md`）。
-- `question` 对每行都相同：`{"type": "noul", "instructions": <用户确认的问题>, "criteria": {"yes": ..., "no": ...}}`。
+- `question` 对每行都相同：`{"type": "noul", "instructions": <用户确认的问题>, "criteria": {"true": <答“是”的说明>, "false": <答“否”的说明>}}`；`target` 用 `{"yes": p, "no": 1 - p}`。noul 的 `criteria` 键是 `true`/`false`，`target` 的键是 `yes`/`no`，不要混（见 `formats.md` 的表）。
 - `split`：训练文件的行写 `"train"`（示例配方用 `--split train` 取训练行），评测文件的行写 `"val"`。
 - `id`：数据里有唯一的 id 列（`id`、`qid`、`meta.uid` 等）就用它的**文本**作 id（`str(...)`；`"0007"` 保持 `"0007"`），切分时把同一列传给 `ojh make-split --id <字段>`；没有就派生稳定的 id（如 `<文件名>:<行号>`，或文本的哈希），这时不能用 make-split 按原始文件切。train 和评测集之间不能重复。
 - 分组字段、一致比例字段放进 `meta`。

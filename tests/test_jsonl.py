@@ -16,7 +16,7 @@ SEP = "line sep para"
 
 def row(i, content="hi", split="train"):
     return {"id": i, "split": split, "state": {"messages": [{"role": "user", "content": content}]},
-            "question": {"type": "noul", "instructions": "x", "criteria": {"yes": "y", "no": "n"}},
+            "question": {"type": "noul", "instructions": "x", "criteria": {"true": "y", "false": "n"}},
             "target": {"yes": 1.0, "no": 0.0}, "meta": {"f": 0.5}}
 
 

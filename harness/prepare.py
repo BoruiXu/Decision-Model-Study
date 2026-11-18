@@ -50,8 +50,13 @@ def _load_adapter(name: str):
     return importlib.import_module(f"adapters.{name}")
 
 
+NOUL_CRITERIA = ("true", "false")  # OneJev qev/schema.py NoulCriteria: descriptions of the yes / the no answer
+
+
 def _labels(qtype, criteria) -> list[str] | None:
-    """Labels OneJev renders for a question type (qev/prompt.py render_question)."""
+    """Labels OneJev renders for a question type (qev/prompt.py render_question). A noul question always
+    has the labels yes/no; its optional ``criteria`` is ``{"true": <yes description>, "false": <no
+    description>}``."""
     if qtype == "noul":
         return ["yes", "no"]
     if qtype == "choice":
@@ -76,12 +81,23 @@ def validate_rows(rows: list[dict]) -> list[str]:
             errors.append(f"{rid}: missing target")
             continue
         q = r.get("question") or {}
-        labels = _labels(q.get("type"), q.get("criteria"))
+        qtype, crit = q.get("type"), q.get("criteria")
+        labels = _labels(qtype, crit)
         if labels is None:
-            errors.append(f"{rid}: unknown question type {q.get('type')!r}")
+            errors.append(f"{rid}: unknown question type {qtype!r}")
             continue
+        if qtype == "noul" and crit is not None and (not isinstance(crit, dict) or not set(crit) <= set(NOUL_CRITERIA)):
+            got = sorted(crit) if isinstance(crit, dict) else type(crit).__name__
+            errors.append(f"{rid}: noul question.criteria keys are true/false (the descriptions of the yes and the "
+                          f"no answer; OneJev ignores other keys); got criteria keys {got}. Target keys stay yes/no")
         if not set(target) <= set(labels):
-            errors.append(f"{rid}: target keys {sorted(target)} not in labels {labels}")
+            if qtype == "noul":
+                why = "noul target keys are yes/no (question.criteria true/false only describe them)"
+            elif qtype == "choice":
+                why = f"choice target keys must be the criteria keys {labels}"
+            else:
+                why = f"score target keys are the level indices {labels}"
+            errors.append(f"{rid}: {why}; got target keys {sorted(target)} (labels {labels})")
         if any(not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0 for v in target.values()):
             errors.append(f"{rid}: target values must be in [0, 1]")
         total = sum(v for v in target.values() if isinstance(v, (int, float)))

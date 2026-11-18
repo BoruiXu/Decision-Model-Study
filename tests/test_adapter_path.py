@@ -26,7 +26,7 @@ def adapt(path, split=None):
             p = float(r["label"])
             yield {"id": r["id"], "split": "train" if r["split"] == "train" else r["split"],
                    "state": {"messages": [{"role": "user", "content": r["text"]}]},
-                   "question": {"type": "noul", "instructions": "ok?", "criteria": {"yes": "y", "no": "n"}},
+                   "question": {"type": "noul", "instructions": "ok?", "criteria": {"true": "y", "false": "n"}},
                    "target": {"yes": p, "no": 1 - p}, "meta": {"grp": r["grp"]}}
 '''
 

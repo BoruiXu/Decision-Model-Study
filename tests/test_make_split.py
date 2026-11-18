@@ -189,7 +189,7 @@ def test_raw_csv_split_feeds_a_file_adapter_through_prepare(tmp_path, capsys):
         "    for r in csv.DictReader(open(path)):\n"
         "        y = float(r['label'])\n"
         "        yield {'id': r['qid'], 'split': split, 'state': {'messages': [{'role': 'user', 'content': r['text']}]},\n"
-        "               'question': {'type': 'noul', 'instructions': 'ok?', 'criteria': {'yes': 'y', 'no': 'n'}},\n"
+        "               'question': {'type': 'noul', 'instructions': 'ok?', 'criteria': {'true': 'y', 'false': 'n'}},\n"
         "               'target': {'yes': y, 'no': 1 - y}, 'meta': {'source': r['source']}}\n")
     (tmp_path / "exp.yaml").write_text(yaml.safe_dump({
         "name": "csv", "data": {"adapter": "adapter.py", "train": "train.csv", "split_file": "splits.json",

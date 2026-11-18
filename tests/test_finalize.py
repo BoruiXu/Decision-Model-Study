@@ -34,7 +34,7 @@ def mk(rid, rng, split, group):
     rate = rng.random()
     return {"id": rid, "split": split,
             "state": {"messages": [{"role": "user", "content": " ".join(rng.choices(WORDS, k=6))}]},
-            "question": {"type": "noul", "instructions": "agree?", "criteria": {"yes": "y", "no": "n"}},
+            "question": {"type": "noul", "instructions": "agree?", "criteria": {"true": "y", "false": "n"}},
             "target": {"yes": rate, "no": 1 - rate},
             "meta": {"f": min(1.0, 0.5 + rate / 2), "cat": group, "label_version": "lv1"}}
 

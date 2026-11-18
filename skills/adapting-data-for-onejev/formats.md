@@ -11,7 +11,21 @@
 | `meta` | 自由字典；`fields.group`、`fields.consistency`、`subset.where` 引用这里的字段（如 `meta.category`） |
 | `split` | 训练行 `"train"`，评测行 `"val"`；以 `test` 开头的行没有 `--allow-test` 一律拒绝 |
 
-题型和合法标签：`noul` → `yes`/`no`（`criteria` 是 `{"yes": 说明, "no": 说明}`）；`choice` → `criteria` 的键；`score` → `"0"`、`"1"`…，个数等于 `criteria` 列表长度。`fields.label` 写正类的键，二分类就是 `target.yes`。
+题型、`criteria` 和合法标签（以 OneJev `qev/schema.py`、`qev/prompt.py` 为准，prepare 按此校验）：
+
+| `question.type` | `question.criteria` | `target` 的键（标签） |
+|---|---|---|
+| `noul`（是/否） | 可省略；写的话是 `{"true": 答“是”的说明, "false": 答“否”的说明}`，只能用 `true`/`false` 这两个键 | 固定是 `yes`、`no` |
+| `choice` | `{标签: 说明, ...}`（1–255 个） | `criteria` 的键 |
+| `score` | `[第 0 档说明, 第 1 档说明, ...]`（1–10 档） | `"0"`、`"1"`…，个数等于列表长度 |
+
+noul 最容易写错：`criteria` 用 `true`/`false`，`target` 用 `yes`/`no`，两者不一样。`criteria` 写成 `{"yes": ..., "no": ...}` 时 OneJev 不报错但会忽略这两段说明、改用默认文字，所以 prepare 直接报错。例：
+
+```json
+{"type": "noul", "instructions": "两个回答的最终结论一致吗？",
+ "criteria": {"true": "结论一致", "false": "结论不一致"}}
+```
+配 `"target": {"yes": 0.8, "no": 0.2}`。`fields.label` 写正类的键，二分类就是 `target.yes`。
 
 下面各例只写 `adapt` 的主体；`Q` 是用户确认过的 `question` 字典，`POS` 是用户确认的正类取值，`SPLIT` 来自 `adapter_args`（训练文件 `{split: train}`，评测集 `{split: val}`，见例 6）。
 
