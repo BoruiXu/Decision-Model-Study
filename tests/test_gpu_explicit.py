@@ -184,3 +184,35 @@ def test_runner_passes_explicit_cards_to_acquire(tmp_path):
     FakePopen.codes = [0]
     assert run(path, acquire=fake_acquire, popen=FakePopen, finalize=lambda rd: None, killpg=lambda *a: None) == 0
     assert seen == {"source": "explicit", "n": 2, "explicit": [1, 3], "need_mib": 32768, "allow_shared": True}
+
+
+def resolve_base(tmp_path, base, recipe, gpus):
+    from harness.resolve import resolve
+    exp, m = setup(tmp_path, recipe=recipe, base=base)
+    exp.gpus = gpus
+    return resolve(exp, m, query=query, apps_query=apps, plan_runner=plan_ok(10, len(gpus)), fingerprint=fake_fp)
+
+
+def test_too_small_cards_get_concrete_alternatives_and_no_useless_wait(tmp_path):
+    with pytest.raises(Infeasible) as e:
+        resolve_base(tmp_path, "elephant-1", "elephant_full_fsdp", [3])  # full 9B on one 80 GB card: ~144 GiB
+    alts = "\n".join(e.value.alternatives)
+    assert "wait" not in alts  # an 80 GB card never holds 144 GiB, however long one waits
+    assert "LoRA" in alts and "examples/recipes/joey_lora_1gpu.yaml" in alts  # elephant-1 has no LoRA default
+    assert "more GPUs: full FSDP over 2 cards" in alts
+    assert "smaller base" in alts and "joey-1" in alts and "mammoth-1" not in alts.split("smaller base", 1)[1]
+    assert "never switches" in alts or "ask the user" in alts
+
+
+def test_base_lora_default_is_named(tmp_path):
+    with pytest.raises(Infeasible) as e:
+        resolve_base(tmp_path, "mammoth-1", "elephant_full_fsdp", [0, 3])
+    alts = "\n".join(e.value.alternatives)
+    assert "examples/recipes/mammoth_lora_ddp.yaml" in alts and "LoRA" in alts
+
+
+def test_wait_is_suggested_only_when_the_card_would_fit(tmp_path):
+    with pytest.raises(Infeasible) as e:
+        resolve_explicit(tmp_path, [2])  # joey full needs 32 GiB; 9000 MiB free + 71000 MiB of pid 4242
+    alts = "\n".join(e.value.alternatives)
+    assert "GPU 2 would have enough memory once the listed processes end" in alts
