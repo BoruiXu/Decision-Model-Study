@@ -12,7 +12,7 @@ import yaml
 from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, oneshot,
                      prepare, registry, report_eval, resolve, runner, status)
 from harness.catalog import ROOT, CatalogError, sha256_file
-from harness.config import ConfigError, check_writable, find_machine, load_experiment, load_machine
+from harness.config import ConfigError, check_writable, find_machine, load_experiment
 from harness.gpu import GpuUnavailable, GpuWaitTimeout
 from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
@@ -173,12 +173,7 @@ def cmd_eval_report(a) -> int:
 
 
 def cmd_table(a) -> int:
-    if a.registry:
-        path = a.registry
-    elif a.machine:
-        path = load_machine(a.machine).registry_path
-    else:
-        raise ConfigError("table needs --machine or --registry")
+    path = a.registry or find_machine(a.machine)[0].registry_path
     print(registry.table(path, include_incomplete=a.all))
     return 0
 
@@ -288,8 +283,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow-test", action="store_true", help="read split test* rows")
     s.add_argument("--seed", type=int, default=None, help="default: first seed of the run")
     s = cmd("table", cmd_table, "render the registry as a comparison table")
-    s.add_argument("--machine")
-    s.add_argument("--registry")
+    s.add_argument("--machine", help=MACHINE_HELP)
+    s.add_argument("--registry", help="registry file (default: the machine config's registry)")
     s.add_argument("--all", action="store_true", help="include incomplete records")
     s = cmd("cleanup", cmd_cleanup, "list, and with --confirm delete, unselected checkpoints")
     s.add_argument("run")

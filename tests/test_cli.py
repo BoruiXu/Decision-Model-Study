@@ -133,7 +133,10 @@ def test_note_and_table(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.registry, "table", lambda path, include_incomplete: f"T {path} {include_incomplete}")
     assert cli.main(["table", "--registry", "r.jsonl", "--all"]) == 0
     assert capsys.readouterr().out.strip() == "T r.jsonl True"
-    assert cli.main(["table"]) == 1
+    m = _machine_yaml(tmp_path)
+    monkeypatch.setenv("OJH_MACHINE", m)  # no --machine/--registry: the machine-config fallback
+    assert cli.main(["table"]) == 0
+    assert capsys.readouterr().out.strip() == f"T {tmp_path / 'out' / 'registry.jsonl'} False"
 
 
 def test_finalize_and_eval_report_acquire_one_gpu(tmp_path, monkeypatch, capsys):
@@ -231,3 +234,9 @@ def test_fetch_base_refuses_forbidden_model_dir(tmp_path, monkeypatch, capsys):
     m = _machine_yaml(tmp_path, forbidden_write_roots=[str(tmp_path / "models")])
     assert cli.main(["fetch-base", "joey-1", "--machine", m]) == 1
     assert called == [] and str(tmp_path / "models") in capsys.readouterr().err
+
+
+def test_table_of_a_missing_registry_creates_nothing(tmp_path, capsys):
+    reg = tmp_path / "none" / "registry.jsonl"
+    assert cli.main(["table", "--registry", str(reg)]) == 0
+    assert "| run |" in capsys.readouterr().out and not (tmp_path / "none").exists()

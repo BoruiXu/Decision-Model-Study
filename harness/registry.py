@@ -179,7 +179,8 @@ COLUMNS = (("run", ("run_id",)), ("exp", ("exp",)), ("seed", ("seed",)), ("base"
 
 def table(path, include_incomplete: bool = False) -> str:
     """Markdown table of the registry; incomplete records are hidden unless asked for."""
-    rows = [r for r in read(path) if include_incomplete or r.get("complete")]
+    records = read(path) if Path(path).is_file() else []  # a missing registry is empty; nothing is created
+    rows = [r for r in records if include_incomplete or r.get("complete")]
     lines = ["| " + " | ".join(name for name, _ in COLUMNS) + " |", "|" + "---|" * len(COLUMNS)]
     for rec in rows:
         lines.append("| " + " | ".join(_fmt(_get(rec, *keys)) for _, keys in COLUMNS) + " |")
