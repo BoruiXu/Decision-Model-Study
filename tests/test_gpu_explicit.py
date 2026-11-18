@@ -216,3 +216,32 @@ def test_wait_is_suggested_only_when_the_card_would_fit(tmp_path):
         resolve_explicit(tmp_path, [2])  # joey full needs 32 GiB; 9000 MiB free + 71000 MiB of pid 4242
     alts = "\n".join(e.value.alternatives)
     assert "GPU 2 would have enough memory once the listed processes end" in alts
+
+
+def test_a_failed_process_query_is_not_an_empty_card():
+    def broken():
+        raise subprocess_error()
+    with pytest.raises(GpuUnavailable) as e:
+        check_explicit(machine(), [0], need_mib=1000, query=query, apps_query=broken)
+    msg = str(e.value)
+    assert "GPU 0: cannot list its compute processes" in msg and "--allow-shared" in msg
+    cards = check_explicit(machine(), [0], need_mib=1000, query=query, apps_query=broken, allow_shared=True)
+    assert cards[0]["processes"] is None  # unknown, not "none"
+
+
+def subprocess_error():
+    import subprocess
+    return subprocess.CalledProcessError(9, ["nvidia-smi", "--query-compute-apps=..."])
+
+
+def test_resolve_with_a_failed_process_query(tmp_path):
+    from harness.resolve import resolve
+    exp, m = setup(tmp_path, recipe="joey_full_1gpu", base="joey-1")
+    exp.gpus = [2]  # also too little memory: the alternatives must cope with unknown processes
+
+    def broken():
+        raise subprocess_error()
+    with pytest.raises(Infeasible) as e:
+        resolve(exp, m, query=query, apps_query=broken, plan_runner=plan_ok(10, 1), fingerprint=fake_fp)
+    assert "GPU 2: 9000 MiB free" in str(e.value) and "unknown" in str(e.value)
+    assert not any("GPU 0 (" in a for a in e.value.alternatives)  # unknown processes: not offered as free

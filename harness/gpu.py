@@ -91,7 +91,9 @@ def _process_user(pid: int) -> str:
     return out or "?"
 
 
-def _procs_text(procs: list[dict]) -> str:
+def _procs_text(procs: list[dict] | None) -> str:
+    if procs is None:
+        return "unknown (the process query failed)"
     return "; ".join(f"pid {p['pid']} (user {p.get('user', '?')}, {p['name']}, {p['used_mib']} MiB)"
                      for p in procs) or "none"
 
@@ -105,13 +107,16 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
     memory) or raises GpuUnavailable with a reason per failing card."""
     need = max(int(need_mib), machine.min_free_mib)
     known = {g.index: g for g in parse_nvidia_smi(query())}
+    apps_error = None
     try:
         apps = parse_apps(apps_query())
-    except Exception:  # without a process list only the free memory can be judged
-        apps = []
+    except Exception as e:  # unknown is not "no process": refused below unless allow_shared
+        apps, apps_error = [], f"{type(e).__name__}: {e}"
     users: dict[int, str] = {}
 
     def procs(uuid):
+        if apps_error is not None:
+            return None
         out = []
         for a in apps:
             if a["uuid"] == uuid:
@@ -137,6 +142,9 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
             reasons[i] = "excluded by the machine config (gpu_include/gpu_exclude)"
         elif g.free_mib < need:
             reasons[i] = f"{g.free_mib} MiB free < {need} MiB needed; processes: {_procs_text(p)}"
+        elif p is None and not allow_shared:
+            reasons[i] = (f"cannot list its compute processes (nvidia-smi --query-compute-apps failed: {apps_error}); "
+                          "only if the user accepts not knowing who else uses the card, run with --allow-shared")
         elif p and not allow_shared:
             reasons[i] = (f"shared with {len(p)} compute process(es) not started by this run: {_procs_text(p)}; "
                           "use it only after asking the user, with --allow-shared")

@@ -334,7 +334,7 @@ def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=
     except GpuUnavailable as e:
         floor = max(need_mib, machine.min_free_mib)
         good = [c for c in e.cards if c["free_mib"] >= floor and c["index"] not in explicit
-                and (allow_shared or not c["processes"])
+                and (allow_shared or c["processes"] == [])
                 and c["index"] not in machine.gpu_exclude
                 and (machine.gpu_include is None or c["index"] in machine.gpu_include)]
         alts = [("other cards with enough free memory and no other process now: "
@@ -346,7 +346,7 @@ def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=
                         "they agree, run again with --allow-shared (or wait until those processes end)")
         short = [by_index[i] for i, r in e.reasons.items() if "MiB needed" in r and i in by_index]
         for c in short:  # waiting helps only when the card would hold the run without the other processes
-            if c["free_mib"] + sum(x["used_mib"] or 0 for x in c["processes"]) >= floor:
+            if c["processes"] and c["free_mib"] + sum(x["used_mib"] or 0 for x in c["processes"]) >= floor:
                 alts.append(f"GPU {c['index']} would have enough memory once the listed processes end "
                             "(they are not ours: wait, or ask their owner)")
         if short and ctx is not None:
