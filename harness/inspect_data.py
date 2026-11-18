@@ -17,6 +17,7 @@ import csv
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 from harness.heldout import is_test_path, is_test_value, row_is_test, split_values
@@ -58,23 +59,57 @@ def name_hint(path) -> str | None:
     return None
 
 
-def _csv_cell(v: str):
+ID_NAMES = {"id", "uid", "uuid", "guid", "qid", "pid", "key"}
+NUMBER = re.compile(r"^[+-]?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$")  # no leading zeros ("007" stays text)
+
+
+def _id_like(name) -> bool:
+    n = str(name).strip().lower()
+    return n in ID_NAMES or n.endswith(("_id", "-id", " id"))
+
+
+def _csv_cell(v: str, key=None):
+    """A csv/tsv cell as a JSON value: empty -> None; a plain number -> int/float, except in id-like columns
+    (id, uid, *_id, ...) and when the text would change (leading zeros, "+1", ".5"), which stay strings."""
     if v == "":
         return None
-    try:
-        return int(v)
-    except ValueError:
-        pass
-    try:
-        return float(v)
-    except ValueError:
+    if (key is not None and _id_like(key)) or not NUMBER.match(v):
         return v
+    return float(v) if any(c in v for c in ".eE") else int(v)
 
 
-def _read_csv(path, delimiter) -> list[dict]:
+def _raise_csv_limit() -> None:
+    """Allow long cells (the csv module's default limit is 128 KiB); the largest value the platform takes."""
+    n = sys.maxsize
+    while n > 1:
+        try:
+            csv.field_size_limit(n)
+            return
+        except OverflowError:
+            n //= 10
+
+
+_raise_csv_limit()
+STREAMED = ("jsonl", "csv", "tsv")
+
+
+def stream_rows(path, bad: list | None = None):
+    """Rows of a jsonl/csv/tsv file one at a time; unparsable jsonl lines are counted in ``bad[0]``."""
+    kind = EXTS[Path(path).suffix.lower()]
+    if kind == "jsonl":
+        with open(path, encoding="utf-8", newline="\n") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    if bad is not None:
+                        bad[0] += 1
+        return
     with open(path, newline="", encoding="utf-8") as f:
-        return [{k: _csv_cell(v) if isinstance(v, str) else v for k, v in r.items()}
-                for r in csv.DictReader(f, delimiter=delimiter)]
+        for r in csv.DictReader(f, delimiter="," if kind == "csv" else "\t"):
+            yield {k: _csv_cell(v, k) if isinstance(v, str) else v for k, v in r.items()}
 
 
 def split_file_shape(obj) -> dict | None:
@@ -95,18 +130,11 @@ def load_rows(path) -> tuple[list[dict] | None, dict]:
     """Rows of a data file (None when it holds no rows) and extra facts about its shape."""
     kind = EXTS[Path(path).suffix.lower()]
     extra: dict = {}
-    if kind == "jsonl":
-        rows, bad = [], 0
-        with open(path, encoding="utf-8", newline="\n") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    bad += 1
-        if bad:
-            extra["unparsable_lines"] = bad
+    if kind in STREAMED:
+        bad = [0]
+        rows = list(stream_rows(path, bad))
+        if bad[0]:
+            extra["unparsable_lines"] = bad[0]
         return rows, extra
     if kind == "json":
         obj = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -120,21 +148,17 @@ def load_rows(path) -> tuple[list[dict] | None, dict]:
                 return obj[lists[0]], extra
             extra["top_keys"] = list(obj)[:50]
         return None, extra
-    if kind in ("csv", "tsv"):
-        return _read_csv(path, "," if kind == "csv" else "\t"), extra
     import pyarrow.parquet as pq  # only reached when pyarrow is importable (see data_files)
 
     return pq.read_table(path).to_pylist(), extra
 
 
 def _count_rows(path) -> int | None:
-    kind = EXTS[Path(path).suffix.lower()]
-    if kind == "jsonl":
+    if EXTS[Path(path).suffix.lower()] == "jsonl":
         with open(path, encoding="utf-8", newline="\n") as f:
             return sum(1 for line in f if line.strip())
-    if kind in ("csv", "tsv"):
-        with open(path, newline="", encoding="utf-8") as f:
-            return max(0, sum(1 for _ in csv.reader(f, delimiter="," if kind == "csv" else "\t")) - 1)
+    if EXTS[Path(path).suffix.lower()] in STREAMED:
+        return sum(1 for _ in stream_rows(path))
     return None
 
 
@@ -155,7 +179,7 @@ class _Field:
         self.types: dict[str, int] = {}
         self.distinct: dict = {}
         self.overflow = False
-        self.nums: list[float] = []
+        self.n_num, self.lo, self.hi, self.total = 0, None, None, 0.0
         self.str_len = self.str_n = 0
         self.list_len = self.list_n = 0
 
@@ -166,7 +190,11 @@ class _Field:
             t = _type(v)
             self.types[t] = self.types.get(t, 0) + 1
             if t in ("int", "float") and v == v:  # not NaN
-                self.nums.append(float(v))
+                x = float(v)
+                self.n_num += 1
+                self.total += x
+                self.lo = x if self.lo is None else min(self.lo, x)
+                self.hi = x if self.hi is None else max(self.hi, x)
             if t == "str":
                 self.str_len += len(v)
                 self.str_n += 1
@@ -185,9 +213,9 @@ class _Field:
         if self.distinct and not self.overflow and len(self.distinct) < n_scalar:
             items = sorted(self.distinct.items(), key=lambda kv: (-kv[1], str(kv[0][1])))
             out["values"] = [{"value": v, "count": c} for (_, v), c in items]
-        if self.nums:
-            lo, hi = min(self.nums), max(self.nums)
-            out.update(min=lo, max=hi, mean=sum(self.nums) / len(self.nums), unit_interval=0.0 <= lo and hi <= 1.0)
+        if self.n_num:
+            out.update(min=self.lo, max=self.hi, mean=self.total / self.n_num,
+                       unit_interval=0.0 <= self.lo and self.hi <= 1.0)
         if self.str_n:
             out["avg_len"] = round(self.str_len / self.str_n, 1)
             out["text_like"] = out["avg_len"] >= TEXT_LEN
@@ -196,16 +224,31 @@ class _Field:
         return out
 
 
-def field_facts(rows: list[dict]) -> dict:
-    fields: dict[str, _Field] = {}
-    for r in rows:
+class _Facts:
+    """Field facts accumulated one row at a time."""
+
+    def __init__(self):
+        self.n = 0
+        self.fields: dict[str, _Field] = {}
+
+    def add(self, r) -> None:
+        self.n += 1
         seen: dict = {}
         if isinstance(r, dict):
             for k, v in r.items():
                 _walk(v, str(k), seen)
         for path, values in seen.items():
-            fields.setdefault(path, _Field()).add_row(values)
-    return {p: f.facts(len(rows)) for p, f in fields.items()}
+            self.fields.setdefault(path, _Field()).add_row(values)
+
+    def result(self) -> dict:
+        return {p: f.facts(self.n) for p, f in self.fields.items()}
+
+
+def field_facts(rows) -> dict:
+    acc = _Facts()
+    for r in rows:
+        acc.add(r)
+    return acc.result()
 
 
 def _dict_scalars(row, prefix: str = "", depth: int = 0):
@@ -255,36 +298,77 @@ def _truncate(v):
     return v
 
 
+def _scan(out: dict, rows_fn, n_samples: int) -> None:
+    """Two passes over ``rows_fn()``: split columns over all rows, then facts on the non-test rows only."""
+    n = 0
+
+    def counted(it):
+        nonlocal n
+        for r in it:
+            n += 1
+            yield r
+    out["split_columns"] = split_columns(r for r in counted(rows_fn()) if isinstance(r, dict))
+    out["rows"] = n
+    test_cols = [p for p, c in out["split_columns"].items() if any(is_test_value(v) for v in c)]
+    facts, samples, errors, n_err, seen = _Facts(), [], [], 0, set()
+    tests = non_dict = 0
+    for r in rows_fn():
+        if isinstance(r, dict) and row_is_test(r, test_cols):
+            tests += 1  # counted only: no fields, values, samples or schema errors from test rows
+            continue
+        facts.add(r)
+        if not isinstance(r, dict):
+            non_dict += 1
+            continue
+        if len(samples) < n_samples:
+            samples.append(_truncate(r))
+        errs = validate_rows([r])
+        rid = r.get("id")
+        if rid is not None:
+            if rid in seen:
+                errs.append(f"duplicate id: {rid}")
+            seen.add(rid)
+        n_err += len(errs)
+        errors += errs[:max(0, 5 - len(errors))]
+    if tests:
+        out["test_rows"] = tests
+    out["fields"], out["samples"] = facts.result(), samples
+    if non_dict:
+        n_err += 1
+        errors = (errors + ["not every row is a JSON object"])[:5]
+    out["onejev"] = {"passes": facts.n > 0 and n_err == 0, "errors": n_err, "first_errors": errors}
+
+
 def inspect_file(path, rows: int = 3, root=None) -> dict:
     path = Path(path)
-    hint = name_hint(path)
-    out = {"path": str(path.resolve()), "type": EXTS[path.suffix.lower()], "size_bytes": path.stat().st_size,
-           "name_hint": hint, "rows": None, "fields": None, "split_columns": {}, "samples": [],
+    kind = EXTS[path.suffix.lower()]
+    out = {"path": str(path.resolve()), "type": kind, "size_bytes": path.stat().st_size,
+           "name_hint": name_hint(path), "rows": None, "fields": None, "split_columns": {}, "samples": [],
            "onejev": None, "split_file": None}
-    if is_test_path(path, root):
-        out["rows"] = _count_rows(path)
-        out["note"] = "test-like file or directory name: contents not inspected (rows counted only)"
-        return out
     try:
+        if is_test_path(path, root):
+            out["rows"] = _count_rows(path)
+            out["note"] = "test-like file or directory name: contents not inspected (rows counted only)"
+            return out
+        if kind in STREAMED:
+            bad, passes = [0], []
+
+            def rows_fn():
+                passes.append(1)
+                return stream_rows(path, bad if len(passes) == 1 else None)  # count bad lines once
+            _scan(out, rows_fn, max(0, rows))
+            if bad[0]:
+                out["unparsable_lines"] = bad[0]
+            return out
         data, extra = load_rows(path)
-    except (ValueError, UnicodeDecodeError, csv.Error) as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-        return out
-    out.update(extra)
-    if data is None:
-        return out
-    out["rows"] = len(data)
-    dict_rows = [r for r in data if isinstance(r, dict)]
-    out["split_columns"] = split_columns(dict_rows)
-    test_cols = [p for p, c in out["split_columns"].items() if any(is_test_value(v) for v in c)]
-    kept = [r for r in data if not (isinstance(r, dict) and row_is_test(r, test_cols))]
-    if len(kept) < len(data):
-        out["test_rows"] = len(data) - len(kept)  # counted only: no fields, values or samples from them
-    out["fields"] = field_facts(kept)
-    kept_dicts = [r for r in kept if isinstance(r, dict)]
-    out["samples"] = [_truncate(r) for r in kept_dicts[:max(0, rows)]]
-    errors = validate_rows(kept_dicts) if len(kept_dicts) == len(kept) else ["not every row is a JSON object"]
-    out["onejev"] = {"passes": bool(kept) and not errors, "errors": len(errors), "first_errors": errors[:5]}
+        out.update(extra)
+        if data is not None:
+            _scan(out, lambda: iter(data), max(0, rows))
+    except (ValueError, UnicodeDecodeError, csv.Error, OSError) as e:
+        # nothing partial: a file that fails half-way reports the error alone
+        out.update(rows=None, fields=None, samples=[], split_columns={}, onejev=None)
+        out.pop("test_rows", None)
+        out["error"] = f"{type(e).__name__}: {e}"[:500]
     return out
 
 

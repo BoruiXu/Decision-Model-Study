@@ -167,3 +167,50 @@ def test_test_paths_are_counted_only(tmp_path, rel):
     f = inspect_path(tmp_path)["files"][0]
     assert f["rows"] == 3 and f["fields"] is None and f["samples"] == [] and "test" in f["note"]
     assert "HIDDEN" not in json.dumps(f)
+
+
+def test_bad_files_report_an_error_and_others_still_inspected(tmp_path):
+    (tmp_path / "latin.jsonl").write_bytes('{"a": "caf\xe9"}\n'.encode("latin-1"))
+    (tmp_path / "latin.csv").write_bytes("a,b\ncaf\xe9,1\n".encode("latin-1"))
+    (tmp_path / "test_latin.csv").write_bytes("a\ncaf\xe9\n".encode("latin-1"))
+    write_jsonl(tmp_path / "ok.jsonl", [chat_row(0)])
+    fs = files_of(inspect_path(tmp_path))
+    assert "UnicodeDecodeError" in fs["latin.jsonl"]["error"] and "UnicodeDecodeError" in fs["latin.csv"]["error"]
+    assert "error" in fs["test_latin.csv"]
+    assert fs["ok.jsonl"]["rows"] == 1
+
+
+def test_long_csv_cells_are_read(tmp_path):
+    with open(tmp_path / "big.csv", "w", newline="") as fh:
+        csv.writer(fh).writerows([["text", "label"], ["x" * 300_000, 1]])
+    f = files_of(inspect_path(tmp_path))["big.csv"]
+    assert f["rows"] == 1 and f["fields"]["text"]["avg_len"] == 300_000
+
+
+def test_csv_keeps_ids_and_leading_zeros_as_strings(tmp_path):
+    with open(tmp_path / "d.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["id", "item_id", "code", "n", "x"])
+        w.writerows([["12", "5", "007", "3", "1.5"], ["13", "6", "010", "4", "2"]])
+    from harness.inspect_data import load_rows
+    rows, _ = load_rows(tmp_path / "d.csv")
+    assert rows[0] == {"id": "12", "item_id": "5", "code": "007", "n": 3, "x": 1.5}
+
+
+def test_jsonl_and_csv_are_streamed(tmp_path, monkeypatch):
+    import harness.inspect_data as ins
+    write_jsonl(tmp_path / "a.jsonl", [chat_row(i) for i in range(5)])
+    with open(tmp_path / "b.csv", "w", newline="") as fh:
+        csv.writer(fh).writerows([["text", "label"], ["hello there", 1]])
+
+    def no_whole_file(path):
+        raise AssertionError("jsonl/csv must not be loaded whole")
+    monkeypatch.setattr(ins, "load_rows", no_whole_file)
+    fs = files_of(inspect_path(tmp_path))
+    assert fs["a.jsonl"]["rows"] == 5 and fs["b.csv"]["rows"] == 1 and fs["a.jsonl"]["onejev"]["passes"] is False
+
+
+def test_duplicate_ids_found_while_streaming(tmp_path):
+    write_jsonl(tmp_path / "rows.jsonl", [onejev_row(1), onejev_row(1)])
+    f = files_of(inspect_path(tmp_path))["rows.jsonl"]
+    assert f["onejev"]["passes"] is False and any("duplicate id" in e for e in f["onejev"]["first_errors"])
