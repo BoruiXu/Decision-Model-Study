@@ -21,5 +21,6 @@ export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$OJH_HOME/cache}"        # other tools'
 export TMPDIR="${TMPDIR:-$OJH_HOME/tmp}"                          # temporary files of uv, pip builds and Python
 export OJH_OUT_ROOT="${OJH_OUT_ROOT:-$OJH_HOME/runs}"             # ojh run outputs and the registry (used when there is no machine config)
 export OJH_MODEL_DIR="${OJH_MODEL_DIR:-$OJH_HOME/models}"         # base weights from `ojh fetch-base` (elephant-1 ~18 GB, joey-1 ~5 GB)
+export OJH_WORK_ROOT="${OJH_WORK_ROOT:-$OJH_HOME/work}"           # experiment workspaces (exp.yaml, adapter.py, splits.json): one dir per experiment
 
 mkdir -p "$TMPDIR"                                                # tools fail when TMPDIR does not exist

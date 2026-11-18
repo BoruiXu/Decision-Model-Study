@@ -40,7 +40,8 @@ def test_dry_run_prints_the_plan_below_ojh_home(tmp_path):
     for label, sub in (("tools (OJH_TOOLS_DIR)", "tools"), ("uv cache (UV_CACHE_DIR)", "cache/uv"),
                        ("python (UV_PYTHON_INSTALL_DIR)", "python"), ("venv (OJH_VENV)", "venv"),
                        ("HF cache (HF_HOME)", "cache/huggingface"), ("temp (TMPDIR)", "tmp"),
-                       ("runs (OJH_OUT_ROOT)", "runs"), ("base weights (OJH_MODEL_DIR)", "models")):
+                       ("runs (OJH_OUT_ROOT)", "runs"), ("base weights (OJH_MODEL_DIR)", "models"),
+                       ("workspaces (OJH_WORK_ROOT)", "work")):
         line = next(l for l in out.splitlines() if label in l)
         assert str(ojh / sub) in line and "GiB free" in line, line
     assert f"UV_UNMANAGED_INSTALL={ojh / 'tools' / 'uv'}" in out  # uv on PATH is hidden: it would be installed

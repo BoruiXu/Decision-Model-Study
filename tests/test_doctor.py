@@ -44,7 +44,7 @@ def test_all_good_exits_zero(tmp_path):
     for n in ("python", "venv", "torch", "cuda", "gpus", "transformers", "flash-linear-attention", "peft",
               "onejev", "tmux", "machine config", "dir runs (out_root)", "dir base weights (model_dir)",
               "dir uv cache (UV_CACHE_DIR)", "dir python (UV_PYTHON_INSTALL_DIR)", "dir HF cache (HF_HOME)",
-              "dir temp (TMPDIR)", "hf hub", "fingerprint", "uv"):
+              "dir temp (TMPDIR)", "dir workspaces (OJH_WORK_ROOT)", "hf hub", "fingerprint", "uv"):
         assert n in names, n
     gpus = next(c for c in checks if c.name == "gpus")
     assert "A100" in gpus.detail and "2 card" in gpus.detail
@@ -140,3 +140,14 @@ def test_uv_version_against_the_pin(tmp_path):
     checks = doctor.run_checks(good(tmp_path, setup_stamp=lambda: None))
     c = next(c for c in checks if c.name == "uv")
     assert c.status == "warn" and "setup.sh" in c.hint and doctor.exit_code(checks) == 0
+
+
+def test_work_root_defaults_under_ojh_home(tmp_path):
+    p = good(tmp_path)
+    env = dict(p.env, OJH_HOME=str(tmp_path / "big"))
+    env.pop("OJH_WORK_ROOT", None)
+    c = next(c for c in doctor.run_checks(replace(p, env=env)) if c.name == "dir workspaces (OJH_WORK_ROOT)")
+    assert c.detail.startswith(str(tmp_path / "big" / "work"))
+    env["OJH_WORK_ROOT"] = str(tmp_path / "elsewhere")
+    c = next(c for c in doctor.run_checks(replace(p, env=env)) if c.name == "dir workspaces (OJH_WORK_ROOT)")
+    assert c.detail.startswith(str(tmp_path / "elsewhere"))

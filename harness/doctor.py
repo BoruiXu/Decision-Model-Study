@@ -173,8 +173,18 @@ def _dirs(p: Probes, machine) -> list[tuple[str, str, bool]]:
             ("uv cache (UV_CACHE_DIR)", env.get("UV_CACHE_DIR") or os.path.join(tools, "cache", "uv"), False),
             ("python (UV_PYTHON_INSTALL_DIR)", env.get("UV_PYTHON_INSTALL_DIR") or os.path.join(tools, "python"),
              False),
-            ("venv (OJH_VENV)", env.get("OJH_VENV") or str(ROOT / ".venv"), False)]
+            ("venv (OJH_VENV)", env.get("OJH_VENV") or str(ROOT / ".venv"), False),
+            ("workspaces (OJH_WORK_ROOT)", work_root(env), False)]
     return out
+
+
+def work_root(env) -> str:
+    """Where the agent puts experiment workspaces: $OJH_WORK_ROOT, else $OJH_HOME/work, else ~/onejev-work."""
+    if env.get("OJH_WORK_ROOT"):
+        return env["OJH_WORK_ROOT"]
+    if env.get("OJH_HOME"):
+        return os.path.join(env["OJH_HOME"], "work")
+    return os.path.join(env.get("HOME", str(Path.home())), "onejev-work")
 
 
 def run_checks(p: Probes, *, network: bool = True, timeout: float = 5.0) -> list[Check]:

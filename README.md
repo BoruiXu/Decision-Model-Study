@@ -47,6 +47,7 @@ bash setup.sh                               #    再执行；重跑会跳过已�
 | `TMPDIR` | 临时文件 | setup 时 `$OJH_TOOLS_DIR/tmp`，之后系统默认 |
 | `OJH_OUT_ROOT` | run 的输出和登记表（没有机器配置时） | `~/ojh_runs` |
 | `OJH_MODEL_DIR` | 基座权重（没有机器配置时） | `~/.cache/onejev-harness/models` |
+| `OJH_WORK_ROOT` | 实验工作区（每个实验一个目录：`exp.yaml`、适配器、`splits.json`），skill 默认放这里 | `$OJH_HOME/work`，没有 `OJH_HOME` 时 `~/onejev-work` |
 
 `/home` 快满时一定先 `source` 这份文件再跑 `setup.sh`：表里“不设时”在 `~` 下的几项会写到 home。`OJH_OUT_ROOT`、`OJH_MODEL_DIR` 不能在 repo 里。
 

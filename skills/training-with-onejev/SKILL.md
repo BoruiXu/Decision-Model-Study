@@ -26,7 +26,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
    - GPU 卡号（如 `0` 或 `2,3`）。没给就问，不要自己挑卡。
    - 基座。没给就列出 `<repo>/catalog/bases/` 里的基座和参数量（`params_b`），请用户选；**不要替用户选**。
    - 输出位置：run 写到机器配置的 `out_root`；没有机器配置时是 `$OJH_OUT_ROOT`，不设就是 `~/ojh_runs`。用户要放到别处（大盘、共享盘），设 `OJH_OUT_ROOT=<目录>` 或传 `--machine <machine.yaml>`。不能在本 repo 里（`ojh` 会拒绝）。
-   - 同时告诉用户实验工作区的位置：默认 `~/onejev-work/<实验名>/`，`<实验名>` = 数据名-基座-训练方式-卡数（数据是文件取文件名去后缀，是目录取目录名；训练方式取将要用的配方的 `mode`：基座的 `default_recipes` 或用户指定的 `--recipe`；如 `/data/qa.csv` + joey-1 + 全参 + 1 卡 → `qa-joey-1-full-1g`，elephant-1 LoRA 4 卡 → `qa-elephant-1-lora-4g`），也是 `exp.yaml` 的 `name`，用户可以改。同名的两份实验会共用 `<out_root>/<实验名>/prepared/`：另一份 `exp.yaml` 已经用过这个名字时，prepare/`ojh run` 会拒绝，换名字；`--force` 只在用户确认要覆盖时用。工作区**不在本 repo 里**；机器配置的 `forbidden_write_roots` 覆盖了它时，换个位置并告诉用户。
+   - 同时告诉用户实验工作区的位置：默认 `$OJH_WORK_ROOT/<实验名>/`（`OJH_WORK_ROOT` 没设时是 `$OJH_HOME/work`，两者都没设才用 `~/onejev-work`；`/home` 小或快满的机器先请用户按 README“环境配置”设好 `OJH_HOME`），`<实验名>` = 数据名-基座-训练方式-卡数（数据是文件取文件名去后缀，是目录取目录名；训练方式取将要用的配方的 `mode`：基座的 `default_recipes` 或用户指定的 `--recipe`；如 `/data/qa.csv` + joey-1 + 全参 + 1 卡 → `qa-joey-1-full-1g`，elephant-1 LoRA 4 卡 → `qa-elephant-1-lora-4g`），也是 `exp.yaml` 的 `name`，用户可以改。同名的两份实验会共用 `<out_root>/<实验名>/prepared/`：另一份 `exp.yaml` 已经用过这个名字时，prepare/`ojh run` 会拒绝，换名字；`--force` 只在用户确认要覆盖时用。工作区**不在本 repo 里**；机器配置的 `forbidden_write_roots` 覆盖了它时，换个位置并告诉用户。
 2. **认数据，写 `exp.yaml`**。**REQUIRED SUB-SKILL:** `adapting-data-for-onejev`。产出是工作区里的 `exp.yaml`，必要时还有 `adapter.py`、`splits.json`。用户对标签含义和判定问题的确认在这一步拿到。
 3. **启动**：
    ```bash

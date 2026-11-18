@@ -20,8 +20,9 @@
 # below one root):
 #   OJH_TOOLS_DIR [<repo>/.tools]  UV_CACHE_DIR [<tools>/cache/uv]  UV_PYTHON_INSTALL_DIR [<tools>/python]
 #   OJH_VENV [<repo>/.venv]  HF_HOME [<tools>/hf]  TMPDIR [<tools>/tmp]
-#   OJH_OUT_ROOT [~/ojh_runs] and OJH_MODEL_DIR [~/.cache/onejev-harness/models] are only printed here;
-#   ojh uses them later (runs and base weights).
+#   OJH_OUT_ROOT [~/ojh_runs], OJH_MODEL_DIR [~/.cache/onejev-harness/models] and OJH_WORK_ROOT
+#   [$OJH_HOME/work, else ~/onejev-work] are only printed here; ojh and the agent use them later (runs,
+#   base weights, experiment workspaces).
 set -euo pipefail
 
 # ---- pins: the CUDA 12.8 wheels of torch (the one place this index URL lives) ----
@@ -60,6 +61,9 @@ export TMPDIR="$(abspath "${TMPDIR:-$OJH_TOOLS_DIR/tmp}")"
 VENV="$(abspath "${OJH_VENV:-$REPO/.venv}")"
 OUT_ROOT="${OJH_OUT_ROOT:-$HOME/ojh_runs}"
 MODEL_DIR="${OJH_MODEL_DIR:-$HOME/.cache/onejev-harness/models}"
+if [ -n "${OJH_WORK_ROOT:-}" ]; then WORK_ROOT="$OJH_WORK_ROOT"
+elif [ -n "${OJH_HOME:-}" ]; then WORK_ROOT="$OJH_HOME/work"
+else WORK_ROOT="$HOME/onejev-work"; fi
 UV_HOME="$OJH_TOOLS_DIR/uv"
 STAMP="$VENV/.ojh-packages"
 PKG_KEY="$(cat constraints.txt pyproject.toml | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64) ${TORCH_INDEX_URL} ${TORCH_PKGS[*]}"
@@ -77,7 +81,7 @@ say "  repo                   $REPO"
 for pair in "tools (OJH_TOOLS_DIR)|$OJH_TOOLS_DIR" "uv cache (UV_CACHE_DIR)|$UV_CACHE_DIR" \
             "python (UV_PYTHON_INSTALL_DIR)|$UV_PYTHON_INSTALL_DIR" "venv (OJH_VENV)|$VENV" \
             "HF cache (HF_HOME)|$HF_HOME" "temp (TMPDIR)|$TMPDIR" "runs (OJH_OUT_ROOT)|$OUT_ROOT" \
-            "base weights (OJH_MODEL_DIR)|$MODEL_DIR"; do
+            "base weights (OJH_MODEL_DIR)|$MODEL_DIR" "workspaces (OJH_WORK_ROOT)|$WORK_ROOT"; do
   printf '  %-30s %s  [%s]\n' "${pair%%|*}" "${pair#*|}" "$(free_of "${pair#*|}")"
 done
 say "  torch                  ${TORCH_PKGS[*]} from $TORCH_INDEX_URL"
