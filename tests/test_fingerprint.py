@@ -51,3 +51,16 @@ def test_fingerprint_carries_the_setup_stamp(tmp_path):
     assert fp["setup"] == {"uv_version": "0.13.9", "python_version": "3.11.18"}
     (venv / ".ojh-setup.json").unlink()
     assert _fingerprint(MachineConfig(python=str(py), model_dir="/m", out_root="/o"))["setup"] is None
+
+
+def test_packages_do_not_depend_on_the_cwd(tmp_path, monkeypatch):
+    stray = tmp_path / "work" / "straypkg-9.9.dist-info"
+    stray.mkdir(parents=True)
+    (stray / "METADATA").write_text("Metadata-Version: 2.1\nName: straypkg\nVersion: 9.9\n")
+    monkeypatch.chdir(tmp_path)
+    here = installed_packages(sys.executable)
+    monkeypatch.chdir(tmp_path / "work")  # e.g. an ojh command run from a source checkout or a workspace
+    assert installed_packages(sys.executable) == here
+    assert not any(p.startswith("straypkg") for p in here)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "work"))
+    assert installed_packages(sys.executable) == here

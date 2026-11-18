@@ -180,8 +180,11 @@ _PACKAGES_SCRIPT = ("import importlib.metadata as m\n"
 
 
 def installed_packages(python: str) -> list[str]:
-    """Sorted ``name==version`` of every distribution importable by ``python`` (importlib.metadata)."""
-    out = subprocess.run([python, "-c", _PACKAGES_SCRIPT], check=True, capture_output=True, text=True).stdout
+    """Sorted ``name==version`` of the distributions installed for ``python`` (importlib.metadata). Isolated
+    (``-I``: no cwd, PYTHONPATH or user site on sys.path) and run from the filesystem root, so the result does
+    not depend on where ojh is called from."""
+    out = subprocess.run([python, "-I", "-c", _PACKAGES_SCRIPT], check=True, capture_output=True, text=True,
+                         cwd=os.path.abspath(os.sep)).stdout
     return sorted(line for line in out.splitlines() if line.strip())
 
 
