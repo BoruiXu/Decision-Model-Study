@@ -12,6 +12,14 @@ from harness.make_split import holdout, select_report
 from harness.prepare import TestSplitRefused
 
 
+@pytest.fixture
+def tmp_path(tmp_path):
+    """A work dir below pytest's tmp dir, whose own name (test_<name>0) would read as a test path."""
+    d = tmp_path / "work"
+    d.mkdir()
+    return d
+
+
 def rows(prefix, n, n_groups, split="val", seed=0):
     rng = random.Random(seed)
     return [{"id": f"{prefix}{i}", "split": split, "meta": {"cat": f"c{rng.randrange(n_groups)}"}, "x": i}
@@ -127,3 +135,25 @@ def test_holdout_out_must_be_a_directory(tmp_path):
     with pytest.raises(ConfigError, match="directory"):
         holdout(path, tmp_path / "splits.json", group="meta.cat", frac=0.2)
     assert not (tmp_path / "splits.json").exists()
+
+
+def test_holdout_refuses_test_rows_in_any_split_like_column(tmp_path):
+    rs = rows("t", 20, 4, split="train")
+    for r in rs:
+        del r["split"]
+        r["set"] = "train"
+    rs[5]["set"] = "Test"
+    path = write(tmp_path / "all.jsonl", rs)
+    with pytest.raises(TestSplitRefused):
+        holdout(path, tmp_path / "out", group="meta.cat", frac=0.2)
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("rel", ["test/part-0.jsonl", "testset.jsonl", "Test-ood.jsonl"])
+def test_refuses_test_like_paths(tmp_path, rel):
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    write(p, rows("t", 10, 2))
+    with pytest.raises(TestSplitRefused):
+        select_report([("x", str(p))], group="meta.cat")
+    assert select_report([("x", str(p))], group="meta.cat", allow_test=True)

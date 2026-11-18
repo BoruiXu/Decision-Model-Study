@@ -8,8 +8,8 @@ about ``frac``; the output is the ``data.split_file`` format ``{set: {"assignmen
 ``<out>/train.jsonl``, ``<out>/val.jsonl`` and ``<out>/manifest.json``.
 
 Groups are sorted, shuffled with ``random.Random("<seed>:<set>")`` and assigned greedily: a group joins the
-first part when that brings its row count closer to the target. Rows in a ``test*`` split, and files whose
-name looks like a test split, are refused unless ``allow_test``.
+first part when that brings its row count closer to the target. Test rows and test-named files or
+directories (``harness.heldout``) are refused unless ``allow_test``.
 """
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ from pathlib import Path
 
 from harness.catalog import sha256_file
 from harness.config import ConfigError, get_field
-from harness.inspect_data import EXTS, load_rows, name_hint
+from harness.heldout import is_test_path, row_is_test
+from harness.inspect_data import EXTS, load_rows
 from harness.jsonl import dumps_line
 from harness.prepare import TestSplitRefused
 
@@ -30,14 +31,14 @@ def _rows(path, allow_test: bool) -> list[dict]:
     path = Path(path)
     if path.suffix.lower() not in EXTS:
         raise ConfigError(f"{path}: unsupported data file type (use jsonl, json, csv, tsv or parquet)")
-    hint = name_hint(path)
-    if hint and hint.startswith("test") and not allow_test:
-        raise TestSplitRefused(f"{path}: the file name looks like a test split; use --allow-test (needs approval)")
+    if is_test_path(path) and not allow_test:
+        raise TestSplitRefused(f"{path}: the file or its directory is named like a test split; use --allow-test "
+                               "(needs approval)")
     rows, _ = load_rows(path)
     if rows is None:
         raise ConfigError(f"{path}: holds no rows")
     if not allow_test:
-        tests = [str(r.get("id")) for r in rows if isinstance(r, dict) and str(r.get("split", "")).startswith("test")]
+        tests = [str(r.get("id")) for r in rows if isinstance(r, dict) and row_is_test(r)]
         if tests:
             raise TestSplitRefused(f"{path}: {len(tests)} row(s) in a test split ({', '.join(tests[:3])}); "
                                    "use --allow-test (needs approval)")

@@ -221,7 +221,8 @@ MAKE_SPLIT_HELP = """Deterministic, group-aware splits (same inputs and seed -> 
   Rows are copied as read (csv/tsv cells as JSON values); no ids are added or changed, so the adapter
   reads both files the same way and keeps its own id rule. Existing output files are never overwritten.
 
-Rows in a test* split, and files whose name looks like a test split, are refused without --allow-test.
+Test data is refused without --allow-test: rows whose split-like column (split, set, subset, partition,
+fold, ...; any case, any dict depth) starts with "test", and files whose name or directory starts with "test".
 """
 
 
