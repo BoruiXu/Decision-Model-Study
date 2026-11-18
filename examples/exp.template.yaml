@@ -41,8 +41,6 @@ evaluator:                                # 评测器
   gate: true                              # 门：每个评测集上 AUC（和组内 AUC）都要高于最好的基线；false 只报告
   # bootstrap_reps: 1000                  # 95% 置信区间的 bootstrap 次数（先抽组、再在组内抽题；没有分组字段时按题抽）；0 关闭
   # bootstrap_seed: 20261115              # bootstrap 种子（固定，结果可复现）
-  # bootstrap_reps: 1000                  # bootstrap 次数（95% 置信区间）；0 关闭
-  # bootstrap_seed: 20261115              # bootstrap 种子（固定，结果可复现）
 
 seeds: [42]                               # 训练种子；多个就依次各训一次
 # merge: false                            # LoRA 配方：finalize 时把选中的 adapter 合并进基座另存一份

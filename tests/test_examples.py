@@ -112,3 +112,19 @@ def test_exp_template_loads_and_covers_every_field(tmp_path):
     assert set(exp.data.eval) == {"val"} and exp.fields.label == "target.yes"
     assert all(line.startswith("#") or not line.strip() or "#" in line
                for line in text.splitlines()), "every active line carries a comment"
+
+
+def test_exp_template_names_each_key_once():
+    keys = re.findall(r"^\s*#?\s*([a-z_]+):", (EXAMPLES / "exp.template.yaml").read_text(), re.M)
+    dupes = {k for k in keys if keys.count(k) > 1} - {"train_labels", "reference", "adapter_args", "split", "n",
+                                                       "seed", "where"}
+    assert not dupes, dupes
+
+
+def test_adapter_template_takes_adapter_args():
+    import inspect as pyinspect
+
+    from adapters import template
+    params = pyinspect.signature(template.adapt).parameters
+    assert any(p.kind is p.VAR_KEYWORD for p in params.values())
+    assert "adapter_args" in template.__doc__
