@@ -154,10 +154,12 @@ def cmd_status(a) -> int:
     return 0
 
 
-def _on_one_gpu(run, fn):
+def _on_one_gpu(run, fn, allow_shared: bool = False):
+    """Score on one card: the run's first explicit card (or one picked like the run's). A shared card is used
+    when the lock allows it (runner.lock_allows_sharing) or the command got --allow-shared."""
     lock = _lock_of(run)
     g = lock["machine"]["gpu"]
-    kw = ({"explicit": list(g["explicit"])[:1], "allow_shared": bool(g.get("allow_shared"))}
+    kw = ({"explicit": list(g["explicit"])[:1], "allow_shared": allow_shared or runner.lock_allows_sharing(lock)}
           if g["source"] == "explicit" else {})
     lease = gpu.acquire(runner._machine(lock["machine"]), 1, **kw)
     try:
@@ -167,7 +169,8 @@ def _on_one_gpu(run, fn):
 
 
 def cmd_finalize(a) -> int:
-    out = _on_one_gpu(a.run, lambda lease: finalize.finalize(Path(a.run), devices=lease.uuids))
+    out = _on_one_gpu(a.run, lambda lease: finalize.finalize(Path(a.run), devices=lease.uuids),
+                      allow_shared=a.allow_shared)
     print(f"{out['run_id']}: {out['status']}")
     for f in out["failures"]:
         print(f"  {f}", file=sys.stderr)
@@ -184,7 +187,8 @@ def cmd_eval_report(a) -> int:
     if not a.allow_report:
         raise ReportRefused("report halves are read only with --allow-report")
     out = _on_one_gpu(a.run, lambda lease: report_eval.run(
-        Path(a.run), allow_report=True, seed=a.seed, allow_test=a.allow_test, devices=lease.uuids))
+        Path(a.run), allow_report=True, seed=a.seed, allow_test=a.allow_test, devices=lease.uuids),
+        allow_shared=a.allow_shared)
     print(f"wrote {Path(a.run) / 'report_eval.json'} (seed {out['seed']})")
     return 0
 
@@ -320,11 +324,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("run")
     s = cmd("finalize", cmd_finalize, "select, rescore, evaluate and register a run")
     s.add_argument("run")
+    s.add_argument("--allow-shared", action="store_true",
+                   help="score on the run's card even if other processes use it (ask the user first)")
     s = cmd("note", cmd_note, "set the conclusion of a run in the registry")
     s.add_argument("run")
     s.add_argument("text")
     s = cmd("eval-report", cmd_eval_report, "evaluate the report halves with the locked checkpoint")
     s.add_argument("run")
+    s.add_argument("--allow-shared", action="store_true",
+                   help="score on the run's card even if other processes use it (ask the user first)")
     s.add_argument("--allow-report", action="store_true", help="required: read report halves")
     s.add_argument("--allow-test", action="store_true", help="read split test* rows")
     s.add_argument("--seed", type=int, default=None, help="default: first seed of the run")

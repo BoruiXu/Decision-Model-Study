@@ -240,3 +240,39 @@ def test_table_of_a_missing_registry_creates_nothing(tmp_path, capsys):
     reg = tmp_path / "none" / "registry.jsonl"
     assert cli.main(["table", "--registry", str(reg)]) == 0
     assert "| run |" in capsys.readouterr().out and not (tmp_path / "none").exists()
+
+
+def _explicit_lock(tmp_path, **gpu_extra):
+    run = tmp_path / "run"
+    run.mkdir()
+    lock = {"run_id": "r", "machine": {"python": "p", "model_dir": "/m", "out_root": str(tmp_path), "registry": None,
+            "env": {}, "forbidden_write_roots": [],
+            "gpu": {"include": None, "exclude": [], "min_free_mib": 0, "lock_dir": None, "order": "free_desc",
+                    "wait_timeout_s": 0, "source": "explicit", "explicit": [0], **gpu_extra}}}
+    (run / "run.lock.yaml").write_text(yaml.safe_dump(lock))
+    return run
+
+
+@pytest.mark.parametrize("gpu_extra,flag,expected", [
+    ({}, [], True),                         # a lock from before --allow-shared: sharing was accepted then
+    ({"allow_shared": True}, [], True),     # the run was allowed to share
+    ({"allow_shared": False}, [], False),   # not allowed: refused on a shared card ...
+    ({"allow_shared": False}, ["--allow-shared"], True),  # ... unless the user allows it for this step
+])
+def test_finalize_and_eval_report_card_sharing(tmp_path, monkeypatch, gpu_extra, flag, expected):
+    run = _explicit_lock(tmp_path, **gpu_extra)
+    seen = []
+
+    class Lease:
+        uuids = ["GPU-a"]
+
+        def release(self):
+            pass
+    monkeypatch.setattr(cli.gpu, "acquire", lambda m, n, **kw: seen.append(kw) or Lease())
+    monkeypatch.setattr(cli.finalize, "finalize", lambda rd, devices=None: {"run_id": "r", "status": "done",
+                                                                           "failures": []})
+    monkeypatch.setattr(cli.report_eval, "run", lambda rd, **kw: {"seed": 1})
+    assert cli.main(["finalize", str(run), *flag]) == 0
+    assert cli.main(["eval-report", str(run), "--allow-report", *flag]) == 0
+    assert [kw["allow_shared"] for kw in seen] == [expected, expected]
+    assert all(kw["explicit"] == [0] for kw in seen)
