@@ -113,17 +113,29 @@ def stream_rows(path, bad: list | None = None):
 
 
 def split_file_shape(obj) -> dict | None:
-    """``{set: {"assignment": {id: "select"|"report"}}}`` -> ``{set: {"select": n, "report": n}}``."""
-    if not isinstance(obj, dict) or not obj:
+    """What prepare reads from a ``data.split_file``: every top-level entry holding an ``assignment`` mapping
+    is an eval set (other keys of the entry, and other top-level keys such as seed or method, are ignored,
+    as prepare does). ``{set: {"select": n, "report": n[, "other": {side: n}]}}``, or None without any set.
+    Sides other than select/report are counted under ``other``: prepare refuses them for rows it reads."""
+    if not isinstance(obj, dict):
         return None
     out = {}
     for name, spec in obj.items():
         a = spec.get("assignment") if isinstance(spec, dict) else None
-        if not isinstance(a, dict) or any(v not in ("select", "report") for v in a.values()):
-            return None
-        vals = list(a.values())
+        if not isinstance(a, dict):
+            continue
+        vals = [str(v) for v in a.values()]
         out[name] = {"select": vals.count("select"), "report": vals.count("report")}
-    return out
+        other = {v: vals.count(v) for v in sorted(set(vals) - {"select", "report"})}
+        if other:
+            out[name]["other"] = other
+    return out or None
+
+
+def split_file_other_keys(obj) -> list[str]:
+    """Top-level keys of a split file that are not eval sets (metadata such as seed, created, method)."""
+    sets = split_file_shape(obj) or {}
+    return [k for k in obj if k not in sets] if isinstance(obj, dict) else []
 
 
 def load_rows(path) -> tuple[list[dict] | None, dict]:
@@ -139,6 +151,8 @@ def load_rows(path) -> tuple[list[dict] | None, dict]:
     if kind == "json":
         obj = json.loads(Path(path).read_text(encoding="utf-8"))
         extra["split_file"] = split_file_shape(obj)
+        if extra["split_file"] is not None:
+            extra["split_file_other_keys"] = split_file_other_keys(obj)
         if isinstance(obj, list):
             return obj, extra
         if isinstance(obj, dict):
@@ -439,8 +453,11 @@ def render(report: dict) -> str:
         if f.get("top_keys"):
             lines.append("top-level keys: " + ", ".join(map(str, f["top_keys"])))
         if f.get("split_file"):
-            lines.append("split file shape: " + "; ".join(f"{k}: select {v['select']}, report {v['report']}"
-                                                         for k, v in f["split_file"].items()))
+            lines.append("split file shape: " + "; ".join(
+                f"{k}: select {v['select']}, report {v['report']}"
+                + (f", other {v['other']}" if v.get("other") else "") for k, v in f["split_file"].items())
+                + (f" (other top-level keys: {', '.join(map(str, f['split_file_other_keys']))})"
+                   if f.get("split_file_other_keys") else ""))
         if f["onejev"] is not None:
             o = f["onejev"]
             lines.append("OneJev rows: " + ("yes" if o["passes"] else f"no ({o['errors']} error(s); first: "

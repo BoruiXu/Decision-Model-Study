@@ -445,7 +445,7 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
 - `type`、`size_bytes`、`rows`；`name_hint`：文件名里的 train/training/val/valid/validation/dev/test/eval；
 - `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格在文本不变时（没有前导零、没有 `+`）才按数统计，id 类列（id、uid、`*_id` 等）一律保持字符串，空单元格算缺失；jsonl、csv、tsv 逐行流式读取；读不了的文件（非 UTF-8 等）在该文件下给出 `error`，其余文件照常；
 - `split_columns`：名字像 split（split、set、fold、partition 等）或取值都像 split 名的低基数字段，及各取值的行数；
-- `split_file`：JSON 形如 `{集: {"assignment": {id: "select"|"report"}}}` 时，各集的 select/report 数；
+- `split_file`：和 prepare 的读法一致，JSON 里每个带 `assignment` 映射的顶层条目算一个评测集，给出各集的 select/report 数（其他取值计入 `other`，prepare 读到这种行会报错）；条目里的其他键和其他顶层键（如 seed、created、method）忽略，后者列在 `split_file_other_keys`；
 - `onejev`：`passes`、`errors`、`first_errors`，用 `prepare.validate_rows` 检查是否已是 OneJev 行；
 - `samples`：前 N 行（默认 3），字符串截到 200 字符，列表截到 5 项。
 

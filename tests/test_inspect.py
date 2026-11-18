@@ -214,3 +214,25 @@ def test_duplicate_ids_found_while_streaming(tmp_path):
     write_jsonl(tmp_path / "rows.jsonl", [onejev_row(1), onejev_row(1)])
     f = files_of(inspect_path(tmp_path))["rows.jsonl"]
     assert f["onejev"]["passes"] is False and any("duplicate id" in e for e in f["onejev"]["first_errors"])
+
+
+def test_split_file_with_metadata_like_prepare_accepts(tmp_path):
+    from harness.config import DataSpec, EvalSetSpec, ExperimentConfig, FieldsSpec
+    from harness.prepare import build_eval_parts
+    rows = [onejev_row(i, split="val") for i in range(4)]
+    write_jsonl(tmp_path / "val_id.jsonl", rows)
+    (tmp_path / "splits.json").write_text(json.dumps({
+        "seed": "20261115", "created": "2026-11-15", "method": {"val_id": "by cluster"},
+        "val_id": {"summary": {"select": {}}, "select_categories": ["a"],
+                   "assignment": {"r0": "select", "r1": "report", "r2": "select", "r3": "report"}},
+        "odd": {"assignment": {"x": "holdout"}}}))
+    f = files_of(inspect_path(tmp_path))["splits.json"]
+    assert f["split_file"] == {"val_id": {"select": 2, "report": 2},
+                               "odd": {"select": 0, "report": 0, "other": {"holdout": 1}}}
+    assert f["split_file_other_keys"] == ["seed", "created", "method"]
+    assert "split file shape" in render(inspect_path(tmp_path))
+    exp = ExperimentConfig(name="e", base=None, recipe=None, fields=FieldsSpec(label="target.yes"),
+                           data=DataSpec(train="unused", split_file=str(tmp_path / "splits.json"),
+                                         eval={"val_id": EvalSetSpec(train_labels=str(tmp_path / "val_id.jsonl"))}))
+    parts = build_eval_parts(exp)  # prepare accepts the same file
+    assert len(parts.select_rows) == 2
