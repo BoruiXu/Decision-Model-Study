@@ -3,7 +3,7 @@
 # 路径可以用 ~ 和 $VAR；相对路径相对本文件所在的目录。
 
 # ---- 必填 ----
-python: <PYTHON>          # python 解释器：setup.sh 用它建 .venv；建好后改成 <repo>/.venv/bin/python，训练用它
+python: <PYTHON>          # 训练用的 python：写 <repo>/.venv/bin/python（setup.sh 用 uv 建好的环境，见 README 环境配置）
 model_dir: <MODEL_DIR>    # 基座权重目录；基座放在 <model_dir>/<基座名>（ojh fetch-base 会下载到这里）
 out_root: <OUT_ROOT>      # 输出根目录：<out_root>/<实验名>/prepared 和每个 run 的目录都在这下面
 

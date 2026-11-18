@@ -50,7 +50,7 @@
 ## 3. 约束
 
 - **OneJev 版本**：`github.com/OmniJev/OneJev@81ce62f1597c91e46767d4d02d6ac2e18534fe94`，再打上 baselabs 发布的 `serve.patch`（第 5 节）。
-- **环境**：Python 3.11、torch 2.8.0+cu128、transformers 5.19.0、peft 0.21.2、flash-linear-attention 0.5.2。来源是现有的 `training/{setup.sh,constraints.txt,recorded_environment.json}`。
+- **环境**：Python 3.11、torch 2.8.0+cu128、transformers 5.19.0、peft 0.21.2、flash-linear-attention 0.5.2。来源是现有的 `training/{setup.sh,constraints.txt,recorded_environment.json}`。`setup.sh` 用 uv 安装（不依赖系统 Python、conda 或 root），所有位置可以用环境变量放到一块盘上，`ojh doctor` 核对（README“环境配置”）。
 - **机器规则一律可配置，repo 里不写具体取值**。可配置的项目包括：
   - 可用 GPU 列表或排除列表；
   - 最小空闲显存；
@@ -112,19 +112,22 @@ onejev-harness/
     adapting-data-for-onejev/SKILL.md    # 新数据格式怎么写适配器
   .claude/skills/ -> ../skills/*         # 符号链接
   onejev.lock                            # 第 5 节
-  setup.sh  constraints.txt
+  setup.sh  constraints.txt              # setup.sh 用 uv 建环境（README“环境配置”）
   catalog/bases/                         # 公开模型的事实信息：repo、revision、sha256、尺寸、注意力和读出设置
     joey-1.yaml  elephant-1.yaml  mammoth-1.yaml  onejev-qwen3.5-{0.8b,4b,9b,27b}.yaml
   examples/
-    machine.example.yaml                 # 机器配置模板，每个键都有注释
+    machine.example.yaml                 # 机器配置模板，每个键都有注释（可选）
+    env.example.sh                       # 环境变量：把 uv、Python、venv、缓存、输出和权重都放到一个 OJH_HOME 下
+    exp.template.yaml                    # 实验配置模板，每个键都有注释（第 15 节）
     recipes/elephant_full_fsdp.yaml      # 示例配方，不是默认值
     recipes/joey_full_1gpu.yaml
     recipes/joey_lora_1gpu.yaml
     recipes/mammoth_lora_ddp.yaml
     dynamicserve_v1_repro.yaml           # 复现 v1 的实验配置，路径用占位符
   harness/                               # Python 包，命令行入口 ojh
-    cli  prepare  resolve  gpu  launch  train_entry  status  finalize  score
-    evaluator/binary_decision  baselines/  registry  cleanup
+    cli  prepare  resolve  gpu  launch  train_entry  status  finalize  score  result
+    inspect_data  make_split  heldout  oneshot  doctor
+    evaluator/{binary_decision,bootstrap}  baselines/{tfidf,length}  registry  cleanup
   adapters/  onejev_rows.py（直通加校验）  template.py
   plugins/README.md                      # 其他任务的插件接口
   tests/
@@ -148,7 +151,9 @@ repo 里不放任何项目的机器配置、数据路径或任务规则，这些
 | `ojh inspect PATH` | 只读：列出数据文件的事实（第 15 节） | 确定性，不做决定 |
 | `ojh make-split …` | 按组确定性地切 select/report，或从 train 切出 val（第 15 节） | 确定性 |
 | `ojh run EXP --base B --gpus i,j` | prepare → resolve → launch 一次完成，立即返回（第 15 节） | 确定性；基座和卡由用户给 |
-| `ojh setup --machine M` | 建环境，拉 OneJev 并打补丁，逐项校验 sha256 | 确定性 |
+| `bash setup.sh` | 用 uv 装 Python 3.11、建 `.venv`、装固定版本的依赖，再执行 `ojh setup`；`--dry-run` 只打印计划 | 确定性 |
+| `ojh setup [--machine M]` | 拉 OneJev 并打补丁，逐项校验 sha256 | 确定性 |
+| `ojh doctor` | 只读检查环境：Python、torch/CUDA、GPU、依赖版本、OneJev、tmux、各目录的可写性和剩余空间、HF hub；有阻塞问题时退出码 1 并给出提示 | 确定性 |
 | `ojh fetch-base NAME --machine M` | 按 catalog 下载固定 revision 的基座权重，并校验 sha256 | 确定性 |
 | `ojh prepare EXP` | 用适配器把数据转成 OneJev 行；校验 schema、id 唯一、target 分布、split 字段；按配置派生训练子集；计算 sha256，和 EXP 里写的值比对，不一致就停 | 确定性；新格式由 agent 写适配器 |
 | `ojh resolve EXP --machine M` | 检测 GPU；结合数据、机器、基座、配方解析出 `run.lock.yaml`（第 8 节）；在目标机器上跑 plan-only 得到每 epoch 步数，按 1/8 epoch 设评测和保存间隔；不可行就报错并给出建议 | 确定性 |
@@ -188,7 +193,7 @@ seeds: [42]
 gpus: 4
 overrides: {}
 ```
-调用时加 `--machine <使用方的机器配置>`。
+机器配置可选（第 15 节）；有就加 `--machine <使用方的机器配置>`。
 
 **训练子集**：做消融（例如只用部分题型，或按条数抽样做规模对比）时，常要从同一份数据版本里取子集。`prepare` 支持在实验配置里声明：
 ```yaml

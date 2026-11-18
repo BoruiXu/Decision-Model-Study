@@ -128,3 +128,14 @@ def test_adapter_template_takes_adapter_args():
     params = pyinspect.signature(template.adapt).parameters
     assert any(p.kind is p.VAR_KEYWORD for p in params.values())
     assert "adapter_args" in template.__doc__
+
+
+def test_docs_reference_existing_examples():
+    texts = [p.read_text() for p in (ROOT / "README.md", ROOT / "docs" / "design.md",
+                                     *(ROOT / "skills").rglob("*.md"))]
+    refs = {m for t in texts for m in re.findall(r"examples/[A-Za-z0-9_./-]+\.(?:ya?ml|sh)", t)}
+    assert "examples/dynamicserve_v1_repro.yaml" in refs and "examples/env.example.sh" in refs
+    missing = sorted(r for r in refs if not (ROOT / r).is_file())
+    assert not missing, missing
+    on_disk = {f"examples/{p.name}" for p in EXAMPLES.glob("*.*")}
+    assert on_disk <= refs, sorted(on_disk - refs)  # every example is documented somewhere

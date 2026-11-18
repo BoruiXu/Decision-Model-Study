@@ -6,16 +6,73 @@
 
 不做：多机训练、云平台、调度系统对接、数据生成和打标签、超参搜索、修改 OneJev、推理服务。
 
-## 安装（在有 GPU 的机器上）
+## 环境配置
+
+环境由 `setup.sh` 用 [uv](https://docs.astral.sh/uv/) 一次建好：uv 本身、Python 3.11、`.venv`、固定版本的依赖、OneJev。机器上不需要预先有 Python 3.11、conda 或 uv，也不需要 root。
+
+### 前提
+
+| 项目 | 要求 |
+|---|---|
+| 系统 | Linux x86_64（在 Ubuntu 22.04 上验证过） |
+| GPU 驱动 | NVIDIA 驱动支持 CUDA 12.8 的 wheel（R570 或更新；`nvidia-smi` 右上角的 CUDA Version ≥ 12.8）。不需要单独装 CUDA toolkit |
+| 工具 | `git`、`tmux`（训练在 tmux 里跑）、`curl`（第一次装 uv） |
+| 网络 | 能访问 astral.sh 和 GitHub（uv、Python、OneJev）、PyPI 和 download.pytorch.org（依赖）、huggingface.co（补丁和基座权重） |
+| 磁盘 | 环境约 5.5 GB（A100 实测：uv 缓存 5.2 GB，Python 80 MB，OneJev 100 MB；venv 和 uv 缓存在同一文件系统时用硬链接共用空间，不在同一个时 venv 再占约 5 GB）；基座权重 elephant-1 约 18 GB、joey-1 约 5 GB；每个 run 的 checkpoint 另算（全参每个 checkpoint 约为基座大小，LoRA 小得多） |
+
+### 步骤
 
 ```bash
-bash setup.sh [<machine.yaml>]      # 建 .venv，装固定版本的依赖（见 constraints.txt），再执行 ojh setup（拉 OneJev、打补丁、校验 sha256）
-<repo>/.venv/bin/ojh fetch-base joey-1   # 下载固定 revision 的基座权重并校验（放到机器配置的 model_dir）
+cp examples/env.example.sh ~/ojh-env.sh     # 1. 改其中的 OJH_HOME，指到一块大盘，例如 /big/disk/ojh
+source ~/ojh-env.sh                         #    每个要跑 ojh 的 shell 都先 source 一次
+bash setup.sh --dry-run                     # 2. 先看计划：每个目录放在哪、剩余空间、要做哪些步骤（什么都不改）
+bash setup.sh                               #    再执行；重跑会跳过已完成的步骤
+<repo>/.venv/bin/ojh doctor                 # 3. 只读检查：Python、torch/CUDA、GPU、依赖版本、OneJev、tmux、各目录、HF hub
+<repo>/.venv/bin/ojh fetch-base joey-1      # 4. 下载固定 revision 的基座权重并校验（到 OJH_MODEL_DIR）
 ```
 
-机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、输出目录 `$OJH_OUT_ROOT`（不设则 `~/ojh_runs`）、`$OJH_MODEL_DIR`（不设则 `~/.cache/onejev-harness/models`），卡由 `--gpus` 指定。输出目录和模型目录不能在 repo 里（会报 `ConfigError`）；要放到别处，设 `OJH_OUT_ROOT`/`OJH_MODEL_DIR` 或传 `--machine`。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份；`setup.sh <machine.yaml>` 用其中的 python 建 `.venv`，建好后把它的 python 改成 `<repo>/.venv/bin/python`（训练用的环境）。
+在 A100 节点（Ubuntu 22.04，系统 Python 3.10，无 conda）上从零跑完约 4 分钟，重跑约 1 秒；`/home` 下不写任何文件。`setup.sh` 的五步：① uv：PATH 上有就用，否则用 `UV_UNMANAGED_INSTALL` 装到 `$OJH_TOOLS_DIR/uv`（不改 shell 配置文件，不往 `~/.local/bin` 放东西）；② `uv python install 3.11` 到 `$UV_PYTHON_INSTALL_DIR`；③ `uv venv` 建 `.venv`（`OJH_VENV` 在别处时，`<repo>/.venv` 是指向它的符号链接）；④ 先从 CUDA 12.8 的 wheel 源装 `torch==2.8.0`、`torchvision==0.23.0`，再按 `constraints.txt` 装其余固定版本，最后 `uv pip check`；⑤ `ojh setup`：拉 OneJev 到固定 revision、打 `serve.patch`、逐项校验 sha256。已有的 Python ≥3.11 可以用 `--python <路径>` 显式指定（opt-in）；`--machine <machine.yaml>` 传给 `ojh setup`。
+
+### 放到大盘上
+
+`examples/env.example.sh` 把所有会写的位置都放在 `OJH_HOME` 下（每行都有注释，已设置的变量不覆盖）：
+
+| 变量 | 内容 | 不设时 |
+|---|---|---|
+| `OJH_TOOLS_DIR` | uv 本身 | `<repo>/.tools` |
+| `UV_CACHE_DIR` | uv 的下载和 wheel 缓存 | `$OJH_TOOLS_DIR/cache/uv` |
+| `UV_PYTHON_INSTALL_DIR` | uv 管理的 Python 3.11 | `$OJH_TOOLS_DIR/python` |
+| `OJH_VENV` | 虚拟环境 | `<repo>/.venv` |
+| `HF_HOME` | Hugging Face 缓存 | setup 时 `$OJH_TOOLS_DIR/hf`，之后 `~/.cache/huggingface` |
+| `TMPDIR` | 临时文件 | setup 时 `$OJH_TOOLS_DIR/tmp`，之后系统默认 |
+| `OJH_OUT_ROOT` | run 的输出和登记表（没有机器配置时） | `~/ojh_runs` |
+| `OJH_MODEL_DIR` | 基座权重（没有机器配置时） | `~/.cache/onejev-harness/models` |
+
+`/home` 快满时一定先 `source` 这份文件再跑 `setup.sh`：表里“不设时”在 `~` 下的几项会写到 home。`OJH_OUT_ROOT`、`OJH_MODEL_DIR` 不能在 repo 里。
+
+### 离线或网络慢
+
+- `setup.sh` 要联网；重跑会用 `UV_CACHE_DIR` 里的缓存，已完成的步骤直接跳过，所以中断后重跑即可。
+- 网络慢时可以先在能联网的机器上用同样的 `OJH_HOME` 布局跑一次，再把 `OJH_HOME`（含 uv 缓存）和 repo 一起拷过去重跑 `setup.sh`。
+- 训练本身不需要网络：runner 设 `HF_HUB_OFFLINE=1`。基座权重可以在别处 `ojh fetch-base` 后拷到 `OJH_MODEL_DIR/<基座名>`；`ojh doctor --no-network` 跳过网络检查。
+
+### 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| 没有 Python 3.11（系统只有 3.10、没有 conda） | 不用管：`setup.sh` 用 uv 装 Python 3.11，不需要系统 Python |
+| `/home` 满了 | `source examples/env.example.sh`（`OJH_HOME` 指到大盘）后重跑 `setup.sh`；`ojh doctor` 列出每个目录的剩余空间。之前没设变量时留下的 `~/.cache/uv` 可以删 |
+| CUDA 和驱动不匹配（`ojh doctor` 的 cuda 一项 FAIL，`torch.cuda.is_available()` 为 False） | 看 `nvidia-smi` 的驱动版本：CUDA 12.8 的 wheel 要 R570 或更新。驱动太旧要请管理员升级；也检查 `CUDA_VISIBLE_DEVICES` 有没有设成空 |
+| flash-linear-attention 导入或编译出错 | `ojh doctor` 核对版本是否是固定的 0.5.2；不是就重跑 `setup.sh`。训练时 FLA kernel 报错按 skill 的故障表加 `--disable-fla-kernels` override（要问用户）。Triton 编译缓存放在 `TRITON_CACHE_DIR` |
+| 依赖解析冲突（`uv pip install` 或 `uv pip check` 报错） | 不要手动改版本：确认 `constraints.txt`、`pyproject.toml` 没被改过，删掉 `$OJH_VENV`（或 `<repo>/.venv`）后重跑 `setup.sh` |
+| 没有 tmux | `ojh launch`/`ojh run` 需要它：`apt install tmux`，或请管理员安装 |
+| uv 装到了 `~/.local/bin` 或改了 `.bashrc` | 那是直接跑 uv 官方安装脚本的结果；`setup.sh` 用 `UV_UNMANAGED_INSTALL` 不会这样。可以删掉 `~/.local/bin/uv`、`uvx` 和配置文件里加的那行 |
+
+### 用法约定
 
 `setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> <repo>/.venv/bin/ojh …` 调用；记录和登记表都留在 GPU 机器的 `out_root` 下。
+
+机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、输出目录 `$OJH_OUT_ROOT`（不设则 `~/ojh_runs`）、`$OJH_MODEL_DIR`（不设则 `~/.cache/onejev-harness/models`），卡由 `--gpus` 指定。输出目录和模型目录不能在 repo 里（会报 `ConfigError`）；要放到别处，设 `OJH_OUT_ROOT`/`OJH_MODEL_DIR` 或传 `--machine`。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份（其中的 `python` 写 `<repo>/.venv/bin/python`）。
 
 ## 使用流程（一次性）
 
@@ -56,7 +113,7 @@ ojh finalize <RUN>                                  # 选 checkpoint、复评、
 
 - **机器配置**（可选）：按顺序取 `--machine`、`$OJH_MACHINE`、`~/.config/onejev-harness/machine.yaml`，都没有就推断（见上）。模板 `examples/machine.example.yaml`（每个键都有说明）。`gpu_source`：`scan`（扫描加锁）、`preassigned`（用 `CUDA_VISIBLE_DEVICES`）、`explicit`（用 `--gpus`；推断时的默认值）。实际用的设置和来源记进 lock。`forbidden_write_roots` 里的目录不会被写：`prepare`（prepared 目录）、`resolve`（run 目录、登记表、`lock_dir`）、`fetch-base`（基座目录）和取卡加锁前都会检查，要写的路径在其下（含经符号链接）就报 `ConfigError`。
 - **路径**：配置里的路径可以用 `~` 和 `$VAR`。相对路径按所在配置文件的目录解析：机器配置里的相对机器配置文件，实验配置里的（数据、评测集、`split_file`、适配器文件、配方、评测插件）相对实验配置文件；配方在那里找不到、但在 repo 根目录下存在时（如 `examples/recipes/…`），取 repo 根目录下的。解析后都是绝对路径，和在哪个目录下运行 `ojh` 无关。
-- **实验配置**：模板 `examples/exp.template.yaml`（每个键都有注释），v1 复现的例子是 `examples/dynamicserve_v1_repro.yaml`。`data.split_file`（可选）把评测集的行分成 select 和 report：不写则所有行都算 select；写了则每个评测集都必须在其中，缺失会报错，集内未分配的 id 被丢弃并记录。每个评测集可以给 `train_labels`（选模算 NLL）和 `reference`（定阈值、AUC、门）两份标签。`evaluator.bootstrap_reps`（默认 1000，0 关闭）和 `bootstrap_seed` 控制置信区间。
+- **实验配置**：模板 `examples/exp.template.yaml`（每个键都有注释）；复现 DynamicServe v1 elephant 的完整例子是 `examples/dynamicserve_v1_repro.yaml`（路径用占位符，`docs/design.md` 第 7 节逐键说明）。`data.split_file`（可选）把评测集的行分成 select 和 report：不写则所有行都算 select；写了则每个评测集都必须在其中，缺失会报错，集内未分配的 id 被丢弃并记录。每个评测集可以给 `train_labels`（选模算 NLL）和 `reference`（定阈值、AUC、门）两份标签。`evaluator.bootstrap_reps`（默认 1000，0 关闭）和 `bootstrap_seed` 控制置信区间。
 - **适配器**：`data.adapter` 是 `adapters/` 里的模块名，或一个 `.py` 文件路径（相对实验配置）。`data.adapter_args`、`data.train_adapter_args`、`data.eval.<集>.adapter_args` 以 `adapt(path, **args)` 传入，一个带 split 列的文件可以同时作训练和评测来源。适配器文件的 sha256 记进 lock 和结果页，文件复制到 `<RUN>/adapter/`。
 - **配方**：`examples/recipes/*.yaml`（`elephant_full_fsdp`、`joey_full_1gpu`、`joey_lora_1gpu`、`mammoth_lora_ddp`），必须显式写 `mode: full` 或 `mode: lora`。基座的 `default_recipes` 指向其中几份；LoRA 配方的超参没有实测。
 - **基线**：`harness/baselines` 的注册表里有 `tfidf`、`group_prior`、`length`（只看文本长度的逻辑回归），缺字段的自动跳过；门要求模型在每个评测集上胜过可用基线中最好的一个。

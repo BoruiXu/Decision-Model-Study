@@ -15,7 +15,8 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 
 - `ojh` 在 GPU 机器上运行，写全路径 `<repo>/.venv/bin/ojh`（下文简写 `ojh`）。不在 GPU 机器上就 `ssh <host> <repo>/.venv/bin/ojh …`。
 - 数据要在 GPU 机器上读得到；用户给的路径在哪台机器上不清楚时，在第 1 步一起问。
-- 第一次用先按 `README.md` 安装，并 `ojh fetch-base <基座>`（下载固定版本的权重，不需要审批）。
+- 第一次用：按 `README.md` 的“环境配置”节（`source` 环境变量文件 → `bash setup.sh` → `ojh doctor` → `ojh fetch-base <基座>`，下载权重不需要审批）。`/home` 小的机器先把 `OJH_HOME` 指到大盘。
+- 环境出问题（导入错误、CUDA 不可用、版本不对、目录写不了、没有 tmux）先跑 `ojh doctor`，按它的 hint 和 README 的故障排查表处理；要装系统软件或升级驱动时告诉用户，不要自己改环境。
 - 机器配置可选，按优先级取：`--machine` > `$OJH_MACHINE` > `~/.config/onejev-harness/machine.yaml` > 自动推断。
 
 ## 主流程
