@@ -334,3 +334,20 @@ def test_no_wait_line_when_one_card_could_never_fit(tmp_path):
     # never pass, so waiting is not offered (the old code offered it for GPU 2 alone)
     alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [2, 3], gpu_exclude=[3])
     assert not any("once the" in a for a in alts)
+
+
+def test_runner_treats_an_explicit_lock_from_before_allow_shared_as_shareable(tmp_path):
+    from test_runner import FakeLease, FakePopen, make_lock
+    from harness.runner import run
+    path, lock, run_dir = make_lock(tmp_path, seeds=(42,))
+    lock["machine"]["gpu"].update(source="explicit", explicit=[1])
+    lock["machine"]["gpu"].pop("allow_shared", None)  # written before the key existed
+    lock["estimate_gib"] = 1.0
+    path.write_text(yaml.safe_dump(lock))
+    seen = {}
+    FakePopen.codes = [0]
+    assert run(path, acquire=lambda m, n, **kw: seen.update(kw) or FakeLease(), popen=FakePopen,
+               finalize=lambda rd: None, killpg=lambda *a: None) == 0
+    assert seen["allow_shared"] is True
+    design = (Path(__file__).resolve().parents[1] / "docs" / "design.md").read_text()
+    assert "runner、`ojh finalize` 和 `ojh eval-report` 都按当时的规则处理" in design
