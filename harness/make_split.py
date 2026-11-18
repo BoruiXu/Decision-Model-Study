@@ -34,7 +34,7 @@ def _rows(path, allow_test: bool) -> list[dict]:
     if is_test_path(path) and not allow_test:
         raise TestSplitRefused(f"{path}: the file or its directory is named like a test split; use --allow-test "
                                "(needs approval)")
-    rows, _ = load_rows(path)
+    rows, _ = load_rows(path, raw_csv=True)  # csv cells as text: "1.50" and "007" stay as the adapter reads them
     if rows is None:
         raise ConfigError(f"{path}: holds no rows")
     if not allow_test:

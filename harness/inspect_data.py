@@ -95,8 +95,9 @@ _raise_csv_limit()
 STREAMED = ("jsonl", "csv", "tsv")
 
 
-def stream_rows(path, bad: list | None = None):
-    """Rows of a jsonl/csv/tsv file one at a time; unparsable jsonl lines are counted in ``bad[0]``."""
+def stream_rows(path, bad: list | None = None, *, raw_csv: bool = False):
+    """Rows of a jsonl/csv/tsv file one at a time; unparsable jsonl lines are counted in ``bad[0]``.
+    ``raw_csv``: csv/tsv cells stay text (empty cells are None), as an adapter reading the file sees them."""
     kind = EXTS[Path(path).suffix.lower()]
     if kind == "jsonl":
         with open(path, encoding="utf-8", newline="\n") as f:
@@ -111,7 +112,10 @@ def stream_rows(path, bad: list | None = None):
         return
     with open(path, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f, delimiter="," if kind == "csv" else "\t"):
-            yield {k: _csv_cell(v, k) if isinstance(v, str) else v for k, v in r.items()}
+            if raw_csv:
+                yield {k: (None if v == "" else v) for k, v in r.items()}
+            else:
+                yield {k: _csv_cell(v, k) if isinstance(v, str) else v for k, v in r.items()}
 
 
 def split_file_shape(obj) -> dict | None:
@@ -140,13 +144,14 @@ def split_file_other_keys(obj) -> list[str]:
     return [k for k in obj if k not in sets] if isinstance(obj, dict) else []
 
 
-def load_rows(path) -> tuple[list[dict] | None, dict]:
-    """Rows of a data file (None when it holds no rows) and extra facts about its shape."""
+def load_rows(path, *, raw_csv: bool = False) -> tuple[list[dict] | None, dict]:
+    """Rows of a data file (None when it holds no rows) and extra facts about its shape. ``raw_csv`` keeps
+    csv/tsv cells as text (make-split: ids and groups must match what the adapter reads)."""
     kind = EXTS[Path(path).suffix.lower()]
     extra: dict = {}
     if kind in STREAMED:
         bad = [0]
-        rows = list(stream_rows(path, bad))
+        rows = list(stream_rows(path, bad, raw_csv=raw_csv))
         if bad[0]:
             extra["unparsable_lines"] = bad[0]
         return rows, extra

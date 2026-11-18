@@ -178,9 +178,10 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False, check_c
         if data.split_file:
             if name not in assignments:
                 raise ConfigError(f"data.split_file has no entry for eval set {name!r}")
-            assign = assignments[name].get("assignment") or {}
+            # JSON object keys are text, so ids are matched as text: a split file's "0" is the row id 0
+            assign = {str(k): v for k, v in (assignments[name].get("assignment") or {}).items()}
         else:  # no split file: the whole eval set is select
-            assign = {r["id"]: "select" for r in labels}
+            assign = {str(r["id"]): "select" for r in labels}
         dropped = parts.dropped.setdefault(name, [])
         unassigned = parts.dropped.setdefault("unassigned", [])
         label_ids = {r["id"] for r in labels}
@@ -188,7 +189,7 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False, check_c
             dropped += sorted(set(ref) - label_ids)
             dropped += sorted(label_ids - set(ref))
         sel: list[dict] = []
-        errs = validate_rows([r for r in labels if assign.get(r["id"]) == "select"
+        errs = validate_rows([r for r in labels if assign.get(str(r["id"])) == "select"
                               and (ref is None or r["id"] in ref)], check_criteria=check_criteria)
         if errs:
             raise ValueError(f"invalid select rows in eval set {name!r}:\n" + "\n".join(errs[:20]))
@@ -197,7 +198,7 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False, check_c
             rid = r["id"]
             if ref is not None and rid not in ref:
                 continue
-            side = assign.get(rid)
+            side = assign.get(str(rid))
             if side is None:
                 unassigned.append(rid)
             elif side == "select":

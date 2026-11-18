@@ -299,3 +299,13 @@ def test_cli_prepare_and_run_refuse_without_force(tmp_path, monkeypatch, capsys)
     assert cli.main(["prepare", str(tmp_path / "b" / "exp.yaml"), "--force"]) == 0
     assert cli.main(["run", str(tmp_path / "a" / "exp.yaml"), "--base", "joey-1", "--gpus", "0"]) == 1
     assert "--force" in capsys.readouterr().err
+
+
+def test_split_file_ids_match_rows_with_numeric_ids(tmp_path):
+    """JSON object keys are text: a split file says "0" for a row whose id is 0."""
+    labels = [dict(row(i, split="val"), id=i) for i in range(6)]
+    exp = make_exp(tmp_path, [row("t1")], evals={"v": (labels, None)},
+                   assignment={"v": {str(i): ("select" if i % 2 else "report") for i in range(6)}})
+    parts = build_eval_parts(exp)
+    assert sorted(r["id"] for r in parts.select_rows) == [1, 3, 5]
+    assert parts.report_ids["v"] == [0, 2, 4] and parts.dropped["unassigned"] == []

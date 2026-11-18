@@ -198,3 +198,14 @@ def test_raw_csv_split_feeds_a_file_adapter_through_prepare(tmp_path, capsys):
     info = prepare(load_experiment(tmp_path / "exp.yaml"), tmp_path / "prepared")
     assert info["counts"]["select"] + info["counts"]["report"]["val"] == 36 and info["counts"]["select"] > 0
     assert info["dropped"]["unassigned"] == []
+
+
+def test_csv_cells_stay_text_for_ids_and_groups(tmp_path):
+    import csv
+    with open(tmp_path / "val.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["code", "grp", "x"])
+        w.writerows([[f"{i}.50", f"{i % 4:03d}", i] for i in range(20)])
+    out = select_report([("val", str(tmp_path / "val.csv"))], group="grp", id_field="code")
+    assert "1.50" in out["val"]["assignment"] and "1.5" not in out["val"]["assignment"]
+    assert set(out["val"]["groups"]["select"]) | set(out["val"]["groups"]["report"]) == {"000", "001", "002", "003"}

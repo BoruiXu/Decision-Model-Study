@@ -457,7 +457,7 @@ test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用
 
 确定性、按组：组键排序后用 `random.Random("<seed>:<集名>")` 打乱，逐组贪心：加入第一部分能让它的行数更接近 `frac × 总行数` 就加入，否则进第二部分。同一组永远在同一边。缺组字段的行直接报错。
 
-- **select-report**（默认）：每个文件是一个评测集，集名取文件名主干，或写成 `名字=路径`。`--frac` 是 select 的比例。`--out` 是切分文件，格式就是 `data.split_file`：`{集: {"assignment": {id: "select"|"report"}, "seed", "frac", "group", "source", "source_sha256", "rows": {"select", "report"}, "groups": {"select": [...], "report": [...]}}}`。每行的 id 取自 `--id`（点分字段，默认 `id`），一律按文本写入（`7` 写成 `"7"`，`"0007"` 不变），记在 `id_field`；适配器必须产出同样的文本作行 id，所以原始文件不用先转成 OneJev 行。已有的 `--out` 内容不同就拒绝覆盖。
+- **select-report**（默认）：每个文件是一个评测集，集名取文件名主干，或写成 `名字=路径`。`--frac` 是 select 的比例。`--out` 是切分文件，格式就是 `data.split_file`：`{集: {"assignment": {id: "select"|"report"}, "seed", "frac", "group", "source", "source_sha256", "rows": {"select", "report"}, "groups": {"select": [...], "report": [...]}}}`。每行的 id 取自 `--id`（点分字段，默认 `id`），一律按文本写入（`7` 写成 `"7"`，`"0007"` 不变；csv/tsv 的单元格按原文读，不转成数，`"1.50"` 不会变成 `"1.5"`），记在 `id_field`；prepare 也按文本匹配切分文件的 id（JSON 的键都是文本，`"0"` 对应 id 为 `0` 的行）；适配器必须产出同样的文本作行 id，所以原始文件不用先转成 OneJev 行。已有的 `--out` 内容不同就拒绝覆盖。
 - **holdout**：只接受一个训练文件，`--frac` 是 val 的比例，`--out` 是**目录**（像 `.json` 文件名的 `--out` 会报错）。写出：
   - `<out>/train.jsonl`、`<out>/val.jsonl`：原样复制的行，保持源文件顺序，每行一个 JSON 对象（csv/tsv 的单元格转成 JSON 值）；不加也不改 id，适配器用同一套规则读这两个文件；
   - `<out>/manifest.json`：`{"mode": "holdout", "source", "source_sha256", "group", "seed", "frac", "rows": {"train", "val"}, "groups": {"train": [...], "val": [...]}, "sha256": {"train.jsonl", "val.jsonl"}}`。
