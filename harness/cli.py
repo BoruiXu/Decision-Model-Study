@@ -8,8 +8,8 @@ from pathlib import Path
 
 import yaml
 
-from harness import (cleanup, fetch_base, finalize, gpu, launch, onejev, prepare, registry, report_eval,
-                     resolve, runner, status)
+from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, onejev, prepare, registry,
+                     report_eval, resolve, runner, status)
 from harness.catalog import ROOT, sha256_file
 from harness.config import ConfigError, check_writable, load_experiment, load_machine
 from harness.gpu import GpuWaitTimeout
@@ -17,7 +17,7 @@ from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
 from harness.resolve import Infeasible
 
-KNOWN = (ConfigError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout, Infeasible)
+KNOWN = (FileNotFoundError, ConfigError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout, Infeasible)
 REFUSALS = (TestSplitRefused, ReportRefused, Infeasible)
 
 
@@ -41,6 +41,12 @@ def _fetch_patch(lock: dict, dest: Path) -> Path:
     if sha256_file(dest) != spec["sha256"]:
         raise ConfigError(f"Unexpected SHA-256 for {dest}")
     return dest
+
+
+def cmd_inspect(a) -> int:
+    report = inspect_data.inspect_path(a.path, rows=a.rows)
+    print(json.dumps(report, indent=2, ensure_ascii=False, default=str) if a.json else inspect_data.render(report))
+    return 0
 
 
 def cmd_setup(a) -> int:
@@ -162,6 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
         s.set_defaults(fn=fn)
         return s
 
+    s = cmd("inspect", cmd_inspect, "read-only facts about data files (no decisions, writes nothing)")
+    s.add_argument("path", help="a data file or a directory")
+    s.add_argument("--json", action="store_true", help="print the full report as JSON")
+    s.add_argument("--rows", type=int, default=3, help="sample rows per file (default 3)")
     s = cmd("setup", cmd_setup, "fetch OneJev and the patch, verify sha256")
     s.add_argument("--machine", required=True)
     s = cmd("fetch-base", cmd_fetch_base, "download a catalog base model and verify it")
