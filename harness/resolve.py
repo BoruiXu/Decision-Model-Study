@@ -350,15 +350,17 @@ def _alternatives(alt: _Alt, cards: list[dict], machine: MachineConfig, need: fl
         listed = ", ".join(f"GPU {c['index']} ({c['free_mib']} MiB free)" for c in same)
         out.append(f"the same run on cards that pass now ({listed}): "
                    f"{_command(alt, alt.base['name'], same[:alt.n], alt.recipe)}")
-    for k in range(alt.n - 1, 0, -1) if requested else ():
+    pool = requested if alt.explicit else cards  # explicit: a subset of the requested cards; scan: any of them
+    for k in range(alt.n - 1, 0, -1) if pool else ():
         try:
             par = parallel_for(alt.mode, p, k, alt.recipe_fsdp)
         except Infeasible:
             continue
         need_k = estimate_gib(p, alt.mode, k, par == "fsdp")
-        ok = _usable(requested, machine, need_k, alt)
+        ok = _usable(pool, machine, need_k, alt)
         if len(ok) >= k:
-            out.append(f"fewer cards: {k} of the requested cards ({par}, ~{need_k:.0f} GiB/card): "
+            which = "of the requested cards" if alt.explicit else "cards"
+            out.append(f"fewer cards: {k} {which} ({par}, ~{need_k:.0f} GiB/card): "
                        f"{_command(alt, alt.base['name'], ok[:k], alt.recipe)}")
             break
     if alt.mode == "full":

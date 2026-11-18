@@ -427,3 +427,18 @@ def test_scan_resolve_leaves_min_free_mib_to_the_runners_wait(tmp_path):
     lock = yaml.safe_load(resolve(exp, machine, query=lambda uuid=None: smi(1, free_mib=40000),
                                   plan_runner=plan_ok(10, 1), fingerprint=fake_fp).read_text())
     assert lock["feasibility"]["checked"] is True and lock["feasibility"]["min_free_gib"] == 39.1
+
+
+@pytest.mark.parametrize("base,recipe,need", [("mammoth-1", "mammoth_lora_ddp", 62), ("elephant-1", "elephant_full_fsdp", 48)])
+def test_scan_alternatives_try_fewer_cards(tmp_path, base, recipe, need):
+    exp, machine = setup(tmp_path, base=base, recipe=recipe)
+    cards = "".join(f"{i}, GPU-{i}, NVIDIA A100-SXM4-80GB, {f}\n" for i, f in enumerate((81920, 81920, 81920, 20480)))
+    with pytest.raises(Infeasible) as e:  # 4 cards wanted, one of them has only 20 GiB free
+        resolve(exp, machine, query=lambda uuid=None: cards, plan_runner=plan_ok(10, 4), fingerprint=fake_fp,
+                source=str(tmp_path / "exp.yaml"))
+    alts = e.value.alternatives
+    fewer = [a for a in alts if a.startswith("fewer cards")]
+    assert len(fewer) == 1 and f"~{need} GiB/card" in fewer[0]
+    assert f"set gpus: 3 in {tmp_path / 'exp.yaml'}, then `ojh run {tmp_path / 'exp.yaml'} --base {base} " \
+           f"--recipe examples/recipes/{recipe}.yaml`" in fewer[0]
+    assert not any(a.startswith("nothing else passes") for a in alts)
