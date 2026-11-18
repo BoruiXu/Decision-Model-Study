@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import yaml
 
-from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, onejev, prepare, registry,
-                     report_eval, resolve, runner, status)
+from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, prepare,
+                     registry, report_eval, resolve, runner, status)
 from harness.catalog import ROOT, sha256_file
 from harness.config import ConfigError, check_writable, load_experiment, load_machine
 from harness.gpu import GpuWaitTimeout
@@ -46,6 +47,36 @@ def _fetch_patch(lock: dict, dest: Path) -> Path:
 def cmd_inspect(a) -> int:
     report = inspect_data.inspect_path(a.path, rows=a.rows)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str) if a.json else inspect_data.render(report))
+    return 0
+
+
+def _set_files(args) -> list[tuple[str, str]]:
+    out = []
+    for arg in args:
+        name, sep, path = arg.partition("=")
+        if sep and name and not os.path.exists(arg):
+            out.append((name, path))
+        else:
+            out.append((Path(arg).stem, arg))
+    return out
+
+
+def cmd_make_split(a) -> int:
+    if a.mode == "holdout":
+        if len(a.files) != 1:
+            raise ConfigError("--mode holdout takes exactly one train file")
+        manifest = make_split.holdout(a.files[0], a.out, group=a.group, seed=a.seed, frac=a.frac,
+                                      allow_test=a.allow_test)
+        print(json.dumps({"out_dir": str(Path(a.out).resolve()), "rows": manifest["rows"],
+                          "groups": {k: len(v) for k, v in manifest["groups"].items()},
+                          "sha256": manifest["sha256"]}, indent=2))
+        return 0
+    obj = make_split.select_report(_set_files(a.files), group=a.group, seed=a.seed, frac=a.frac,
+                                   allow_test=a.allow_test)
+    path = make_split.write_split_file(obj, a.out)
+    print(json.dumps({"split_file": str(path.resolve()),
+                      "sets": {k: {"rows": v["rows"], "groups": {s: len(g) for s, g in v["groups"].items()}}
+                               for k, v in obj.items()}}, indent=2))
     return 0
 
 
@@ -159,6 +190,28 @@ def cmd_cleanup(a) -> int:
     return 0
 
 
+MAKE_SPLIT_HELP = """Deterministic, group-aware splits (same inputs and seed -> same output).
+
+--mode select-report (default): for each FILE (an eval set; its name is the file stem, or NAME=PATH),
+  whole groups go to "select" or "report" so the select share is about --frac. Writes --out as the
+  data.split_file format {set: {"assignment": {id: "select"|"report"}, "seed", "frac", "group", "source",
+  "source_sha256", "rows", "groups"}}. Every row needs an "id" field: the id the adapter yields.
+  An existing --out with different content is never overwritten.
+
+--mode holdout: carve a validation part out of ONE train FILE by whole groups (about --frac of the rows go
+  to val). Writes into the directory --out:
+    train.jsonl    the remaining rows, unchanged, in source order, one JSON object per line
+    val.jsonl      the held-out rows, unchanged, in source order
+    manifest.json  {"mode": "holdout", "source", "source_sha256", "group", "seed", "frac",
+                    "rows": {"train", "val"}, "groups": {"train": [...], "val": [...]},
+                    "sha256": {"train.jsonl", "val.jsonl"}}
+  Rows are copied as read (csv/tsv cells as JSON values); no ids are added or changed, so the adapter
+  reads both files the same way and keeps its own id rule. Existing output files are never overwritten.
+
+Rows in a test* split, and files whose name looks like a test split, are refused without --allow-test.
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ojh", description="Training harness around OneJev")
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -172,6 +225,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path", help="a data file or a directory")
     s.add_argument("--json", action="store_true", help="print the full report as JSON")
     s.add_argument("--rows", type=int, default=3, help="sample rows per file (default 3)")
+    s = sub.add_parser(
+        "make-split", formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="deterministic, group-aware select/report split file or train/val holdout",
+        description=MAKE_SPLIT_HELP)
+    s.set_defaults(fn=cmd_make_split)
+    s.add_argument("files", nargs="+", metavar="FILE",
+                   help="select-report: eval files (set name = file stem, or NAME=PATH); holdout: one train file")
+    s.add_argument("--out", required=True,
+                   help="select-report: the split file to write; holdout: the output directory")
+    s.add_argument("--group", required=True, help="dotted group field; whole groups stay on one side")
+    s.add_argument("--seed", type=int, default=make_split.SEED, help=f"default {make_split.SEED}")
+    s.add_argument("--frac", type=float, default=0.5,
+                   help="select-report: select share; holdout: val share (default 0.5)")
+    s.add_argument("--mode", choices=("select-report", "holdout"), default="select-report")
+    s.add_argument("--allow-test", action="store_true", help="read test* rows and files (needs approval)")
     s = cmd("setup", cmd_setup, "fetch OneJev and the patch, verify sha256")
     s.add_argument("--machine", required=True)
     s = cmd("fetch-base", cmd_fetch_base, "download a catalog base model and verify it")
