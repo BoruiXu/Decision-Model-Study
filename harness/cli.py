@@ -9,16 +9,16 @@ from pathlib import Path
 
 import yaml
 
-from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, prepare,
-                     registry, report_eval, resolve, runner, status)
-from harness.catalog import ROOT, sha256_file
+from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, oneshot,
+                     prepare, registry, report_eval, resolve, runner, status)
+from harness.catalog import ROOT, CatalogError, sha256_file
 from harness.config import ConfigError, check_writable, find_machine, load_experiment, load_machine
 from harness.gpu import GpuUnavailable, GpuWaitTimeout
 from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
 from harness.resolve import Infeasible
 
-KNOWN = (FileNotFoundError, ConfigError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout,
+KNOWN = (FileNotFoundError, ConfigError, CatalogError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout,
          GpuUnavailable, Infeasible)
 REFUSALS = (TestSplitRefused, ReportRefused, Infeasible)
 
@@ -118,6 +118,13 @@ def cmd_resolve(a) -> int:
             print(f"  alternative: {alt}", file=sys.stderr)
         return 2
     print(path)
+    return 0
+
+
+def cmd_run(a) -> int:
+    gpus = oneshot.parse_gpus(a.gpus) if a.gpus is not None else None
+    out = oneshot.run(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine, allow_test=a.allow_test)
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -258,6 +265,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = cmd("resolve", cmd_resolve, "resolve an experiment into run.lock.yaml")
     s.add_argument("exp")
     s.add_argument("--machine", help=MACHINE_HELP)
+    s = cmd("run", cmd_run, "prepare, resolve and launch in one call; prints a JSON summary and returns at once")
+    s.add_argument("exp")
+    s.add_argument("--base", help="catalog base (overrides or fills base in the experiment; never chosen for you)")
+    s.add_argument("--gpus", help="card indices such as 0,1 (overrides or fills gpus in the experiment)")
+    s.add_argument("--recipe", help="recipe file (default: the experiment's recipe, else the base's default_recipes)")
+    s.add_argument("--machine", help=MACHINE_HELP)
+    s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
     s = cmd("launch", cmd_launch, "start a run in tmux and return at once")
     s.add_argument("lock")
     s = cmd("status", cmd_status, "short progress report of a run")
