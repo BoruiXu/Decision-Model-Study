@@ -173,13 +173,33 @@ def _default_plan_runner(lock: dict) -> str:
     return proc.stdout
 
 
+# Lists the training python's distributions without pip (a venv made by `uv venv` has none).
+_PACKAGES_SCRIPT = ("import importlib.metadata as m\n"
+                    "names = {f\"{(d.metadata['Name'] or '').lower()}=={d.version}\" for d in m.distributions()}\n"
+                    "print('\\n'.join(sorted(n for n in names if not n.startswith('=='))))")
+
+
+def installed_packages(python: str) -> list[str]:
+    """Sorted ``name==version`` of every distribution importable by ``python`` (importlib.metadata)."""
+    out = subprocess.run([python, "-c", _PACKAGES_SCRIPT], check=True, capture_output=True, text=True).stdout
+    return sorted(line for line in out.splitlines() if line.strip())
+
+
+def _driver_version() -> str | None:
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                             check=True, capture_output=True, text=True, timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out[0] if out else None
+
+
 def _fingerprint(machine: MachineConfig) -> dict:
-    freeze = subprocess.run([machine.python, "-m", "pip", "freeze"], check=True,
-                            capture_output=True, text=True).stdout
-    drv = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
-                         check=True, capture_output=True, text=True).stdout.split()
-    return {"pip_freeze_sha256": hashlib.sha256(freeze.encode()).hexdigest(),
-            "driver_version": drv[0] if drv else None}
+    """Environment fingerprint for the lock: the training python's packages (importlib.metadata, so it works
+    in a venv without pip) and the NVIDIA driver version (None without nvidia-smi)."""
+    pkgs = installed_packages(machine.python)
+    return {"packages_sha256": hashlib.sha256("\n".join(pkgs).encode()).hexdigest(), "packages": len(pkgs),
+            "packages_source": "importlib.metadata", "driver_version": _driver_version()}
 
 
 def _load_recipe(path: str) -> dict:

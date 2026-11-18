@@ -2,7 +2,8 @@
 only when probed).
 
 Checks Python and the venv, torch and CUDA, the GPUs (nvidia-smi), the pinned transformers,
-flash-linear-attention and peft, the OneJev checkout and patch hashes, tmux, the machine config, every
+flash-linear-attention and peft, the OneJev checkout and patch hashes, tmux, the machine config and the
+environment fingerprint resolve records (the machine python's packages, the driver), every
 directory the harness and setup.sh write (writable, free space) and, optionally, the Hugging Face hub.
 Every probe is injectable (``Probes``) so the checks can be tested without a GPU. A ``fail`` is blocking
 (exit code 1) and carries a hint; a ``warn`` is not blocking.
@@ -67,6 +68,12 @@ def _nvidia_smi() -> str:
                           timeout=30).stdout
 
 
+def _fingerprint(machine) -> dict:
+    from harness.resolve import _fingerprint as fp
+
+    return fp(machine)
+
+
 def _onejev() -> list[str]:
     from harness.onejev import load_lock, verify_onejev
 
@@ -113,6 +120,7 @@ class Probes:
     http: Callable[[str, float], int] = _http
     env: dict = field(default_factory=lambda: dict(os.environ))
     machine: Any = None  # (MachineConfig, origin); None: found with ``env`` like any ojh command
+    fingerprint: Callable[[Any], dict] = _fingerprint  # what resolve records in the lock
 
 
 def default_probes() -> Probes:
@@ -218,6 +226,15 @@ def run_checks(p: Probes, *, network: bool = True, timeout: float = 5.0) -> list
     except Exception as e:
         add("machine config", "fail", f"{type(e).__name__}: {e}",
             "fix the machine config, or set OJH_OUT_ROOT / OJH_MODEL_DIR outside the repo")
+    if machine is not None:
+        try:
+            fp = p.fingerprint(machine)
+            add("fingerprint", "ok", f"{fp.get('packages')} packages of {machine.python} via "
+                f"{fp.get('packages_source')}; driver {fp.get('driver_version')}")
+        except Exception as e:
+            add("fingerprint", "fail", f"cannot list the packages of {machine.python}: {type(e).__name__}: {e}",
+                f"resolve records them in the lock; {SETUP}, and point the machine config's python at "
+                "<repo>/.venv/bin/python")
 
     for label, path, blocking in _dirs(p, machine):
         free = p.disk_free(path)

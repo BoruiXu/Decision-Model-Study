@@ -26,7 +26,9 @@ def good(tmp_path, **over):
         torch_info=lambda: {"version": pins["torch"], "cuda_available": True, "cuda": "12.8", "devices": 2},
         nvidia_smi=lambda: SMI, which=lambda name: f"/usr/bin/{name}",
         onejev=lambda: [], disk_free=lambda path: 500 * 2**30, writable=lambda path: True,
-        http=lambda url, timeout: 200, env=env, machine=None)
+        http=lambda url, timeout: 200, env=env, machine=None,
+        fingerprint=lambda m: {"packages_sha256": "ab" * 32, "packages": 72, "packages_source": "importlib.metadata",
+                               "driver_version": "570.124.06"})
     return replace(p, **over)
 
 
@@ -41,7 +43,7 @@ def test_all_good_exits_zero(tmp_path):
     for n in ("python", "venv", "torch", "cuda", "gpus", "transformers", "flash-linear-attention", "peft",
               "onejev", "tmux", "machine config", "dir runs (out_root)", "dir base weights (model_dir)",
               "dir uv cache (UV_CACHE_DIR)", "dir python (UV_PYTHON_INSTALL_DIR)", "dir HF cache (HF_HOME)",
-              "dir temp (TMPDIR)", "hf hub"):
+              "dir temp (TMPDIR)", "hf hub", "fingerprint"):
         assert n in names, n
     gpus = next(c for c in checks if c.name == "gpus")
     assert "A100" in gpus.detail and "2 card" in gpus.detail
@@ -59,6 +61,7 @@ def test_all_good_exits_zero(tmp_path):
     ({"which": lambda name: None}, "tmux", "tmux"),
     ({"onejev": lambda: ["vendor/OneJev missing"]}, "onejev", "setup"),
     ({"writable": lambda path: "runs" not in str(path)}, "dir runs (out_root)", "OJH_OUT_ROOT"),
+    ({"fingerprint": lambda m: (_ for _ in ()).throw(OSError("no such python"))}, "fingerprint", "setup.sh"),
 ])
 def test_blocking_problems_fail_with_a_hint(tmp_path, over, name, hint):
     checks = doctor.run_checks(good(tmp_path, **over))
