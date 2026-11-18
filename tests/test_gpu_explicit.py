@@ -1,4 +1,5 @@
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -245,3 +246,48 @@ def test_resolve_with_a_failed_process_query(tmp_path):
         resolve(exp, m, query=query, apps_query=broken, plan_runner=plan_ok(10, 1), fingerprint=fake_fp)
     assert "GPU 2: 9000 MiB free" in str(e.value) and "unknown" in str(e.value)
     assert not any("GPU 0 (" in a for a in e.value.alternatives)  # unknown processes: not offered as free
+
+
+def _alts(tmp_path, base, recipe, gpus, **machine_kw):
+    from harness.resolve import resolve
+    exp, m = setup(tmp_path, recipe=recipe, base=base)
+    exp.gpus = gpus
+    for k, v in machine_kw.items():
+        setattr(m, k, v)
+    with pytest.raises(Infeasible) as e:
+        resolve(exp, m, query=query, apps_query=apps, plan_runner=plan_ok(10, len(gpus)), fingerprint=fake_fp,
+                source=str(tmp_path / "exp.yaml"))
+    return e.value.alternatives
+
+
+def test_alternatives_respect_min_free_mib(tmp_path):
+    # joey LoRA needs ~5 GiB and GPU 2 has 9000 MiB, but the machine wants 75000 MiB free on a card: the old
+    # message said "cards with >= 5 GiB free (the best requested card has 9 GiB)"
+    alts = _alts(tmp_path, "joey-1", "joey_lora_1gpu", [2], min_free_mib=75000)
+    text = "\n".join(alts)
+    assert "cards with >=" not in text
+    now = [a for a in alts if "once the listed processes end" not in a]  # waiting is about later, not now
+    picked = {int(g) for a in now for g in re.findall(r"--gpus (\d+)", a)}
+    assert picked and all(dict(((0, 80000), (1, 70000), (2, 9000), (3, 81000)))[g] >= 75000 for g in picked)
+    assert any("GPU 2 would have enough memory once the listed processes end" in a for a in alts)
+
+
+def test_no_fsdp_suggestion_where_fsdp_does_not_apply(tmp_path):
+    # joey-1 (2B) on more cards runs DDP: each card still needs the whole model, so more cards never help
+    alts = _alts(tmp_path, "joey-1", "joey_full_1gpu", [2], min_free_mib=100000)
+    assert not any("FSDP" in a for a in alts)
+
+
+def test_every_alternative_is_a_runnable_ojh_run_line(tmp_path):
+    alts = _alts(tmp_path, "elephant-1", "elephant_full_fsdp", [3])
+    runnable = [a for a in alts if "`ojh run " in a]
+    assert len(runnable) >= 3
+    for a in runnable:
+        cmd = a.split("`ojh run ", 1)[1].split("`", 1)[0]
+        assert cmd.startswith(str(tmp_path / "exp.yaml") + " --base ") and " --gpus " in cmd and " --recipe " in cmd
+    fsdp = next(a for a in runnable if "FSDP" in a)
+    assert "--base elephant-1 --gpus 3,0 --recipe examples/recipes/elephant_full_fsdp.yaml" in fsdp
+    lora = next(a for a in runnable if "LoRA" in a)
+    assert "--gpus 3 --recipe examples/recipes/joey_lora_1gpu.yaml" in lora
+    smaller = next(a for a in runnable if "smaller base" in a)
+    assert "--base joey-1 --gpus 3 --recipe examples/recipes/joey_full_1gpu.yaml" in smaller

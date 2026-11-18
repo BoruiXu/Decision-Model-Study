@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import yaml
@@ -278,8 +278,27 @@ GENERIC_LORA = ("examples/recipes/joey_lora_1gpu.yaml", "examples/recipes/mammot
 NO_SWITCH = "ojh never switches base, recipe or training mode by itself: ask the user which option to take"
 
 
-def _lora_recipe(base: dict, n: int) -> str:
-    """The base's LoRA default recipe for ``n`` cards (else any LoRA default it has), else a generic one."""
+@dataclass
+class _Alt:
+    """What an infeasible request was, to phrase alternatives as ojh run lines that pass the same checks."""
+    base: dict
+    mode: str
+    n: int
+    recipe: str
+    recipe_fsdp: bool | None
+    exp_path: str | None
+    allow_shared: bool
+    explicit: bool  # cards given with --gpus (else scan: picked by free memory)
+
+
+def _rel(path) -> str:
+    p = os.path.abspath(str(path))
+    return os.path.relpath(p, ROOT) if p.startswith(str(ROOT) + os.sep) else p
+
+
+def _lora_recipe(base: dict, n: int) -> tuple[str, str]:
+    """(recipe path, note): the base's LoRA default for ``n`` cards (else any LoRA default it has), else a
+    generic LoRA recipe."""
     from .catalog import parse_gpu_range
     lora = []
     for key, path in (base.get("default_recipes") or {}).items():
@@ -289,82 +308,118 @@ def _lora_recipe(base: dict, n: int) -> str:
             lora.append((not (lo <= n and (hi is None or n <= hi)), path, key))
     if lora:
         _, path, key = sorted(lora)[0]
-        return f"{path} (the base's default for {key} GPU(s))"
-    return f"{GENERIC_LORA[0] if n == 1 else GENERIC_LORA[1]} (generic; its hyperparameters are not measured for " \
-           f"{base['name']})"
+        return path, f"the base's default for {key} GPU(s)"
+    return (GENERIC_LORA[0] if n == 1 else GENERIC_LORA[1],
+            f"a generic recipe; its hyperparameters are not measured for {base['name']}")
 
 
-def _memory_alternatives(base: dict, mode: str, n: int, parallel: str, need: float, free: float) -> list[str]:
-    """Concrete options when ``need`` GiB per card does not fit in ``free`` GiB: more cards (full FSDP),
-    LoRA (the base's LoRA recipe or a generic one), smaller bases that fit. Never applied automatically."""
-    from .catalog import CATALOG_DIR
-    p, alts = base["params_b"], []
-    if mode == "full":
-        total = p * FULL_BYTES_PER_PARAM
-        k = math.ceil(total / free) if free > 0 else None
-        if k is not None and k > n:
-            alts.append(f"more GPUs: full FSDP over {k} cards needs ~{total / k:.0f} GiB/card "
-                        f"(cards with >= {total / k:.0f} GiB free each)")
-        lora = estimate_gib(p, "lora", n, False)
-        alts.append(f"LoRA (a different training mode): {_lora_recipe(base, n)} needs ~{lora:.0f} GiB/card on "
-                    f"{n} card(s)" + ("" if lora <= free else f" (still above the {free:.0f} GiB free)")
-                    + "; only with the user's consent, via --recipe")
-    else:
-        alts.append(f"cards with >= {need:.0f} GiB free each (the best requested card has {free:.0f} GiB)")
+def _usable(cards: list[dict], machine: MachineConfig, need_gib: float, alt: _Alt) -> list[dict]:
+    """Cards that would pass the checks for ``need_gib`` per card: allowed by gpu_include/gpu_exclude, at least
+    max(need, min_free_mib) free and, for explicit cards, no other process unless --allow-shared. Most free
+    first."""
+    floor = max(math.ceil(need_gib * 1024), machine.min_free_mib)
+    ok = [c for c in cards if c["index"] not in machine.gpu_exclude
+          and (machine.gpu_include is None or c["index"] in machine.gpu_include)
+          and c["free_mib"] >= floor
+          and (not alt.explicit or alt.allow_shared or c.get("processes") == [])]
+    return sorted(ok, key=lambda c: (-c["free_mib"], c["index"]))
+
+
+def _command(alt: _Alt, base: str, cards: list[dict], recipe, shared: bool = False) -> str:
+    exp = alt.exp_path or "<exp.yaml>"
+    if alt.explicit:
+        flag = " --allow-shared" if shared or alt.allow_shared else ""
+        return (f"`ojh run {exp} --base {base} --gpus {','.join(str(c['index']) for c in cards)} "
+                f"--recipe {_rel(recipe)}{flag}`")
+    cmd = f"`ojh run {exp} --base {base} --recipe {_rel(recipe)}`"
+    return cmd if len(cards) == alt.n else f"set gpus: {len(cards)} in {exp}, then {cmd}"
+
+
+def _alternatives(alt: _Alt, cards: list[dict], machine: MachineConfig, need: float) -> list[str]:
+    """Options that pass the same checks on the cards as they are now, each with its ojh run line: the same
+    run on other cards, more cards where FSDP applies, LoRA, smaller catalog bases with a default recipe."""
+    from .catalog import CATALOG_DIR, CatalogError, default_recipe
+    p, out = alt.base["params_b"], []
+    same = _usable(cards, machine, need, alt)
+    if len(same) >= alt.n:
+        listed = ", ".join(f"GPU {c['index']} ({c['free_mib']} MiB free)" for c in same)
+        out.append(f"the same run on cards that pass now ({listed}): "
+                   f"{_command(alt, alt.base['name'], same[:alt.n], alt.recipe)}")
+    if alt.mode == "full":
+        for k in range(alt.n + 1, len(cards) + 1):
+            if parallel_for("full", p, k, alt.recipe_fsdp) != "fsdp":
+                continue  # DDP keeps a whole model per card: more cards would not lower the need
+            need_k = estimate_gib(p, "full", k, True)
+            ok = _usable(cards, machine, need_k, alt)
+            if len(ok) >= k:
+                out.append(f"more GPUs: full FSDP over {k} cards needs ~{need_k:.0f} GiB/card: "
+                           f"{_command(alt, alt.base['name'], ok[:k], alt.recipe)}")
+                break
+        rpath, note = _lora_recipe(alt.base, alt.n)
+        lora = estimate_gib(p, "lora", alt.n, False)
+        ok = _usable(cards, machine, lora, alt)
+        if len(ok) >= alt.n:
+            out.append(f"LoRA, a different training mode ({rpath}: {note}), needs ~{lora:.0f} GiB/card; only with "
+                       f"the user's consent: {_command(alt, alt.base['name'], ok[:alt.n], ROOT / rpath)}")
     smaller = []
-    for path in sorted(CATALOG_DIR.glob("*.yaml")):
+    for path in CATALOG_DIR.glob("*.yaml"):
         b = yaml.safe_load(path.read_text())
         if b["params_b"] >= p:
             continue
-        par = parallel_for(mode, b["params_b"], n, None) if mode == "full" else "ddp"
-        est = estimate_gib(b["params_b"], mode, n, par == "fsdp")
-        if est <= free:
-            smaller.append((b["params_b"], f"{b['name']} (~{est:.0f} GiB/card)"))
-    alts.append("smaller base: " + (", ".join(x for _, x in sorted(smaller, reverse=True))
-                                    if smaller else f"none of the catalog bases fits {free:.0f} GiB per card"))
-    alts.append(NO_SWITCH)
-    return alts
+        try:
+            recipe = default_recipe(b["name"], alt.n)
+            r = yaml.safe_load(Path(recipe).read_text()) or {}
+            par = parallel_for(r.get("mode"), b["params_b"], alt.n, r.get("fsdp"))
+        except (CatalogError, Infeasible):
+            continue  # no default recipe for this card count: not runnable as given
+        need_b = estimate_gib(b["params_b"], r.get("mode"), alt.n, par == "fsdp")
+        ok = _usable(cards, machine, need_b, alt)
+        if len(ok) >= alt.n:
+            smaller.append((-b["params_b"], f"smaller base {b['name']} ({r.get('mode')}, ~{need_b:.0f} GiB/card): "
+                                           f"{_command(alt, b['name'], ok[:alt.n], recipe)}"))
+    out += [x for _, x in sorted(smaller)]
+    if not out:
+        out.append("nothing else passes the checks on this machine now: wait for cards to free up, or use "
+                   "another machine")
+    return out + [NO_SWITCH]
 
 
-def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=False, ctx=None) -> dict:
+def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=False, alt=None) -> dict:
     need_mib = math.ceil(need * 1024)
     try:
         cards = check_explicit(machine, explicit, need_mib, query=query, apps_query=apps_query,
                                allow_shared=allow_shared)
     except GpuUnavailable as e:
         floor = max(need_mib, machine.min_free_mib)
-        good = [c for c in e.cards if c["free_mib"] >= floor and c["index"] not in explicit
-                and (allow_shared or c["processes"] == [])
-                and c["index"] not in machine.gpu_exclude
-                and (machine.gpu_include is None or c["index"] in machine.gpu_include)]
-        alts = [("other cards with enough free memory and no other process now: "
-                 + ", ".join(f"GPU {c['index']} ({c['name']}, {c['free_mib']} MiB free)" for c in good))
-                if good else f"no other card has {floor} MiB free and no other process now"]
         by_index = {c["index"]: c for c in e.cards}
-        if any(r.startswith("shared with") for r in e.reasons.values()):
-            alts.append("ask the user whether the run may share the card(s) with the processes listed; only if "
-                        "they agree, run again with --allow-shared (or wait until those processes end)")
-        short = [by_index[i] for i, r in e.reasons.items() if "MiB needed" in r and i in by_index]
-        for c in short:  # waiting helps only when the card would hold the run without the other processes
-            if c["processes"] and c["free_mib"] + sum(x["used_mib"] or 0 for x in c["processes"]) >= floor:
-                alts.append(f"GPU {c['index']} would have enough memory once the listed processes end "
-                            "(they are not ours: wait, or ask their owner)")
-        if short and ctx is not None:
-            free = min(c["free_mib"] for c in (by_index[i] for i in explicit if i in by_index)) / 1024
-            alts += _memory_alternatives(*ctx, need, free)
-        else:
-            alts.append(NO_SWITCH)
+        requested = [by_index[i] for i in explicit if i in by_index]
+        alts = []
+        for i, r in e.reasons.items():
+            c = by_index.get(i)
+            if c is None or alt is None:
+                continue
+            if r.startswith("shared with"):
+                alts.append(f"only if the user agrees (ask the user) to share GPU {i} with the processes listed: "
+                            f"{_command(alt, alt.base['name'], requested, alt.recipe, shared=True)}")
+            elif "MiB needed" in r and c["processes"] and \
+                    c["free_mib"] + sum(x["used_mib"] or 0 for x in c["processes"]) >= floor:
+                alts.append(f"GPU {i} would have enough memory once the listed processes end (they are not ours: "
+                            f"wait, or ask their owner), then: {_command(alt, alt.base['name'], requested, alt.recipe)}")
+        alts += _alternatives(alt, e.cards, machine, need) if alt is not None else [NO_SWITCH]
         raise Infeasible(str(e), alts) from None
     return {"checked": True, "need_gib_per_card": round(need, 1), "need_mib_per_card": cards[0]["need_mib"],
             "min_free_gib": round(min(c["free_mib"] for c in cards) / 1024, 1), "cards": cards}
 
 
 def _check_feasible(machine, base, mode, n, parallel, query, explicit=None,
-                    apps_query=_nvidia_smi_apps, allow_shared=False) -> tuple[float, dict]:
+                    apps_query=_nvidia_smi_apps, allow_shared=False, alt_info=None) -> tuple[float, dict]:
     need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
+    info = alt_info or {}
+    alt = _Alt(base=base, mode=mode, n=n, recipe=info.get("recipe") or "", recipe_fsdp=info.get("recipe_fsdp"),
+               exp_path=info.get("exp_path"), allow_shared=allow_shared, explicit=explicit is not None)
     if explicit is not None:
         return need, _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared,
-                                        (base, mode, n, parallel))
+                                        alt if alt.recipe else None)
     cards, why = _candidate_cards(machine, n, query)
     if cards is None:
         return need, {"checked": False, "reason": why}
@@ -374,10 +429,11 @@ def _check_feasible(machine, base, mode, n, parallel, query, explicit=None,
                          [f"wait or free cards (or relax gpu_include/gpu_exclude)",
                           f"use fewer GPUs (gpus: {len(chosen)})" if chosen else "use another machine"])
     free = min(g.free_mib for g in chosen) / 1024
-    if need <= free:
+    if need <= free and min(g.free_mib for g in chosen) >= machine.min_free_mib:
         return need, {"checked": True, "need_gib_per_card": round(need, 1), "min_free_gib": round(free, 1),
                       "cards": [g.uuid for g in chosen]}
-    alts = _memory_alternatives(base, mode, n, parallel, need, free)
+    listed = [{"index": g.index, "free_mib": g.free_mib, "processes": None} for g in cards]
+    alts = _alternatives(alt, listed, machine, need) if alt.recipe else [NO_SWITCH]
     raise Infeasible(f"{mode} of {base['name']} on {n} GPU(s) ({parallel}) needs ~{need:.0f} GiB/card; "
                      f"the best {n} candidate cards have {free:.0f} GiB free", alts)
 
@@ -543,8 +599,9 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
     lock["plan"] = {"steps": steps, "ranks": ranks, "interval": interval}
     lock["fingerprint"] = (fingerprint or (lambda: _fingerprint(machine)))()
     if check_gpus:
-        _, lock["feasibility"] = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query,
-                                                 allow_shared)
+        _, lock["feasibility"] = _check_feasible(
+            machine, base, mode, n, parallel, query, explicit, apps_query, allow_shared,
+            {"recipe": exp.recipe, "recipe_fsdp": recipe.get("fsdp"), "exp_path": source})
     else:
         lock["feasibility"] = {"checked": False, "reason": "cards not checked (ojh check)"}
     return lock, afile

@@ -124,7 +124,11 @@ def test_mammoth_full_infeasible_lists_lora(tmp_path):
     with pytest.raises(Infeasible) as e:
         run(exp, machine)
     alts = " ".join(e.value.alternatives)
-    assert "lora" in alts.lower() and "GPUs" in alts and "smaller base" in alts
+    # 4 cards of 80 GiB: no FSDP spread fits (that needs more cards than there are); LoRA and a smaller base do,
+    # each given as an ojh run line (scan mode: the experiment's gpus count stays)
+    assert "LoRA" in alts and "--recipe examples/recipes/mammoth_lora_ddp.yaml" in alts
+    assert "smaller base elephant-1" in alts and "--base elephant-1 --recipe examples/recipes/elephant_full_fsdp.yaml" in alts
+    assert "FSDP over" not in alts
 
 
 def test_lora_override_makes_mammoth_feasible(tmp_path):
