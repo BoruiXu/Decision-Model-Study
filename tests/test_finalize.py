@@ -563,3 +563,26 @@ def test_run_card_states_the_gate_rule(tmp_path):
     finalize(run_dir, scorer=FakeScorer(), merger=no_merger)
     section = (run_dir / "RUN_CARD.md").read_text().split("## 门", 1)[1].split("\n## ", 1)[0]
     assert "没有任何对照基线" in section and "全部被去掉" in section and "不通过" in section
+
+
+def test_runs_prepared_with_the_old_noul_criteria_still_finalize_and_report(tmp_path, monkeypatch):
+    """Before the noul check, the docs prescribed criteria {yes, no}; such runs must keep working."""
+    import harness.prepare as prep
+    from harness import report_eval
+    old_mk = mk
+
+    def legacy_mk(*a, **k):
+        r = old_mk(*a, **k)
+        r["question"]["criteria"] = {"yes": "y", "no": "n"}
+        return r
+    monkeypatch.setattr(sys.modules[__name__], "mk", legacy_mk)
+    monkeypatch.setattr(prep, "NOUL_CRITERIA", ("true", "false", "yes", "no"))  # the rule when it was prepared
+    run_dir, lock = make_run(tmp_path)
+    monkeypatch.setattr(prep, "NOUL_CRITERIA", ("true", "false"))  # today's rule
+    out = finalize(run_dir, scorer=FakeScorer())
+    assert out["status"] == "done", out["failures"]
+    def any_rows(model_dir, rows, **kw):
+        return {r["id"]: {"id": r["id"], "labels": ["yes", "no"], "probs": [0.7, 0.3], "target": [1.0, 0.0]}
+                for r in rows}
+    rep = report_eval.run(run_dir, allow_report=True, scorer=any_rows)
+    assert rep["sets"]["pooled_report"]["questions"] == 30

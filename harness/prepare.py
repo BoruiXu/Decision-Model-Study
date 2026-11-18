@@ -66,7 +66,10 @@ def _labels(qtype, criteria) -> list[str] | None:
     return None
 
 
-def validate_rows(rows: list[dict]) -> list[str]:
+def validate_rows(rows: list[dict], *, check_criteria: bool = True) -> list[str]:
+    """Schema errors of OneJev rows. ``check_criteria=False`` skips the noul criteria-key check: it is
+    enforced when data is prepared, not when finalize or eval-report rebuild the eval rows of a run
+    prepared before the check existed."""
     errors: list[str] = []
     seen: set = set()
     for i, r in enumerate(rows):
@@ -86,7 +89,8 @@ def validate_rows(rows: list[dict]) -> list[str]:
         if labels is None:
             errors.append(f"{rid}: unknown question type {qtype!r}")
             continue
-        if qtype == "noul" and crit is not None and (not isinstance(crit, dict) or not set(crit) <= set(NOUL_CRITERIA)):
+        if check_criteria and qtype == "noul" and crit is not None and (
+                not isinstance(crit, dict) or not set(crit) <= set(NOUL_CRITERIA)):
             got = sorted(crit) if isinstance(crit, dict) else type(crit).__name__
             errors.append(f"{rid}: noul question.criteria keys are true/false (the descriptions of the yes and the "
                           f"no answer; OneJev ignores other keys); got criteria keys {got}. Target keys stay yes/no")
@@ -154,7 +158,9 @@ def read_eval(data: DataSpec, name: str, path) -> list[dict]:
     return _read(data.adapter, path, eval_args(data, name))
 
 
-def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> EvalParts:
+def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False, check_criteria: bool = True) -> EvalParts:
+    """Select/report parts of the eval sets. finalize and eval-report pass ``check_criteria=False``: they
+    rebuild the rows of an existing run, which was validated when it was prepared."""
     data = exp.data
     assignments: dict = {}
     if data.split_file:
@@ -183,7 +189,7 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> Eval
             dropped += sorted(label_ids - set(ref))
         sel: list[dict] = []
         errs = validate_rows([r for r in labels if assign.get(r["id"]) == "select"
-                              and (ref is None or r["id"] in ref)])
+                              and (ref is None or r["id"] in ref)], check_criteria=check_criteria)
         if errs:
             raise ValueError(f"invalid select rows in eval set {name!r}:\n" + "\n".join(errs[:20]))
         reports: list[str] = []

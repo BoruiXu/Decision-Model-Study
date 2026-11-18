@@ -65,7 +65,7 @@ def run(run_dir, *, allow_report: bool, seed=None, allow_test: bool = False, sco
     exp = exp_from_lock(lock)
     fields = exp.fields
     allow_test = bool(allow_test or lock.get("allow_test"))  # a run prepared with --allow-test keeps it
-    parts = build_eval_parts(exp, allow_test=allow_test)
+    parts = build_eval_parts(exp, allow_test=allow_test, check_criteria=False)  # validated at prepare
     rows, owner = [], {}
     for name, spec in exp.data.eval.items():
         wanted = set(parts.report_ids.get(name, []))

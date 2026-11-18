@@ -339,7 +339,8 @@ def finalize(run_dir, *, scorer=score_checkpoint, merger=merge_lora, devices: li
     run_failures: list[str] = []
 
     bad_adapter = adapter_problem(lock)
-    parts = None if bad_adapter else build_eval_parts(exp, allow_test=bool(lock.get("allow_test")))
+    parts = None if bad_adapter else build_eval_parts(exp, allow_test=bool(lock.get("allow_test")),
+                                                      check_criteria=False)
     dropped = {"eval_parts": parts.dropped if parts is not None else {}}
     changed = data_changes(lock)
     if bad_adapter:
