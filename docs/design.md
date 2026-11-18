@@ -437,13 +437,13 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
 只读，不写任何文件，不做判断。`<path>` 是文件或目录（目录递归，跳过隐藏项）。支持 jsonl、json、csv、tsv；装了 pyarrow 时也读 parquet，否则列进 `skipped`。每个文件（`--json` 的键）：
 
 - `type`、`size_bytes`、`rows`；`name_hint`：文件名里的 train/training/val/valid/validation/dev/test/eval；
-- `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格能解析成数就按数统计，空单元格算缺失；
+- `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格在文本不变时（没有前导零、没有 `+`）才按数统计，id 类列（id、uid、`*_id` 等）一律保持字符串，空单元格算缺失；jsonl、csv、tsv 逐行流式读取；读不了的文件（非 UTF-8 等）在该文件下给出 `error`，其余文件照常；
 - `split_columns`：名字像 split（split、set、fold、partition 等）或取值都像 split 名的低基数字段，及各取值的行数；
 - `split_file`：JSON 形如 `{集: {"assignment": {id: "select"|"report"}}}` 时，各集的 select/report 数；
 - `onejev`：`passes`、`errors`、`first_errors`，用 `prepare.validate_rows` 检查是否已是 OneJev 行；
 - `samples`：前 N 行（默认 3），字符串截到 200 字符，列表截到 5 项。
 
-文件名像 test 的文件只数行数（`note` 说明），不读字段和样例；样例从不取 test 开头的 split 的行（`test_rows` 给出这种行的数量）。
+test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用）：所查目录之下任何一级目录名或文件名（以及所查目录本身的名字）以 test 开头（不分大小写）的文件，只数行数（`note` 说明）；行里任何 split 类的键（split、set、subset、partition、fold 等，不分大小写，任意字典深度）或取值像 split 名的列，值以 test 开头的行，在统计字段、取值、样例和 schema 检查之前去掉，只在 `split_columns` 里计数，`test_rows` 给出行数。
 
 ### `ojh make-split`
 
@@ -457,7 +457,7 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
   - `<out>/manifest.json`：`{"mode": "holdout", "source", "source_sha256", "group", "seed", "frac", "rows": {"train", "val"}, "groups": {"train": [...], "val": [...]}, "sha256": {"train.jsonl", "val.jsonl"}}`。
 
   实验配置里 `data.train` 指 `<out>/train.jsonl`，`data.eval.val.train_labels` 指 `<out>/val.jsonl`；不写 `split_file` 时 val 全部算 select。已存在的输出文件不覆盖。
-- split 以 test 开头的行、文件名像 test 的文件，都要 `--allow-test` 才读。
+- test 数据（规则同上；没有所查目录时看文件名和它所在目录的名字）都要 `--allow-test` 才读。
 
 ### `ojh run <exp.yaml> --base <名字> --gpus <i,j,...> [--recipe <路径>] [--machine <m.yaml>] [--allow-test]`
 
@@ -481,7 +481,7 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
 
 ### 适配器
 
-`data.adapter` 可以是 `adapters/` 里的模块名，也可以是 `.py` 文件路径（相对实验配置文件）。参数：`data.adapter_args`（所有文件）、`data.train_adapter_args`（训练文件）、`data.eval.<集>.adapter_args`（该评测集的文件），后两者合并在前者之上，以 `adapt(path, **args)` 传入；这样一个带 split 列的文件可以同时作训练和评测来源。适配器给训练行设 `split: "train"`（配方用 `--split train`）。prepare 在 `prepared.json` 记下适配器文件的 sha256 和参数；resolve 发现适配器在 prepare 之后改过就报错，把 sha256 和参数写进 lock，并把文件复制到 `<run>/adapter/`；`RUN_CARD.md` 和 `RESULT.md` 写明适配器和 sha256。确定性检查不变。
+`data.adapter` 可以是 `adapters/` 里的模块名，也可以是 `.py` 文件路径（相对实验配置文件）。参数：`data.adapter_args`（所有文件）、`data.train_adapter_args`（训练文件）、`data.eval.<集>.adapter_args`（该评测集的文件），后两者合并在前者之上，以 `adapt(path, **args)` 传入；这样一个带 split 列的文件可以同时作训练和评测来源。适配器给训练行设 `split: "train"`（配方用 `--split train`）。prepare 在 `prepared.json` 记下适配器文件的 sha256 和参数；resolve 发现适配器文件或参数在 prepare 之后改过就报错，把 sha256 和参数写进 lock，并把文件复制到 `<run>/adapter/`；finalize 和 eval-report 用这份副本读评测标签，副本缺失或 sha256 和 lock 不符时拒绝（finalize 记为失败，eval-report 报错）；`RUN_CARD.md` 和 `RESULT.md` 写明适配器和 sha256。确定性检查不变。
 
 ### 实验配置模板
 
@@ -494,7 +494,7 @@ finalize 最后写进 run 目录（`result.json` 是机器可读的同一份内�
 - 数据：各部分行数（train、select 及各评测集、report）、训练和参照标签版本、sha256、适配器；
 - 基座、配方（lock 记下配方路径和 sha256）、卡和训练墙钟时间、GPU 时间；
 - 训练曲线（每次评测的 select NLL），选中的 step、checkpoint 和 sha256、复评 NLL；
-- select 合并集上的指标表：模型、每个基线、全选正类、oracle 的 AUC、组内 AUC、各预算下的承接率（带 95% bootstrap 置信区间）和各自最佳阈值下的 Jaccard；
+- select 合并集上的指标表，以及每个评测集 select 部分的同样的表：模型、每个基线、全选正类、oracle 的 AUC、组内 AUC、各预算下的承接率（带 95% bootstrap 置信区间）和各自最佳阈值下的 Jaccard；
 - 锁定的阈值：合并集和各评测集上的承接率、Jaccard、不一致率；
 - 门的结论和逐项理由（模型对最好基线的比较）；失败项、警告（被去掉的 id、未见过的组、select 太少、按题 bootstrap、读了 test、override、门关闭、推断的机器配置）；
 - 下一步命令：`ojh note`、`ojh eval-report --allow-report`、`ojh cleanup`、`ojh cleanup --confirm`，读 report 和删除的两条标明要用户批准。
@@ -503,7 +503,7 @@ finalize 最后写进 run 目录（`result.json` 是机器可读的同一份内�
 
 ### Bootstrap 置信区间
 
-评测器对 AUC、组内 AUC 和各预算下的承接率给出 95% 置信区间（2.5 和 97.5 百分位）：每次重抽先有放回地抽与组数相同个组，再在每个抽到的组里有放回地抽与组大小相同条题；同一组被抽到两次算两个簇（组内 AUC 不跨簇配对）。同一评测集的所有方法用同一组重抽，区间可以成对比较。默认 1000 次、种子 20261115，`evaluator.bootstrap_reps`、`evaluator.bootstrap_seed` 可改，0 关闭。没有分组字段时按题重抽，并在结果里写明。计算用向量化实现，测试核对它与第 10 节移植的 v1 函数一致。
+评测器对 AUC、组内 AUC 和各预算下的承接率给出 95% 置信区间（2.5 和 97.5 百分位）：每次重抽先有放回地抽与组数相同个组，再在每个抽到的组里有放回地抽与组大小相同条题；同一组被抽到两次算两个簇（组内 AUC 不跨簇配对）。同一评测集的所有方法用同一组重抽，区间可以成对比较。默认 1000 次、种子 20261115，`evaluator.bootstrap_reps`、`evaluator.bootstrap_seed` 可改，0 关闭。某次重抽里指标无定义（只有一类）时跳过，按指标记下跳过的次数（`ci95_skipped`），结果页写在区间后面。没有分组字段时按题重抽，并在结果里写明。计算用向量化实现，测试核对它与第 10 节移植的 v1 函数一致。
 
 ### 基线插件
 
