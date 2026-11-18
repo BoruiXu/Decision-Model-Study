@@ -26,14 +26,16 @@
 export OJH_HOME=/big/disk/ojh              # 1. 一块大盘上的目录（不要放在 /home）
 mkdir -p "$OJH_HOME" && cp examples/env.example.sh "$OJH_HOME/ojh-env.sh"
                                             #    把文件里 OJH_HOME 那一行改成同一个目录
-source $OJH_HOME/ojh-env.sh                 #    每个要跑 ojh 的 shell 都先 source 一次（文件和数据放在一起，不占 home）
+source /big/disk/ojh/ojh-env.sh             #    之后每个要跑 ojh 的 shell 都用完整路径 source 一次
 bash setup.sh --dry-run                     # 2. 先看计划：每个目录放在哪、剩余空间、要做哪些步骤（什么都不改）
 bash setup.sh                               #    再执行；重跑会跳过已完成的步骤
 <repo>/.venv/bin/ojh doctor                 # 3. 只读检查：Python、torch/CUDA、GPU、依赖版本、OneJev、tmux、各目录、HF hub
 <repo>/.venv/bin/ojh fetch-base joey-1      # 4. 下载固定 revision 的基座权重并校验（到 OJH_MODEL_DIR）
 ```
 
-在 A100 节点（Ubuntu 22.04，系统 Python 3.10，无 conda）上从零跑完约 4 分钟，重跑约 1 秒；`/home` 下不写任何文件。`setup.sh` 的五步：① uv，版本固定（`setup.sh` 里的 `UV_VERSION`，现在是 0.13.9）：PATH 上的 uv 正好是这个版本才用，否则用 `UV_UNMANAGED_INSTALL` 把固定版本装到 `$OJH_TOOLS_DIR/uv`（不改 shell 配置文件，不往 `~/.local/bin` 放东西）；② `uv python install 3.11` 到 `$UV_PYTHON_INSTALL_DIR`；③ `uv venv` 建 `.venv`（`OJH_VENV` 在别处时，`<repo>/.venv` 是指向它的符号链接）；④ 先从 CUDA 12.8 的 wheel 源装 `torch==2.8.0`、`torchvision==0.23.0`，再按 `constraints.txt` 装其余固定版本，最后 `uv pip check`；⑤ `ojh setup`：拉 OneJev 到固定 revision、打 `serve.patch`、逐项校验 sha256；最后把 uv 版本、Python 版本和 torch 源写进 venv 的 `.ojh-setup.json`，`ojh resolve` 把它记进 lock 的 `fingerprint.setup`，`ojh doctor` 核对 uv 版本。已有的 Python ≥3.11 可以用 `--python <路径>` 显式指定（opt-in）；`--machine <machine.yaml>` 传给 `ojh setup`。
+在 A100 节点（Ubuntu 22.04，系统 Python 3.10，无 conda）上从零跑完约 4 分钟，重跑约 1 秒；`/home` 下不写任何文件。新开的 shell 里还没有 `OJH_HOME`：它由 `ojh-env.sh` 本身设置 `OJH_HOME`（以及其余变量），所以 source 时写文件的完整路径（上例的 `/big/disk/ojh/ojh-env.sh`），不要写 `$OJH_HOME/…`。文件和数据都在大盘上，不占 home。
+
+`setup.sh` 的五步：① uv，版本固定（`setup.sh` 里的 `UV_VERSION`，现在是 0.13.9）：PATH 上的 uv 正好是这个版本才用，否则用 `UV_UNMANAGED_INSTALL` 把固定版本装到 `$OJH_TOOLS_DIR/uv`（不改 shell 配置文件，不往 `~/.local/bin` 放东西）；② `uv python install 3.11` 到 `$UV_PYTHON_INSTALL_DIR`；③ `uv venv` 建 `.venv`（`OJH_VENV` 在别处时，`<repo>/.venv` 是指向它的符号链接）；④ 先从 CUDA 12.8 的 wheel 源装 `torch==2.8.0`、`torchvision==0.23.0`，再按 `constraints.txt` 装其余固定版本，最后 `uv pip check`；⑤ `ojh setup`：拉 OneJev 到固定 revision、打 `serve.patch`、逐项校验 sha256；最后把 uv 版本、Python 版本和 torch 源写进 venv 的 `.ojh-setup.json`，`ojh resolve` 把它记进 lock 的 `fingerprint.setup`，`ojh doctor` 核对 uv 版本。已有的 Python ≥3.11 可以用 `--python <路径>` 显式指定（opt-in）；`--machine <machine.yaml>` 传给 `ojh setup`。
 
 ### 放到大盘上
 
@@ -73,7 +75,7 @@ bash setup.sh                               #    再执行；重跑会跳过已�
 
 ### 用法约定
 
-`setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> <repo>/.venv/bin/ojh …` 调用；记录和登记表都留在 GPU 机器的 `out_root` 下。很多服务器会拒绝短时间内反复新建的 ssh 连接，所以复用一条：`ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=2h <host> …`（或写进 `~/.ssh/config`）。
+`setup.sh` 不会激活 `.venv`，所以命令要写全路径 `<repo>/.venv/bin/ojh`（或先 `source <repo>/.venv/bin/activate`）；下文的 `ojh` 都是它的简写。agent 不在 GPU 机器上时，用 `ssh <host> 'source /big/disk/ojh/ojh-env.sh && <repo>/.venv/bin/ojh …'` 调用：非交互的 ssh 不读你的 shell 配置，环境变量文件要在同一条命令里 source；记录和登记表都留在 GPU 机器的 `out_root` 下。很多服务器会拒绝短时间内反复新建的 ssh 连接，所以复用一条：`ssh -o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=2h <host> 'source /big/disk/ojh/ojh-env.sh && <repo>/.venv/bin/ojh …'`（或把这几个选项写进 `~/.ssh/config`）。
 
 机器配置可选（见下文“配置”）：不给时 `ojh` 用 `<repo>/.venv/bin/python`、输出目录 `$OJH_OUT_ROOT`（不设则 `~/ojh_runs`）、`$OJH_MODEL_DIR`（不设则 `~/.cache/onejev-harness/models`），卡由 `--gpus` 指定。输出目录和模型目录不能在 repo 里（会报 `ConfigError`）；要放到别处，设 `OJH_OUT_ROOT`/`OJH_MODEL_DIR` 或传 `--machine`。共享机器上要加锁、排除卡、禁止写某些目录时，从 `examples/machine.example.yaml` 复制一份（其中的 `python` 写 `<repo>/.venv/bin/python`）。
 

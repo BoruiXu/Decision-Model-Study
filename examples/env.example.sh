@@ -2,8 +2,9 @@
 #
 #   export OJH_HOME=/big/disk/ojh                # a big disk, not /home
 #   mkdir -p "$OJH_HOME" && cp examples/env.example.sh "$OJH_HOME/ojh-env.sh"
-#   # edit the OJH_HOME line below to the same directory, then in every shell:
-#   source $OJH_HOME/ojh-env.sh
+#   # edit the OJH_HOME line below to the same directory. This file itself sets OJH_HOME, so a new shell
+#   # (or `ssh host '... && ojh ...'`) sources it by its full path:
+#   source /big/disk/ojh/ojh-env.sh
 #   bash setup.sh                                # uv, Python 3.11, .venv, pinned packages, OneJev
 #   <repo>/.venv/bin/ojh doctor                  # read-only health check
 #

@@ -140,7 +140,7 @@ repo 里不放任何项目的机器配置、数据路径或任务规则，这些
 
 **在哪里运行**：
 - `ojh` 装在有 GPU 的机器上，在那里运行。
-- agent 不在 GPU 机器上时，用 `ssh <主机> ojh …` 调用，skill 里写明这种用法。v1 不做远程模式。
+- agent 不在 GPU 机器上时，用 `ssh <主机> 'source <环境变量文件> && <repo>/.venv/bin/ojh …'` 调用（非交互的 ssh 不读 shell 配置，所以在同一条命令里 source；连接用 ControlMaster 复用），skill 和 README 里写明这种用法。v1 不做远程模式。
 - `status` 的输出很短，通过 ssh 查看的成本很低。
 - 记录和登记表都留在 GPU 机器的 `out_root` 下。登记表路径可以配置，默认是 `<out_root>/registry.jsonl`；多人共用一份时，把它指到大家都能写的目录。
 
