@@ -6,7 +6,7 @@ optional; finalize falls back to the default when one is missing:
     validate(rows) -> list[str] | None        data errors (non-empty fails the run)   default: no check
     select_rule(events) -> int                step from the harness_eval events       default: lowest select NLL
     calibrate(preds, rows) -> dict            decision thresholds                     default: none
-    baselines(train_rows, eval_rows) -> dict  {name: metrics} on eval_rows            default: TF-IDF, group prior
+    baselines(train_rows, eval_rows) -> dict  {name: metrics} on eval_rows            default: registered baselines
     acceptance(preds, rows) -> dict           router metrics, optional "gate"         default: NLL, accuracy, ECE
 
 ``preds`` maps row id to the rescored record ``{"id", "labels", "probs", "target"}``. ``acceptance`` and
@@ -68,13 +68,13 @@ def default_acceptance(preds: dict, rows: list[dict]) -> dict:
 
 
 class DefaultBaselines:
-    """TF-IDF and group prior scored against ``fields.label`` (unlabeled rows are skipped; skipped train rows
-    are kept in ``skipped``)."""
+    """The registered baselines (``harness.baselines``) available for ``fields``, scored against
+    ``fields.label`` (unlabeled rows are skipped; skipped train rows are kept in ``skipped``)."""
 
     def __init__(self, train_rows, fields):
         self.fields = fields
         self.train, self.skipped = baseline_examples(train_rows, fields)
-        self._tfidf = None
+        self._fitted = None
 
     def _examples(self, rows):
         return baseline_examples(rows, self.fields)[0]
@@ -87,19 +87,14 @@ class DefaultBaselines:
         return out
 
     def __call__(self, train_rows, eval_rows) -> dict:
-        from harness.baselines.tfidf import TextBaseline, group_prior
+        from harness.baselines import available, predictor
 
         ex = self._examples(eval_rows)
-        out: dict = {}
         if not ex or not self.train:
-            return out
-        if self.fields.text:
-            if self._tfidf is None:
-                self._tfidf = TextBaseline(self.train)
-            out["tfidf"] = self._metrics(ex, self._tfidf.predict(ex))
-        if self.fields.group:
-            out["group_prior"] = self._metrics(ex, group_prior(self.train, ex))
-        return out
+            return {}
+        if self._fitted is None:
+            self._fitted = {b.name: b.fit(self.train) for b in available(self.fields)}
+        return {name: self._metrics(ex, predictor(m)(ex)) for name, m in self._fitted.items()}
 
 
 def _gate_of(value):

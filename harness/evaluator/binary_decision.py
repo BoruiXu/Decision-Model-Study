@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import statistics
 
-from harness.baselines.tfidf import TextBaseline, group_prior
+from harness.baselines import available, predictor
 from harness.config import get_field
 from harness.evaluator.bootstrap import LEVEL_GROUPED, LEVEL_ITEM, bootstrap_cis
 from harness.evaluator.labels import baseline_examples, label_value, num
@@ -46,26 +46,35 @@ def _beats(router, others, key) -> bool:
     return mine > max(rivals) if rivals else True
 
 
-NO_RIVAL = "no rival baseline (TF-IDF needs fields.text, the group prior fields.group; both need labeled train rows)"
+NO_RIVAL = ("no rival baseline (tfidf and length need fields.text, group_prior fields.group; all need labeled "
+            "train rows)")
+NOT_RIVALS = ("router", "all_positive", "oracle")  # every other method in a set entry is a registered baseline
+
+
+def _best(rivals: dict, key):
+    vals = [(name, m[key]) for name, m in rivals.items() if m.get(key) is not None]
+    return list(max(vals, key=lambda nv: nv[1])) if vals else None
 
 
 def _gate(set_names, sets, has_group, evaluator_cfg) -> dict:
-    """Per eval set: does the router beat every rival baseline on AUC (and within-group AUC)? A set without
-    any rival baseline, or whose select rows were all dropped, records why and fails: a gate with nothing
-    to beat cannot pass."""
+    """Per eval set: does the router beat the best available baseline on AUC (and within-group AUC)?
+    ``best`` names that baseline and its value per key. A set without any rival baseline, or whose select
+    rows were all dropped, records why and fails: a gate with nothing to beat cannot pass."""
     keys = ["auc"] + (["within_group_auc"] if has_group else [])
     gate: dict = {"enabled": bool(evaluator_cfg.gate)}
     ok = []
     for n in set_names:
         e = sets.get(n)
-        rivals = [e[k] for k in ("tfidf", "group_prior") if k in e] if e is not None else []
+        rivals = ({k: v for k, v in e.items() if isinstance(v, dict) and k not in NOT_RIVALS}
+                  if e is not None else {})
         if e is None:
             gate[n] = {"passed": False, "reason": "every select row was dropped (no label, consistency or group)"}
         elif not rivals:
             gate[n] = {"passed": False, "reason": NO_RIVAL}
         else:
-            gate[n] = {k: _beats(e["router"], rivals, k) for k in keys}
-        ok.append("reason" not in gate[n] and all(gate[n].values()))
+            gate[n] = {k: _beats(e["router"], list(rivals.values()), k) for k in keys}
+            gate[n]["best"] = {k: _best(rivals, k) for k in keys}
+        ok.append("reason" not in gate[n] and all(gate[n][k] for k in keys))
     gate["passed"] = (bool(ok) and all(ok)) if evaluator_cfg.gate else None
     return gate
 
@@ -112,7 +121,7 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
     if skipped:
         dropped[TRAIN_DROPPED] = skipped
 
-    model = TextBaseline(train) if fields.text and train else None
+    fitted = {b.name: b.fit(train) for b in available(fields)} if train else {}
     train_groups = {t["group"] for t in train} if has_group else set()
 
     reps = int(getattr(evaluator_cfg, "bootstrap_reps", 0) or 0)
@@ -125,10 +134,8 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
         if not ex:
             continue
         sc = {"router": [e["pred"] for e in ex]}
-        if model is not None:
-            sc["tfidf"] = model.predict(ex)
-        if has_group and train:
-            sc["group_prior"] = group_prior(train, ex)
+        for name, model in fitted.items():
+            sc[name] = [float(x) for x in predictor(model)(ex)]
         sc["all_positive"] = [1.0] * len(ex)
         if has_f:
             sc["oracle"] = [e["f"] for e in ex]
@@ -148,7 +155,7 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
 
     all_sets = list(dict.fromkeys(parts.select_index[r["id"]] for r in parts.select_rows))
     result: dict = {"sets": sets, "thresholds": {}, "gate": _gate(all_sets, sets, has_group, evaluator_cfg),
-                    "dropped": dropped, "tfidf_strength": model.strength if model is not None else None,
+                    "dropped": dropped, "tfidf_strength": getattr(fitted.get("tfidf"), "strength", None),
                     "bootstrap": None}
     if reps > 0:
         result["bootstrap"] = {"reps": reps, "seed": evaluator_cfg.bootstrap_seed, "ci": 0.95,

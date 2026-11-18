@@ -60,7 +60,7 @@ def test_no_group_no_prior():
     out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
     e = out["sets"]["pooled_select"]
     assert "group_prior" not in e and "within_group_auc" not in e["router"] and "groups" not in e
-    assert set(out["gate"]["a"]) == {"auc"}
+    assert set(out["gate"]["a"]) == {"auc", "best"}
 
 
 def test_gate_fails_when_router_worse():
@@ -192,7 +192,7 @@ def test_gate_fails_for_a_set_whose_rows_were_all_dropped():
         if parts.select_index[r["id"]] == "a":
             del r["meta"]["f"]
     out = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=FAST_REPS))
-    assert "a" not in out["sets"] and set(out["gate"]["b"]) == {"auc", "within_group_auc"}
+    assert "a" not in out["sets"] and set(out["gate"]["b"]) == {"auc", "within_group_auc", "best"}
     assert out["gate"]["a"]["passed"] is False and "dropped" in out["gate"]["a"]["reason"]
     assert out["gate"]["passed"] is False
     for r in parts.select_rows:

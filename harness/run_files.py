@@ -239,7 +239,8 @@ def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str
     lines += ["", "## 被去掉的 id（参照连接、未分配、评测时缺标签）"] + _dropped_lines(dropped)
     lines += ["", "## 门"]
     if ev["type"] == "binary_decision":
-        lines.append("- 规则：每个评测集上，路由器的 AUC（有分组时还有组内 AUC）都要高于 TF-IDF 和分组先验；"
+        lines.append("- 规则：每个评测集上，路由器的 AUC（有分组时还有组内 AUC）都要高于可用基线中最好的一个"
+                     "（tfidf、group_prior、length 及注册的其他基线）；"
                      "某个集没有任何对照基线，或它的 select 行全部被去掉时，门不通过（没有可比的对象不能算通过）")
     lines += [f"- seed {k}：{_gate_text(c.get('gate'))}" for k, c in comparison.items()]
     lines += ["", "## overrides"]
