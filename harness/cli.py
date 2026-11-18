@@ -73,7 +73,7 @@ def cmd_make_split(a) -> int:
                           "sha256": manifest["sha256"]}, indent=2))
         return 0
     obj = make_split.select_report(_set_files(a.files), group=a.group, seed=a.seed, frac=a.frac,
-                                   allow_test=a.allow_test)
+                                   allow_test=a.allow_test, id_field=a.id)
     path = make_split.write_split_file(obj, a.out)
     print(json.dumps({"split_file": str(path.resolve()),
                       "sets": {k: {"rows": v["rows"], "groups": {s: len(g) for s, g in v["groups"].items()}}
@@ -219,7 +219,9 @@ MAKE_SPLIT_HELP = """Deterministic, group-aware splits (same inputs and seed -> 
 --mode select-report (default): for each FILE (an eval set; its name is the file stem, or NAME=PATH),
   whole groups go to "select" or "report" so the select share is about --frac. Writes --out as the
   data.split_file format {set: {"assignment": {id: "select"|"report"}, "seed", "frac", "group", "source",
-  "source_sha256", "rows", "groups"}}. Every row needs an "id" field: the id the adapter yields.
+  "source_sha256", "rows", "groups", "id_field"}}. Ids come from --id (a dotted field, default "id") and are
+  written as text, e.g. "0007" stays "0007"; the adapter must yield that same text as each row's id, so raw
+  files (csv, chat jsonl) can be split before any conversion.
   An existing --out with different content is never overwritten.
 
 --mode holdout: carve a validation part out of ONE train FILE by whole groups (about --frac of the rows go
@@ -260,6 +262,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--out", required=True,
                    help="select-report: the split file to write; holdout: the output directory")
     s.add_argument("--group", required=True, help="dotted group field; whole groups stay on one side")
+    s.add_argument("--id", default="id", metavar="FIELD",
+                   help="select-report: dotted field holding each row's id, kept as text (default: id); the "
+                        "adapter must yield the same value as the row id. Not used by holdout")
     s.add_argument("--seed", type=int, default=make_split.SEED, help=f"default {make_split.SEED}")
     s.add_argument("--frac", type=float, default=0.5,
                    help="select-report: select share; holdout: val share (default 0.5)")

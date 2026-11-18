@@ -157,3 +157,44 @@ def test_refuses_test_like_paths(tmp_path, rel):
     with pytest.raises(TestSplitRefused):
         select_report([("x", str(p))], group="meta.cat")
     assert select_report([("x", str(p))], group="meta.cat", allow_test=True)
+
+
+def test_id_field_is_dotted_and_kept_as_text(tmp_path):
+    rs = [{"meta": {"uid": i, "cat": f"c{i % 5}"}, "x": i} for i in range(30)]
+    out = select_report([("v", write(tmp_path / "v.jsonl", rs))], group="meta.cat", id_field="meta.uid")
+    assert set(out["v"]["assignment"]) == {str(i) for i in range(30)} and out["v"]["id_field"] == "meta.uid"
+    del rs[3]["meta"]["uid"]
+    with pytest.raises(ConfigError, match="meta.uid.*--id"):
+        select_report([("v", write(tmp_path / "v.jsonl", rs))], group="meta.cat", id_field="meta.uid")
+
+
+def test_raw_csv_split_feeds_a_file_adapter_through_prepare(tmp_path, capsys):
+    import csv
+    import yaml
+    from harness.config import load_experiment
+    from harness.prepare import prepare
+    with open(tmp_path / "val.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["qid", "text", "label", "source"])
+        w.writerows([[f"{i:04d}", f"text {i}", i % 2, f"s{i % 6}"] for i in range(36)])
+    with open(tmp_path / "train.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["qid", "text", "label", "source"])
+        w.writerows([[f"t{i}", f"text {i}", i % 2, f"s{i % 6}"] for i in range(20)])
+    assert cli.main(["make-split", "--out", str(tmp_path / "splits.json"), "--group", "source", "--id", "qid",
+                     f"val={tmp_path / 'val.csv'}"]) == 0
+    assert "0007" in json.loads((tmp_path / "splits.json").read_text())["val"]["assignment"]  # not 7
+    (tmp_path / "adapter.py").write_text(
+        "import csv\n\ndef adapt(path, split='train'):\n"
+        "    for r in csv.DictReader(open(path)):\n"
+        "        y = float(r['label'])\n"
+        "        yield {'id': r['qid'], 'split': split, 'state': {'messages': [{'role': 'user', 'content': r['text']}]},\n"
+        "               'question': {'type': 'noul', 'instructions': 'ok?', 'criteria': {'yes': 'y', 'no': 'n'}},\n"
+        "               'target': {'yes': y, 'no': 1 - y}, 'meta': {'source': r['source']}}\n")
+    (tmp_path / "exp.yaml").write_text(yaml.safe_dump({
+        "name": "csv", "data": {"adapter": "adapter.py", "train": "train.csv", "split_file": "splits.json",
+                                "eval": {"val": {"train_labels": "val.csv", "adapter_args": {"split": "val"}}}},
+        "fields": {"label": "target.yes", "group": "meta.source"}}))
+    info = prepare(load_experiment(tmp_path / "exp.yaml"), tmp_path / "prepared")
+    assert info["counts"]["select"] + info["counts"]["report"]["val"] == 36 and info["counts"]["select"] > 0
+    assert info["dropped"]["unassigned"] == []

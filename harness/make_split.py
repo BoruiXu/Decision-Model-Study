@@ -89,28 +89,39 @@ def _values(keys):
     return [json.loads(k) for k in sorted(keys)]
 
 
+def _row_id(row, id_field: str, path) -> str:
+    """The row's id at ``id_field`` as text (JSON object keys are text; the adapter must yield the same)."""
+    try:
+        v = get_field(row, id_field) if isinstance(row, dict) else None
+    except KeyError:
+        v = None
+    if v is None or isinstance(v, (dict, list)):
+        raise ConfigError(f"{path}: a row has no id at {id_field!r}; pass the field that holds each row's id "
+                          "with --id (the adapter must yield the same value, as text, as the row id)")
+    return str(v)
+
+
 def select_report(files: list[tuple[str, str]], *, group: str, seed: int = SEED, frac: float = 0.5,
-                  allow_test: bool = False) -> dict:
-    """``files``: (set name, path) pairs. Returns the split-file object."""
+                  allow_test: bool = False, id_field: str = "id") -> dict:
+    """``files``: (set name, path) pairs; ``id_field``: dotted field holding each row's id (kept as text).
+    Returns the split-file object."""
     _check_frac(frac)
     out, owner = {}, {}
     for name, path in files:
         if name in out:
             raise ConfigError(f"eval set {name!r} given twice")
         rows = _rows(path, allow_test)
-        for r in rows:
-            rid = r.get("id") if isinstance(r, dict) else None
-            if rid is None:
-                raise ConfigError(f"{path}: every row needs an id field (the ids the adapter yields)")
+        ids = [_row_id(r, id_field, path) for r in rows]
+        for rid in ids:
             if rid in owner:
                 raise ConfigError(f"id {rid} appears twice ({owner[rid]} and {name})")
             owner[rid] = name
         groups = _groups(rows, group, path)
         sel, rep = _assign(groups, frac, f"{seed}:{name}")
         side = {k: "select" for k in sel} | {k: "report" for k in rep}
-        assignment = {r["id"]: side[_group_key(r, group)] for r in rows}
+        assignment = {rid: side[_group_key(r, group)] for rid, r in zip(ids, rows)}
         n_sel = sum(v == "select" for v in assignment.values())
-        out[name] = {"assignment": assignment, "seed": seed, "frac": frac, "group": group,
+        out[name] = {"assignment": assignment, "seed": seed, "frac": frac, "group": group, "id_field": id_field,
                      "source": str(Path(path).resolve()), "source_sha256": sha256_file(path),
                      "rows": {"select": n_sel, "report": len(assignment) - n_sel},
                      "groups": {"select": _values(sel), "report": _values(rep)}}
