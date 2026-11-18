@@ -89,7 +89,8 @@ overrides:
 | 现象 | 处理 |
 |---|---|
 | `ojh run` 报 GPU 校验失败（空闲显存不够，或卡上已有计算进程：默认拒绝，列出 pid、用户、显存） | 把原因和进程列表原样告诉用户，问：换哪几张卡、等一等、减卡，还是共用这张卡。只有用户明确同意共用，才加 `--allow-shared` 重跑。不碰别人的进程 |
-| `ojh run` 报不可行（Infeasible），列出替代方案 | 列给用户选（等卡、加卡、换小基座、LoRA）。不自己选 |
+| `ojh run` 报不可行（Infeasible），列出替代方案 | 列给用户选（其他空闲的卡、加卡、换小基座、LoRA 配方；只有卡能放下时才有“等进程结束”）。不自己选 |
+| 卡暂时都忙，但想先确认实验本身没问题 | `ojh check <工作区>/exp.yaml --base <基座> --gpus <i,j>`：做 prepare、配置、适配器、plan-only、环境指纹，不看卡、不启动 |
 | 训练中 OOM，或另一位用户中途占了卡（`nvidia-smi` 里有别人的进程） | 被占卡：告诉用户，问换卡还是等。真 OOM：提议 override `onejev.batch_tokens` 减半（再不行 `onejev.max_rows`），用户同意后重跑 |
 | plan-only 失败 | 多半是数据或适配器的问题：回 `adapting-data-for-onejev` 自测，修好后重跑 |
 | prepare 报 `data.train_sha256` 不一致 | 数据文件变了。告诉用户，问是否是新数据版本；确认后才更新 `train_sha256` |
