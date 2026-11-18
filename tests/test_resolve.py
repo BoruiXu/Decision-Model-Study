@@ -29,20 +29,21 @@ def fake_fp():
 
 
 def setup(tmp_path, base="elephant-1", recipe="elephant_full_fsdp", n_gpus_free=4, **kw):
+    import hashlib
     out = tmp_path / "out"
+    d = tmp_path / "d"
+    d.mkdir(parents=True)
+    for name in ("train.jsonl", "val.jsonl", "val_ref.jsonl", "splits.json"):
+        (d / name).write_text(f"{name}\n")
     prep = out / "exp" / "prepared"
     prep.mkdir(parents=True)
     for name in ("train.jsonl", "select.jsonl", "select_index.json"):
         (prep / name).write_text(f"{name}\n")
-    (prep / "prepared.json").write_text(json.dumps({
-        "train_sha256_source": "s" * 64, "train_sha256_prepared": "p" * 64,
-        "subset": None, "counts": {}, "dropped": {}}))
+    (prep / "prepared.json").write_text(json.dumps({  # as prepare writes it for d/train.jsonl
+        "train_sha256_source": hashlib.sha256((d / "train.jsonl").read_bytes()).hexdigest(),
+        "train_sha256_prepared": "p" * 64, "subset": None, "counts": {}, "dropped": {}}))
     machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"),
                             out_root=str(out), env={"HF_HUB_OFFLINE": "1"})
-    d = tmp_path / "d"
-    d.mkdir()
-    for name in ("train.jsonl", "val.jsonl", "val_ref.jsonl", "splits.json"):
-        (d / name).write_text(f"{name}\n")
     exp = ExperimentConfig(
         name="exp", base=base, recipe=str(RECIPES / f"{recipe}.yaml"),
         data=DataSpec(train=str(d / "train.jsonl"),
@@ -367,3 +368,49 @@ def test_plan_only_runs_in_the_repo(tmp_path, monkeypatch):
             "base": {"name": "b"}, "data": {"select": "/s", "train": "/t"}}
     resolve_mod._default_plan_runner(lock)
     assert seen["cwd"] == "/repo" and seen["cmd"][1:3] == ["-m", "train.sft"]
+
+
+def _two_experiments(tmp_path):
+    from harness.config import load_experiment
+    from harness.prepare import prepare
+    def row(i, split, y):
+        return {"id": i, "split": split, "state": {"messages": [{"role": "user", "content": i}]},
+                "question": {"type": "noul", "instructions": "?", "criteria": {"true": "a", "false": "b"}},
+                "target": {"yes": y, "no": 1 - y}, "meta": {}}
+    for d, y in (("a", 1.0), ("b", 0.0)):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "train.jsonl").write_text("".join(json.dumps(row(f"{d}t{i}", "train", y)) + "\n"
+                                                          for i in range(3)))
+        (tmp_path / d / "val.jsonl").write_text(json.dumps(row(f"{d}v", "val", y)) + "\n")
+        (tmp_path / d / "exp.yaml").write_text(yaml.safe_dump({
+            "name": "same", "base": "joey-1", "recipe": str(RECIPES / "joey_full_1gpu.yaml"), "gpus": 1,
+            "data": {"train": "train.jsonl", "eval": {"v": {"train_labels": "val.jsonl"}}},
+            "fields": {"label": "target.yes"}}))
+    machine = MachineConfig(python="/venv/bin/python", model_dir=str(tmp_path / "models"),
+                            out_root=str(tmp_path / "out"))
+    a, b = load_experiment(tmp_path / "a" / "exp.yaml"), load_experiment(tmp_path / "b" / "exp.yaml")
+    prepare(a, tmp_path / "out" / "same" / "prepared", source=str(tmp_path / "a" / "exp.yaml"))
+    return a, b, machine
+
+
+def _resolve(exp, machine, **kw):
+    return resolve(exp, machine, query=lambda uuid=None: smi(1), plan_runner=plan_ok(3, 1), fingerprint=fake_fp, **kw)
+
+
+def test_resolve_refuses_data_prepared_from_another_experiment(tmp_path):
+    a, b, machine = _two_experiments(tmp_path)
+    with pytest.raises(ConfigError) as e:
+        _resolve(b, machine, source=str(tmp_path / "b" / "exp.yaml"))
+    msg = str(e.value)
+    assert str(tmp_path / "a" / "exp.yaml") in msg and "prepare" in msg and "--force" in msg
+    lock = yaml.safe_load(_resolve(a, machine, source=str(tmp_path / "a" / "exp.yaml")).read_text())
+    assert lock["data"]["source"] == str(tmp_path / "a" / "train.jsonl")
+
+
+def test_resolve_refuses_a_train_file_that_is_not_the_prepared_one(tmp_path):
+    a, b, machine = _two_experiments(tmp_path)
+    with pytest.raises(ConfigError, match="train"):  # no experiment path given: the train file still differs
+        _resolve(b, machine)
+    (tmp_path / "a" / "train.jsonl").write_text((tmp_path / "a" / "train.jsonl").read_text() + "\n")
+    with pytest.raises(ConfigError, match="changed since prepare"):
+        _resolve(a, machine, source=str(tmp_path / "a" / "exp.yaml"))

@@ -288,6 +288,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False, s
     afile = adapter_file(data.adapter)
     info = {
         "experiment": {"name": exp.name, "path": source},
+        "train_source": str(data.train),
         "allow_test": bool(allow_test),
         "adapter": {"name": data.adapter, "file": str(afile), "sha256": _sha256(afile)},
         "adapter_args": {"global": data.adapter_args, "train": data.train_adapter_args,

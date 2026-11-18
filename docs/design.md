@@ -475,7 +475,7 @@ test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用
 
 ### 实验名和 prepared 目录
 
-prepared 数据放在 `<out_root>/<name>/prepared/`，`prepared.json` 记下生成它的实验文件路径。另一份实验文件用同一个 `name` 再 prepare（包括 `ojh run`、`ojh check`）时拒绝，避免两个实验互相覆盖数据；同一个文件重跑照常覆盖；`--force` 强制覆盖（已经 resolve 的 run 随后会在 sha256 校验时失败）。skill 建议的名字含数据名、基座、训练方式和卡数。
+prepared 数据放在 `<out_root>/<name>/prepared/`，`prepared.json` 记下生成它的实验文件路径和训练文件路径。`ojh resolve`（以及 `ojh run`、`ojh check`）核对这三样：prepared 数据来自当前的实验文件、来自当前的 `data.train`、训练文件的 sha256 和 prepare 时相同；不符就拒绝，提示 `ojh prepare <exp> --force` 或换名字。另一份实验文件用同一个 `name` 再 prepare（包括 `ojh run`、`ojh check`）时拒绝，避免两个实验互相覆盖数据；同一个文件重跑照常覆盖；`--force` 强制覆盖（已经 resolve 的 run 随后会在 sha256 校验时失败）。skill 建议的名字含数据名、基座、训练方式和卡数。
 
 ### `ojh check`（不看卡的检查）
 

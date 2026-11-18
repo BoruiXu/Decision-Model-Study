@@ -24,14 +24,18 @@ def fill(src: Path, dst: Path, tmp: Path) -> Path:
     return dst
 
 
-def prepared(out_root: Path, name: str) -> None:
+def prepared(out_root: Path, name: str, train: str) -> None:
+    """Fake prepared data for ``train`` (written here), as prepare records it."""
+    import hashlib
+    Path(train).parent.mkdir(parents=True, exist_ok=True)
+    Path(train).write_text("{}\n")
     prep = out_root / name / "prepared"
     prep.mkdir(parents=True)
     for f in ("train.jsonl", "select.jsonl", "select_index.json"):
         (prep / f).write_text(f"{f}\n")
     (prep / "prepared.json").write_text(json.dumps({
-        "train_sha256_source": V1_SHA, "train_sha256_prepared": "p" * 64,
-        "subset": None, "counts": {}, "dropped": {}}))
+        "train_sha256_source": hashlib.sha256(Path(train).read_bytes()).hexdigest(),
+        "train_sha256_prepared": "p" * 64, "subset": None, "counts": {}, "dropped": {}}))
 
 
 def resolve_with(exp, machine, n_gpus):
@@ -66,7 +70,7 @@ def test_examples_resolve(tmp_path, recipe, monkeypatch):
     monkeypatch.chdir(tmp_path)  # any cwd: config paths are absolute once loaded
     machine = load_machine(fill(EXAMPLES / "machine.example.yaml", tmp_path / "m.yaml", tmp_path))
     exp = load_experiment(fill(EXAMPLES / "dynamicserve_v1_repro.yaml", tmp_path / "e.yaml", tmp_path))
-    prepared(Path(machine.out_root), exp.name)
+    prepared(Path(machine.out_root), exp.name, exp.data.train)
     for p in [s.train_labels for s in exp.data.eval.values()] + [exp.data.split_file]:  # hashed into the lock
         Path(p).parent.mkdir(parents=True, exist_ok=True)
         Path(p).write_text("{}\n")

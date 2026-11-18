@@ -404,8 +404,27 @@ def _explicit_cards(exp: ExperimentConfig, machine: MachineConfig) -> list[int] 
     return None
 
 
+def _check_prepared(exp: ExperimentConfig, info: dict, prepared: Path, source: str | None) -> None:
+    """The prepared data must come from this experiment file and this train file, unchanged since."""
+    owner = (info.get("experiment") or {}).get("path")
+    if source and owner and os.path.abspath(source) != owner:
+        raise ConfigError(f"{prepared} was prepared from {owner}, not from {source} (both use the experiment name "
+                          f"{exp.name!r}); run `ojh prepare {source} --force` to prepare this experiment's data "
+                          "there, or give this experiment another name")
+    then = info.get("train_source")
+    if then and os.path.abspath(exp.data.train) != os.path.abspath(then):
+        raise ConfigError(f"{prepared} was prepared from the train file {then}, but data.train is {exp.data.train}; "
+                          "run `ojh prepare` (with --force if another experiment owns the name) or use another name")
+    if not Path(exp.data.train).is_file():
+        raise ConfigError(f"data.train not found: {exp.data.train}")
+    sha = sha256_file(exp.data.train)
+    if sha != info.get("train_sha256_source"):
+        raise ConfigError(f"the train file {exp.data.train} changed since prepare (sha256 {sha[:12]}…, prepared from "
+                          f"{str(info.get('train_sha256_source'))[:12]}…): re-run `ojh prepare`")
+
+
 def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner, fingerprint, machine_origin,
-           apps_query, check_gpus: bool, allow_shared: bool = False) -> tuple[dict, Path]:
+           apps_query, check_gpus: bool, allow_shared: bool = False, source: str | None = None) -> tuple[dict, Path]:
     """The lock and the adapter file. Order: config, prepared data and adapter checks, plan-only, fingerprint,
     and the cards last, so busy cards never hide a data or plan problem (``check_gpus=False`` skips them)."""
     if not exp.base:
@@ -445,6 +464,7 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
     if not info_path.is_file():
         raise ConfigError(f"no prepared data at {prepared}; run `ojh prepare` first")
     info = json.loads(info_path.read_text())
+    _check_prepared(exp, info, prepared, source)
     from .prepare import adapter_file
     afile = adapter_file(exp.data.adapter)
     asha = sha256_file(afile)
@@ -531,20 +551,22 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
 
 
 def check(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
-          fingerprint=None, machine_origin: dict | None = None, apps_query=_nvidia_smi_apps) -> dict:
+          fingerprint=None, machine_origin: dict | None = None, apps_query=_nvidia_smi_apps,
+          source: str | None = None) -> dict:
     """Everything resolve validates except the cards (config, prepared data, adapter, plan-only,
     fingerprint); writes nothing and returns the would-be lock."""
     lock, _ = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
-                     machine_origin=machine_origin, apps_query=apps_query, check_gpus=False)
+                     machine_origin=machine_origin, apps_query=apps_query, check_gpus=False, source=source)
     return lock
 
 
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
             fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None,
-            apps_query=_nvidia_smi_apps, allow_shared: bool = False) -> Path:
+            apps_query=_nvidia_smi_apps, allow_shared: bool = False, source: str | None = None) -> Path:
+    """``source``: the experiment file; the prepared data must have been prepared from it."""
     lock, afile = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
                          machine_origin=machine_origin, apps_query=apps_query, check_gpus=True,
-                         allow_shared=allow_shared)
+                         allow_shared=allow_shared, source=source)
     out_root, data = Path(machine.out_root), lock["data"]
     body = json.dumps(lock, sort_keys=True, default=str)
     stamp = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y%m%dT%H%M%SZ")

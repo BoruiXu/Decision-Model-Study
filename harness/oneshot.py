@@ -75,7 +75,7 @@ def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, r
     """``ojh check``: what ``ojh run`` validates except the cards (prepare, config, adapter, plan-only,
     fingerprint). Writes the prepared data like run, but no lock and no run dir; launches nothing."""
     m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test, force)
-    lock = resolve.check(exp, m, machine_origin=origin, **_probes(
+    lock = resolve.check(exp, m, machine_origin=origin, source=os.path.abspath(exp_path), **_probes(
         query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     return {"ok": True, "cards_checked": False, "base": exp.base,
             "recipe": {"path": exp.recipe, "source": source, "mode": lock["mode"]},
@@ -93,7 +93,8 @@ def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, rec
     """``allow_shared``: the requested cards may carry other users' processes (only after asking the user);
     recorded in the lock."""
     m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test, force)
-    lock_path = resolve.resolve(exp, m, machine_origin=origin, allow_shared=allow_shared, **_probes(
+    lock_path = resolve.resolve(exp, m, machine_origin=origin, allow_shared=allow_shared,
+                                source=os.path.abspath(exp_path), **_probes(
         query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     started = launch.launch(lock_path, tmux=tmux or launch._tmux)
 

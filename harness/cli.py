@@ -117,7 +117,8 @@ def cmd_prepare(a) -> int:
 def cmd_resolve(a) -> int:
     try:
         m, origin = find_machine(a.machine)
-        path = resolve.resolve(load_experiment(a.exp), m, machine_origin=origin, allow_shared=a.allow_shared)
+        path = resolve.resolve(load_experiment(a.exp), m, machine_origin=origin, allow_shared=a.allow_shared,
+                               source=os.path.abspath(a.exp))
     except Infeasible as e:
         print(f"infeasible: {e}", file=sys.stderr)
         for alt in e.alternatives:
