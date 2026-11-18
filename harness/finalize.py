@@ -29,7 +29,7 @@ from harness.jsonl import read_jsonl
 from harness.evaluator import binary_decision
 from harness.merge import merge_lora
 from harness.plugins import evaluate_plugin, hook, load_plugin
-from harness.prepare import _read, build_eval_parts
+from harness.prepare import build_eval_parts, read_eval
 from harness.resolve import data_changes
 from harness.score import score_checkpoint
 from harness.select import checkpoint_dir, eval_events, select_step
@@ -43,6 +43,8 @@ def exp_from_lock(lock: dict) -> ExperimentConfig:
     return ExperimentConfig(
         name=lock["experiment"], base=lock["base"]["name"], recipe="",
         data=DataSpec(train=d["source"], adapter=d["adapter"], split_file=lock.get("split_file"),
+                      adapter_args=dict(d.get("adapter_args") or {}),
+                      train_adapter_args=dict(d.get("train_adapter_args") or {}),
                       eval={n: EvalSetSpec(**s) for n, s in lock["eval_sets"].items()}),
         fields=FieldsSpec(**lock["fields"]), evaluator=EvaluatorSpec(**lock["evaluator"]),
         seeds=list(lock["seeds"]), merge=bool(lock.get("merge")))
@@ -75,9 +77,9 @@ def label_version(rows: list[dict], path) -> str:
 
 def label_versions(lock: dict, exp: ExperimentConfig, train_rows: list[dict]) -> dict:
     refs = []
-    for spec in exp.data.eval.values():
+    for name, spec in exp.data.eval.items():
         path = spec.reference or spec.train_labels
-        refs.append(label_version(_read(exp.data.adapter, path), path))
+        refs.append(label_version(read_eval(exp.data, name, path), path))
     return {"train": label_version(train_rows, lock["data"]["train"]),
             "reference": "+".join(dict.fromkeys(refs)) or None}
 

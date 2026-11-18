@@ -56,6 +56,12 @@ class MachineConfig:
 class EvalSetSpec:
     train_labels: str
     reference: str | None = None
+    adapter_args: dict[str, Any] = field(default_factory=dict)  # merged over data.adapter_args for this set
+
+
+def is_adapter_path(name: str) -> bool:
+    """``data.adapter`` names a .py file (resolved relative to the experiment file) rather than a module."""
+    return name.endswith(".py") or "/" in name or os.sep in name
 
 
 @dataclass
@@ -65,6 +71,8 @@ class DataSpec:
     train_sha256: str | None = None
     eval: dict[str, EvalSetSpec] = field(default_factory=dict)
     split_file: str | None = None
+    adapter_args: dict[str, Any] = field(default_factory=dict)  # keyword arguments: adapt(path, **args)
+    train_adapter_args: dict[str, Any] = field(default_factory=dict)  # merged over adapter_args for train
 
 
 @dataclass
@@ -236,6 +244,14 @@ def _check_keys(d: Any, cls, prefix: str = "") -> dict:
     return d
 
 
+def _args(raw, where: str) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping of keyword arguments for adapt(path, **args)")
+    return dict(raw)
+
+
 def _recipe_path(p, base: Path) -> str:
     local = _abs(p, base)
     if not os.path.exists(local) and not os.path.isabs(_expand(p)):
@@ -264,10 +280,16 @@ def load_experiment(path) -> ExperimentConfig:
         eval_sets[name] = EvalSetSpec(
             train_labels=_abs(_require(spec, "train_labels", prefix), base),
             reference=_abs(ref, base) if ref is not None else None,
+            adapter_args=_args(spec.get("adapter_args"), f"{prefix}adapter_args"),
         )
     data_kw = {k: data[k] for k in ("adapter", "train_sha256", "split_file") if k in data}
     if data_kw.get("split_file") is not None:
         data_kw["split_file"] = _abs(data_kw["split_file"], base)
+    if data_kw.get("adapter") is not None:
+        a = str(data_kw["adapter"])
+        data_kw["adapter"] = _abs(a, base) if is_adapter_path(a) else a
+    for k in ("adapter_args", "train_adapter_args"):
+        data_kw[k] = _args(data.get(k), f"data.{k}")
     sub = d.get("subset")
     subset = SubsetSpec(**_check_keys(sub, SubsetSpec, "subset.")) if sub is not None else None
     ev = d.get("evaluator")

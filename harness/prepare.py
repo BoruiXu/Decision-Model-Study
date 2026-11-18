@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import random
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from harness.config import ConfigError, ExperimentConfig, SubsetSpec, get_field
+from harness.config import ConfigError, DataSpec, ExperimentConfig, SubsetSpec, get_field, is_adapter_path
 from harness.jsonl import dumps_line
 
 
@@ -27,7 +28,25 @@ class TestSplitRefused(RuntimeError):
     __test__ = False  # not a pytest class
 
 
+def adapter_file(name: str) -> Path:
+    """The source file of an adapter: the path itself, or ``adapters/<name>.py`` for a module name."""
+    if is_adapter_path(name):
+        p = Path(name)
+        if not p.is_file():
+            raise ConfigError(f"adapter file not found: {name}")
+        return p
+    spec = importlib.util.find_spec(f"adapters.{name}")
+    if spec is None or not spec.origin:
+        raise ConfigError(f"unknown adapter {name!r}: no adapters/{name}.py (or give a path to a .py file)")
+    return Path(spec.origin)
+
+
 def _load_adapter(name: str):
+    if is_adapter_path(name):
+        from harness.plugins import load_plugin
+
+        return load_plugin(str(adapter_file(name)))
+    adapter_file(name)
     return importlib.import_module(f"adapters.{name}")
 
 
@@ -97,8 +116,26 @@ class EvalParts:
     dropped: dict[str, list[str]] = field(default_factory=dict)
 
 
-def _read(adapter: str, path) -> list[dict]:
-    return list(_load_adapter(adapter).adapt(Path(path)))
+def _read(adapter: str, path, args: dict | None = None) -> list[dict]:
+    return list(_load_adapter(adapter).adapt(Path(path), **(args or {})))
+
+
+def train_args(data: DataSpec) -> dict:
+    return {**data.adapter_args, **data.train_adapter_args}
+
+
+def eval_args(data: DataSpec, name: str) -> dict:
+    return {**data.adapter_args, **data.eval[name].adapter_args}
+
+
+def read_train(data: DataSpec) -> list[dict]:
+    """Rows of ``data.train`` through the adapter, with data.adapter_args + data.train_adapter_args."""
+    return _read(data.adapter, data.train, train_args(data))
+
+
+def read_eval(data: DataSpec, name: str, path) -> list[dict]:
+    """Rows of one of eval set ``name``'s files, with data.adapter_args + that set's adapter_args."""
+    return _read(data.adapter, path, eval_args(data, name))
 
 
 def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> EvalParts:
@@ -108,14 +145,14 @@ def build_eval_parts(exp: ExperimentConfig, *, allow_test: bool = False) -> Eval
         assignments = json.loads(Path(data.split_file).read_text())
     parts = EvalParts()
     for name, spec in data.eval.items():
-        labels = _read(data.adapter, spec.train_labels)
+        labels = read_eval(data, name, spec.train_labels)
         if not allow_test:
             for r in labels:
                 if str(r.get("split", "")).startswith("test"):
                     raise TestSplitRefused(f"{name}: row {r.get('id')} is in split {r['split']!r}; use --allow-test")
         ref = None
         if spec.reference is not None:
-            ref = {r["id"]: r for r in _read(data.adapter, spec.reference)}
+            ref = {r["id"]: r for r in read_eval(data, name, spec.reference)}
         if data.split_file:
             if name not in assignments:
                 raise ConfigError(f"data.split_file has no entry for eval set {name!r}")
@@ -178,7 +215,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     elif data.train_sha256 != src_sha:
         raise ShaMismatch(f"train sha256 {src_sha} != expected {data.train_sha256}")
 
-    train_all = _read(data.adapter, data.train)
+    train_all = read_train(data)
     if not allow_test:
         tests = [str(r.get("id")) for r in train_all if str(r.get("split", "")).startswith("test")]
         if tests:
@@ -197,7 +234,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     train_ids = {r["id"] for r in train_all}
     owner: dict[str, str] = {}
     for name, spec in data.eval.items():
-        ids = {r["id"] for r in _read(data.adapter, spec.train_labels)}
+        ids = {r["id"] for r in read_eval(data, name, spec.train_labels)}
         both = ids & train_ids
         if both:
             raise IdOverlap(f"{len(both)} id(s) in train and eval set {name}: {sorted(both)[:3]}")
@@ -210,8 +247,12 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False) -
     _write_jsonl(out_dir / "train.jsonl", train)
     _write_jsonl(out_dir / "select.jsonl", parts.select_rows)
     (out_dir / "select_index.json").write_text(json.dumps(parts.select_index, indent=2))
+    afile = adapter_file(data.adapter)
     info = {
         "allow_test": bool(allow_test),
+        "adapter": {"name": data.adapter, "file": str(afile), "sha256": _sha256(afile)},
+        "adapter_args": {"global": data.adapter_args, "train": data.train_adapter_args,
+                         "eval": {n: s.adapter_args for n, s in data.eval.items()}},
         "train_sha256_source": src_sha,
         "train_sha256_prepared": _sha256(out_dir / "train.jsonl"),
         "subset": ({"where": exp.subset.where, "n": exp.subset.n, "seed": exp.subset.seed}

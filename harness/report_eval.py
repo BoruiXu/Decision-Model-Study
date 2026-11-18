@@ -17,7 +17,7 @@ from harness.config import get_field
 from harness.evaluator.labels import label_value, num
 from harness.evaluator.metrics import at_threshold, auc, ece, within_group_auc
 from harness.finalize import _gpu_env, exp_from_lock, score_kwargs
-from harness.prepare import _read, build_eval_parts
+from harness.prepare import build_eval_parts, read_eval
 from harness.score import score_checkpoint
 
 POOLED = "pooled_report"
@@ -68,7 +68,7 @@ def run(run_dir, *, allow_report: bool, seed=None, allow_test: bool = False, sco
     rows, owner = [], {}
     for name, spec in exp.data.eval.items():
         wanted = set(parts.report_ids.get(name, []))
-        for r in _read(exp.data.adapter, spec.train_labels):
+        for r in read_eval(exp.data, name, spec.train_labels):
             if r["id"] in wanted:
                 rows.append(r)
                 owner[r["id"]] = name

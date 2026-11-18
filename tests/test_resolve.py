@@ -171,7 +171,8 @@ def test_lock_has_all_fields(tmp_path):
     assert lock["data"]["adapter"] == "onejev_rows"
     assert lock["onejev"]["patch"]["sha256"] and lock["fingerprint"]["driver_version"] == "570.00"
     assert lock["machine"]["python"] == "/venv/bin/python"
-    assert lock["eval_sets"] == {"val": {"train_labels": str(tmp_path / "d" / "val.jsonl"), "reference": None}}
+    assert lock["eval_sets"] == {"val": {"train_labels": str(tmp_path / "d" / "val.jsonl"), "reference": None,
+                                         "adapter_args": {}}}
     assert lock["run_id"] in str(path)
     cmd = build_command(lock, 7)
     assert cmd[cmd.index("--name") + 1] == "exp-s7" and cmd[cmd.index("--seed") + 1] == "7"

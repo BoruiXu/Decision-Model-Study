@@ -200,6 +200,9 @@ def write_run_card(run_dir: Path, lock: dict, *, status: str, failures: list[str
              f"（{lock.get('parallel')}，{lock['n_gpus']} 卡）",
              f"- 数据：train.jsonl sha256 `{data['sha256']['train.jsonl']}`；"
              f"源文件 sha256 `{data['source_sha256']}`",
+             f"- 适配器：{data.get('adapter')}（sha256 `{data.get('adapter_sha256')}`）"
+             + (f"；参数 train {data.get('train_adapter_args') or {}}，全局 {data.get('adapter_args') or {}}"
+                if data.get("adapter_args") or data.get("train_adapter_args") else ""),
              f"- 标签版本：训练 {versions['train']}；参照 {versions['reference']}",
              "- test 部分：" + ("已读（prepare --allow-test，须经用户批准）" if lock.get("allow_test") else "未读"),
              f"- 评测器：{ev['type']}{'（' + ev['path'] + '）' if ev.get('path') else ''}",

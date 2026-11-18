@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
@@ -352,7 +353,16 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     if not info_path.is_file():
         raise ConfigError(f"no prepared data at {prepared}; run `ojh prepare` first")
     info = json.loads(info_path.read_text())
+    from .prepare import adapter_file
+    afile = adapter_file(exp.data.adapter)
+    asha = sha256_file(afile)
+    prepared_sha = (info.get("adapter") or {}).get("sha256")
+    if prepared_sha is not None and prepared_sha != asha:
+        raise ConfigError(f"adapter changed after prepare ({afile}: sha256 {asha[:12]}… vs {prepared_sha[:12]}… "
+                          "when prepared); re-run `ojh prepare`")
     data = {"prepared_dir": str(prepared), "source": exp.data.train, "adapter": exp.data.adapter,
+            "adapter_file": str(afile), "adapter_sha256": asha,
+            "adapter_args": dict(exp.data.adapter_args), "train_adapter_args": dict(exp.data.train_adapter_args),
             "sha256": {f: _sha(prepared / f) for f in DATA_FILES},
             "source_sha256": info["train_sha256_source"], "subset": info.get("subset"),
             "counts": info.get("counts"),
@@ -419,6 +429,11 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     lock["run_id"], lock["run_dir"] = run_id, str(run_dir)
     check_writable(machine, run_dir)
     run_dir.mkdir(parents=True)
+    # the adapter as it was at resolve time, next to the lock (the lock also records its sha256)
+    kept = run_dir / "adapter" / afile.name
+    kept.parent.mkdir()
+    shutil.copy2(afile, kept)
+    data["adapter_copy"] = str(kept)
     path = run_dir / "run.lock.yaml"
     path.write_text(yaml.safe_dump(lock, sort_keys=False))
     return path
