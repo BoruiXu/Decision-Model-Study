@@ -146,3 +146,9 @@ def test_env_file_is_kept_on_the_big_disk_not_in_home():
         text = p.read_text()
         assert not re.search(r"cp examples/env\.example\.sh ~", text), p
         assert "$OJH_HOME/ojh-env.sh" in text, p
+
+
+def test_readme_disk_needs_explain_the_cache_venv_split():
+    text = (ROOT / "README.md").read_text()
+    row = next(line for line in text.splitlines() if line.startswith("| 磁盘 |"))
+    assert "硬链接" in row and "11 GB" in row and "95 MB" in row and "5.2 GB" in row

@@ -18,7 +18,7 @@
 | GPU 驱动 | NVIDIA 驱动支持 CUDA 12.8 的 wheel（R570 或更新；`nvidia-smi` 右上角的 CUDA Version ≥ 12.8）。不需要单独装 CUDA toolkit |
 | 工具 | `git`、`tmux`（训练在 tmux 里跑）、`curl`（第一次装 uv） |
 | 网络 | 能访问 astral.sh 和 GitHub（uv、Python、OneJev）、PyPI 和 download.pytorch.org（依赖）、huggingface.co（补丁和基座权重） |
-| 磁盘 | 环境约 5.5 GB（A100 实测：uv 缓存 5.2 GB，Python 80 MB，OneJev 100 MB；venv 和 uv 缓存在同一文件系统时用硬链接共用空间，不在同一个时 venv 再占约 5 GB）；基座权重 elephant-1 约 18 GB、joey-1 约 5 GB；每个 run 的 checkpoint 另算（全参每个 checkpoint 约为基座大小，LoRA 小得多） |
+| 磁盘 | 环境 5.5–11 GB：依赖包（torch 和 CUDA 库等）约 5 GB，加 Python 80 MB、OneJev 100 MB。这 5 GB 在 uv 缓存和 venv 之间怎么分看文件系统：两者在同一文件系统时 uv 用硬链接，只占一份，`du` 把它算在先统计的目录里（A100 实测：缓存 5.2 GB、venv 50 MB）；不在同一个文件系统，或缓存被清理过时，venv 自己约 5 GB，缓存从几十 MB（另一台机器实测 95 MB）到 5 GB 不等。按最坏情况预留约 11 GB；缓存和 venv 不共用时，`uv cache clean`（用同样的 `UV_CACHE_DIR`）可以收回缓存，不影响 venv。基座权重 elephant-1 约 18 GB、joey-1 约 5 GB；每个 run 的 checkpoint 另算（全参每个 checkpoint 约为基座大小，LoRA 小得多） |
 
 ### 步骤
 
