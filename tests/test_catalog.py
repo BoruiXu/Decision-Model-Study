@@ -63,3 +63,39 @@ def test_fetch_base_downloads_then_verifies(tmp_path, monkeypatch):
         fetch_base("joey-1", tmp_path)
     assert calls["repo_id"] == spec["hf_repo"] and calls["revision"] == spec["revision"]
     assert calls["allow"] == list(spec["sha256"])
+
+
+def test_default_recipes_point_at_existing_recipes():
+    from harness.catalog import ROOT, parse_gpu_range
+    for f in catalog.CATALOG_DIR.glob("*.yaml"):
+        d = yaml.safe_load(f.read_text())
+        for key, path in (d.get("default_recipes") or {}).items():
+            lo, hi = parse_gpu_range(key)
+            assert 1 <= lo <= (hi or lo), (f.name, key)
+            assert (ROOT / path).is_file(), (f.name, path)
+
+
+@pytest.mark.parametrize("base,n,recipe", [("joey-1", 1, "joey_full_1gpu"), ("elephant-1", 4, "elephant_full_fsdp"),
+                                           ("elephant-1", 2, "elephant_full_fsdp"),
+                                           ("mammoth-1", 8, "mammoth_lora_ddp")])
+def test_default_recipe_lookup(base, n, recipe):
+    from harness.catalog import ROOT, default_recipe
+    assert default_recipe(base, n) == str(ROOT / "examples" / "recipes" / f"{recipe}.yaml")
+
+
+def test_no_default_recipe_lists_the_options():
+    from harness.catalog import default_recipe
+    with pytest.raises(CatalogError) as e:
+        default_recipe("elephant-1", 1)
+    msg = str(e.value)
+    assert "elephant-1" in msg and "1 GPU" in msg and "2-8: examples/recipes/elephant_full_fsdp.yaml" in msg
+    assert "joey_lora_1gpu.yaml" in msg and "--recipe" in msg
+    with pytest.raises(CatalogError, match="no default_recipes"):
+        default_recipe("onejev-qwen3.5-4b", 1)
+
+
+def test_parse_gpu_range():
+    from harness.catalog import parse_gpu_range
+    assert parse_gpu_range(1) == (1, 1) and parse_gpu_range("2-8") == (2, 8) and parse_gpu_range("2+") == (2, None)
+    with pytest.raises(CatalogError):
+        parse_gpu_range("x")

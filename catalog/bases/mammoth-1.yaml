@@ -20,3 +20,5 @@ sha256:
   tokenizer_config.json: 2984c03425a28d242744e234a5003786fd289b3713db79fe0958c65eb59d85b2
 published_recipe: 'Qwen3.5-27B base, full fine-tune with vision frozen, lr 2.7e-6,
   1 epoch, 72xGB300, FSDP. Source: baselabs model card at hf_repo.'
+default_recipes:  # GPU count (N, A-B or A+) -> recipe path relative to the repo root
+  2-8: examples/recipes/mammoth_lora_ddp.yaml

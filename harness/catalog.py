@@ -32,3 +32,40 @@ def load_base(name: str) -> dict:
         known = sorted(p.stem for p in CATALOG_DIR.glob("*.yaml"))
         raise CatalogError(f"unknown base {name!r}; known: {known}")
     return yaml.safe_load(path.read_text())
+
+
+def parse_gpu_range(key) -> tuple[int, int | None]:
+    """A ``default_recipes`` key: ``N``, ``A-B`` or ``A+`` (open-ended) -> (low, high or None)."""
+    text = str(key).strip()
+    try:
+        if text.endswith("+"):
+            return int(text[:-1]), None
+        if "-" in text:
+            lo, hi = text.split("-", 1)
+            return int(lo), int(hi)
+        return int(text), int(text)
+    except ValueError:
+        raise CatalogError(f"bad default_recipes key {key!r}: use N, A-B or A+") from None
+
+
+def recipe_options(base: dict) -> list[str]:
+    """Human-readable choices when no default fits: the base's defaults and every example recipe."""
+    defaults = [f"{k}: {v}" for k, v in (base.get("default_recipes") or {}).items()]
+    examples = sorted(str(p.relative_to(ROOT)) for p in (ROOT / "examples" / "recipes").glob("*.yaml"))
+    return ([f"{base['name']} default_recipes: " + "; ".join(defaults)] if defaults else []) + \
+        ["example recipes: " + ", ".join(examples), "or pass --recipe <path> (your own recipe file)"]
+
+
+def default_recipe(name: str, n_gpus: int) -> str:
+    """The absolute recipe path that ``catalog/bases/<name>.yaml`` names for ``n_gpus`` cards.
+
+    Raises CatalogError listing the options when the base has no default for that count."""
+    base = load_base(name)
+    table = base.get("default_recipes") or {}
+    for key, path in table.items():
+        lo, hi = parse_gpu_range(key)
+        if lo <= n_gpus and (hi is None or n_gpus <= hi):
+            return str(ROOT / path)
+    head = (f"base {name} has no default recipe for {n_gpus} GPU(s)" if table
+            else f"base {name} has no default_recipes")
+    raise CatalogError(head + "; options:\n- " + "\n- ".join(recipe_options(base)))
