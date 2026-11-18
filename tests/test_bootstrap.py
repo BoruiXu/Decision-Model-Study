@@ -68,9 +68,10 @@ def test_bootstrap_cis_are_deterministic_and_bracket_the_estimate():
     one = bootstrap_cis(ex, scores, budgets=[0.1], has_group=True, has_f=True, reps=200, seed=3)
     two = bootstrap_cis(ex, scores, budgets=[0.1], has_group=True, has_f=True, reps=200, seed=3)
     assert one == two
-    lo, hi = one["router"]["auc"]
+    lo, hi = one["router"]["ci95"]["auc"]
     assert lo < auc(scores["router"], [e["rate"] for e in ex]) < hi and hi - lo < 0.3
-    assert set(one["router"]) == {"auc", "within_group_auc", "share_at_budget_10"}
+    assert set(one["router"]["ci95"]) == {"auc", "within_group_auc", "share_at_budget_10"}
+    assert one["router"]["ci95_skipped"] == {"auc": 0, "within_group_auc": 0, "share_at_budget_10": 0}
     other = bootstrap_cis(ex, scores, budgets=[0.1], has_group=True, has_f=True, reps=200, seed=4)
     assert other != one
 
@@ -79,7 +80,7 @@ def test_bootstrap_without_groups_is_item_level():
     ex = examples()
     out = bootstrap_cis(ex, {"router": [e["rate"] for e in ex]}, budgets=None, has_group=False, has_f=False,
                         reps=50, seed=0)
-    assert set(out["router"]) == {"auc"}
+    assert set(out["router"]["ci95"]) == {"auc"}
 
 
 def test_evaluate_reports_cis_and_the_level():
@@ -99,3 +100,17 @@ def test_evaluate_reports_cis_and_the_level():
     assert res["bootstrap"]["level"] == "item" and "no group field" in res["bootstrap"]["note"]
     res = evaluate(preds, parts, train, fields, EvaluatorSpec(bootstrap_reps=0))
     assert res["bootstrap"] is None and "ci95" not in res["sets"]["pooled_select"]["router"]
+
+
+def test_skipped_replicates_are_counted():
+    ex = [{"id": str(i), "rate": 1.0 if i else 0.0, "f": 1.0, "group": "g"} for i in range(6)]
+    out = bootstrap_cis(ex, {"router": [0.1 * i for i in range(6)]}, budgets=None, has_group=False, has_f=False,
+                        reps=200, seed=0)
+    skipped = out["router"]["ci95_skipped"]["auc"]
+    assert 0 < skipped < 200  # replicates that drew no negative have no AUC
+
+
+def test_result_md_shows_skipped_replicates():
+    from harness.result import _metrics_table
+    lines = _metrics_table({"model": {"auc": 0.8, "auc_ci95": [0.7, 0.9], "auc_ci95_skipped": 12}}, reps=1000)
+    assert "0.8000 [0.7000, 0.9000] (12/1000 skipped)" in "\n".join(lines)

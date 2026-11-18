@@ -105,8 +105,10 @@ def _pct(b) -> int:
 
 def bootstrap_cis(examples: list[dict], scores: dict[str, list[float]], *, budgets, has_group: bool,
                   has_f: bool, reps: int, seed: int, salt: str = "") -> dict:
-    """``{method: {metric: [lo, hi] or None}}`` for AUC, within-group AUC (with groups) and the share at
-    each budget (with consistency), at 95%. ``salt`` (the set name) gives each set its own stream."""
+    """``{method: {"ci95": {metric: [lo, hi] or None}, "ci95_skipped": {metric: n}}}`` for AUC, within-group
+    AUC (with groups) and the share at each budget (with consistency), at 95%. A replicate where a metric is
+    undefined (one class only) is skipped for that metric and counted. ``salt`` (the set name) gives each
+    set its own stream."""
     n = len(examples)
     rng = np.random.default_rng([seed, zlib.crc32(salt.encode())])
     rates = np.array([e["rate"] for e in examples], dtype=float)
@@ -134,8 +136,10 @@ def bootstrap_cis(examples: list[dict], scores: dict[str, list[float]], *, budge
     lo_q, hi_q = (1 - CI) / 2 * 100, (1 + CI) / 2 * 100
     result = {}
     for m, per in values.items():
-        result[m] = {}
+        cis, skipped = {}, {}
         for k, vals in per.items():
             ok = [v for v in vals if v is not None]
-            result[m][k] = ([float(np.percentile(ok, lo_q)), float(np.percentile(ok, hi_q))] if ok else None)
+            cis[k] = [float(np.percentile(ok, lo_q)), float(np.percentile(ok, hi_q))] if ok else None
+            skipped[k] = len(vals) - len(ok)
+        result[m] = {"ci95": cis, "ci95_skipped": skipped}
     return result

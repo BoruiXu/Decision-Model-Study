@@ -33,9 +33,10 @@ def _methods(entry: dict) -> dict:
         if not isinstance(m, dict):
             continue
         ci = m.get("ci95") or {}
+        skipped = m.get("ci95_skipped") or {}
         row = {}
         for k, v in m.items():
-            if k == "ci95" or isinstance(v, dict):
+            if k in ("ci95", "ci95_skipped") or isinstance(v, dict):
                 continue
             if k == "jaccard_at_own_best_threshold":
                 row["jaccard"] = v
@@ -43,6 +44,8 @@ def _methods(entry: dict) -> dict:
             row[k] = v
             if k in ci:
                 row[f"{k}_ci95"] = ci[k]
+                if skipped.get(k):
+                    row[f"{k}_ci95_skipped"] = skipped[k]
         out["model" if name == "router" else name] = row
     order = ["model"] + [k for k in out if k not in ("model", "all_positive", "oracle")] + \
         [k for k in ("all_positive", "oracle") if k in out]
@@ -183,11 +186,14 @@ def _ci(v) -> str:
     return f" [{v[0]:.4f}, {v[1]:.4f}]" if isinstance(v, (list, tuple)) and len(v) == 2 else ""
 
 
-def _metrics_table(methods: dict) -> list[str]:
-    cols = list(dict.fromkeys(k for m in methods.values() for k in m if not k.endswith("_ci95")))
+def _metrics_table(methods: dict, reps: int | None = None) -> list[str]:
+    cols = list(dict.fromkeys(k for m in methods.values() for k in m
+                              if not k.endswith(("_ci95", "_ci95_skipped"))))
     lines = ["| method | " + " | ".join(cols) + " |", "|---|" + "---|" * len(cols)]
     for name, m in methods.items():
-        cells = [_num(m.get(c)) + _ci(m.get(f"{c}_ci95")) for c in cols]
+        cells = [_num(m.get(c)) + _ci(m.get(f"{c}_ci95"))
+                 + (f" ({m[f'{c}_ci95_skipped']}/{reps} skipped)" if m.get(f"{c}_ci95_skipped") else "")
+                 for c in cols]
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
     return lines
 
@@ -235,7 +241,10 @@ def render_result_md(r: dict) -> str:
                      if rs else "")]
         m = s["metrics"]
         lines += ["", f"### Metrics on the select part ({m['set']}, {m['questions']} questions; {ci_note})", ""]
-        lines += _metrics_table(m["methods"]) if m["methods"] else ["- not evaluated"]
+        lines += _metrics_table(m["methods"], b["reps"] if b else None) if m["methods"] else ["- not evaluated"]
+        if b and any(k.endswith("_ci95_skipped") for x in m["methods"].values() for k in x):
+            lines += ["", "(n/reps skipped): bootstrap replicates where the metric was undefined (one class only); "
+                          "the interval uses the rest."]
         lines += ["", "Jaccard: each method at its own best threshold on select. The model's locked thresholds:"]
         lines += ["", "| threshold | value | small share | Jaccard | inconsistency | per set (share / Jaccard) |",
                   "|---|---|---|---|---|---|"]

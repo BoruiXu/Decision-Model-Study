@@ -150,7 +150,7 @@ def evaluate(preds, parts, train_rows, fields, evaluator_cfg) -> dict:
             cis = bootstrap_cis(ex, sc, budgets=budgets, has_group=has_group, has_f=has_f, reps=reps,
                                 seed=evaluator_cfg.bootstrap_seed, salt=n)
             for name, ci in cis.items():
-                entry[name]["ci95"] = ci
+                entry[name].update(ci)  # ci95 and ci95_skipped
         sets[n] = entry
 
     all_sets = list(dict.fromkeys(parts.select_index[r["id"]] for r in parts.select_rows))
