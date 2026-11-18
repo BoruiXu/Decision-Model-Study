@@ -479,7 +479,7 @@ test 数据由 `harness/heldout.py` 统一识别（inspect 和 make-split 共用
 
 ### 指定的卡（`gpu_source: explicit`）
 
-`--gpus` 列出的每张卡都要：在 nvidia-smi 里存在；不被 `gpu_include`/`gpu_exclude` 排除；空闲显存 ≥ max(resolve 的每卡估算, `min_free_mib`)。失败时逐卡给出原因，并列出卡上的进程（pid、进程名、显存，来自 `--query-compute-apps`）；resolve 把其他空闲显存够的卡作为事实列在替代方案里。lock 记下 `machine.gpu.source: explicit` 和卡号，`feasibility.cards` 记下检查结果。runner 不扫描也不等卡：按 lock 里的卡号重新检查，配了 `lock_dir` 时同样加锁（被别人锁住就失败，`DONE` 的 `stage` 是 `acquire`），然后把这些卡作为预先分配的卡交给训练。`scan` 和 `preassigned` 不变。
+`--gpus` 列出的每张卡都要：在 nvidia-smi 里存在；不被 `gpu_include`/`gpu_exclude` 排除；空闲显存 ≥ max(resolve 的每卡估算, `min_free_mib`)；卡上没有计算进程（检查时本 run 还没启动，所以看到的进程都不是它的）。卡上有进程时默认拒绝，`ojh run --allow-shared` 才允许共用，记进 lock 的 `machine.gpu.allow_shared`，runner 和 finalize 取卡时沿用。失败时逐卡给出原因，并列出卡上的进程（pid、用户、进程名、显存；来自 `--query-compute-apps` 和 `ps`，看不到的用户记作 `?`）；resolve 把其他空闲显存够的卡作为事实列在替代方案里。lock 记下 `machine.gpu.source: explicit` 和卡号，`feasibility.cards` 记下检查结果。runner 不扫描也不等卡：按 lock 里的卡号重新检查，配了 `lock_dir` 时同样加锁（被别人锁住就失败，`DONE` 的 `stage` 是 `acquire`），然后把这些卡作为预先分配的卡交给训练。`scan` 和 `preassigned` 不变。
 
 ### 基座的默认配方
 

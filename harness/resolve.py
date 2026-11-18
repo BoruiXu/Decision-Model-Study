@@ -259,30 +259,35 @@ def _candidate_cards(machine: MachineConfig, n: int, query) -> tuple[list[Gpu] |
     return cards, None
 
 
-def _explicit_feasible(machine, explicit, need, query, apps_query) -> dict:
+def _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared=False) -> dict:
     need_mib = math.ceil(need * 1024)
     try:
-        cards = check_explicit(machine, explicit, need_mib, query=query, apps_query=apps_query)
+        cards = check_explicit(machine, explicit, need_mib, query=query, apps_query=apps_query,
+                               allow_shared=allow_shared)
     except GpuUnavailable as e:
         floor = max(need_mib, machine.min_free_mib)
         good = [c for c in e.cards if c["free_mib"] >= floor and c["index"] not in explicit
+                and (allow_shared or not c["processes"])
                 and c["index"] not in machine.gpu_exclude
                 and (machine.gpu_include is None or c["index"] in machine.gpu_include)]
-        alts = [("other cards with enough free memory now: "
+        alts = [("other cards with enough free memory and no other process now: "
                  + ", ".join(f"GPU {c['index']} ({c['name']}, {c['free_mib']} MiB free)" for c in good))
-                if good else f"no other card has {floor} MiB free now",
-                "wait until the requested cards are free",
-                "a recipe or base that needs less memory per card"]
+                if good else f"no other card has {floor} MiB free and no other process now"]
+        if any(r.startswith("shared with") for r in e.reasons.values()):
+            alts.append("ask the user whether the run may share the card(s) with the processes listed; only if "
+                        "they agree, run again with --allow-shared")
+        alts += ["wait until the requested cards are free",
+                 "a recipe or base that needs less memory per card"]
         raise Infeasible(str(e), alts) from None
     return {"checked": True, "need_gib_per_card": round(need, 1), "need_mib_per_card": cards[0]["need_mib"],
             "min_free_gib": round(min(c["free_mib"] for c in cards) / 1024, 1), "cards": cards}
 
 
 def _check_feasible(machine, base, mode, n, parallel, query, explicit=None,
-                    apps_query=_nvidia_smi_apps) -> tuple[float, dict]:
+                    apps_query=_nvidia_smi_apps, allow_shared=False) -> tuple[float, dict]:
     need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
     if explicit is not None:
-        return need, _explicit_feasible(machine, explicit, need, query, apps_query)
+        return need, _explicit_feasible(machine, explicit, need, query, apps_query, allow_shared)
     cards, why = _candidate_cards(machine, n, query)
     if cards is None:
         return need, {"checked": False, "reason": why}
@@ -334,7 +339,7 @@ def _explicit_cards(exp: ExperimentConfig, machine: MachineConfig) -> list[int] 
 
 
 def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner, fingerprint, machine_origin,
-           apps_query, check_gpus: bool) -> tuple[dict, Path]:
+           apps_query, check_gpus: bool, allow_shared: bool = False) -> tuple[dict, Path]:
     """The lock and the adapter file. Order: config, prepared data and adapter checks, plan-only, fingerprint,
     and the cards last, so busy cards never hide a data or plan problem (``check_gpus=False`` skips them)."""
     if not exp.base:
@@ -425,7 +430,9 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
                             "min_free_mib": machine.min_free_mib, "lock_dir": machine.lock_dir,
                             "order": machine.order, "wait_timeout_s": machine.wait_timeout_s,
                             "source": "explicit" if explicit is not None else machine.gpu_source,
-                            "explicit": explicit},
+                            "explicit": explicit,
+                            # explicit cards may carry other processes only with ojh run --allow-shared
+                            "allow_shared": bool(allow_shared)},
                     "forbidden_write_roots": list(machine.forbidden_write_roots),
                     # where these settings came from (--machine, $OJH_MACHINE, user config or inferred)
                     "origin": machine_origin or {"source": "given", "path": None}},
@@ -450,7 +457,8 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
     lock["plan"] = {"steps": steps, "ranks": ranks, "interval": interval}
     lock["fingerprint"] = (fingerprint or (lambda: _fingerprint(machine)))()
     if check_gpus:
-        _, lock["feasibility"] = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query)
+        _, lock["feasibility"] = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query,
+                                                 allow_shared)
     else:
         lock["feasibility"] = {"checked": False, "reason": "cards not checked (ojh check)"}
     return lock, afile
@@ -467,9 +475,10 @@ def check(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, p
 
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
             fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None,
-            apps_query=_nvidia_smi_apps) -> Path:
+            apps_query=_nvidia_smi_apps, allow_shared: bool = False) -> Path:
     lock, afile = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
-                         machine_origin=machine_origin, apps_query=apps_query, check_gpus=True)
+                         machine_origin=machine_origin, apps_query=apps_query, check_gpus=True,
+                         allow_shared=allow_shared)
     out_root, data = Path(machine.out_root), lock["data"]
     body = json.dumps(lock, sort_keys=True, default=str)
     stamp = (now or dt.datetime.now(dt.timezone.utc)).strftime("%Y%m%dT%H%M%SZ")

@@ -106,7 +106,8 @@ def _run(lock_path, acquire, popen, finalize, killpg) -> int:
             from harness.gpu import acquire
         stage = "acquire"
         g = lock["machine"]["gpu"]
-        kw = ({"explicit": list(g["explicit"]), "need_mib": math.ceil(float(lock["estimate_gib"]) * 1024)}
+        kw = ({"explicit": list(g["explicit"]), "need_mib": math.ceil(float(lock["estimate_gib"]) * 1024),
+               "allow_shared": bool(g.get("allow_shared"))}
               if g["source"] == "explicit" else {})
         lease = acquire(_machine(lock["machine"]), lock["n_gpus"], **kw)
         _write_json(run_dir / "gpus.json", [{"uuid": u, "name": n} for u, n in zip(lease.uuids, lease.names)])

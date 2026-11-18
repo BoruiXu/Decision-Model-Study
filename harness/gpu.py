@@ -81,24 +81,44 @@ def parse_apps(text: str) -> list[dict]:
     return out
 
 
+def _process_user(pid: int) -> str:
+    """Owner of ``pid`` (``ps``), or "?" when it is not visible here (another container, already gone)."""
+    try:
+        out = subprocess.run(["ps", "-o", "user=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+    return out or "?"
+
+
 def _procs_text(procs: list[dict]) -> str:
-    return "; ".join(f"pid {p['pid']} {p['name']} {p['used_mib']} MiB" for p in procs) or "none"
+    return "; ".join(f"pid {p['pid']} (user {p.get('user', '?')}, {p['name']}, {p['used_mib']} MiB)"
+                     for p in procs) or "none"
 
 
 def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *, query=_nvidia_smi,
-                   apps_query=_nvidia_smi_apps) -> list[dict]:
-    """Validate explicitly requested cards: each exists, is allowed by gpu_include/gpu_exclude, and has at
-    least max(need_mib, machine.min_free_mib) MiB free. Returns one dict per card (index, uuid, name,
-    free_mib, need_mib, processes) or raises GpuUnavailable with a reason per failing card."""
+                   apps_query=_nvidia_smi_apps, user_of=_process_user, allow_shared: bool = False) -> list[dict]:
+    """Validate explicitly requested cards: each exists, is allowed by gpu_include/gpu_exclude, has at
+    least max(need_mib, machine.min_free_mib) MiB free and, unless ``allow_shared``, runs no compute
+    process (any process found here was not started by this run: the run starts only after this check).
+    Returns one dict per card (index, uuid, name, free_mib, need_mib, processes with pid, user, name and
+    memory) or raises GpuUnavailable with a reason per failing card."""
     need = max(int(need_mib), machine.min_free_mib)
     known = {g.index: g for g in parse_nvidia_smi(query())}
     try:
         apps = parse_apps(apps_query())
-    except Exception:  # process listing is informative only
+    except Exception:  # without a process list only the free memory can be judged
         apps = []
+    users: dict[int, str] = {}
 
     def procs(uuid):
-        return [{k: a[k] for k in ("pid", "name", "used_mib")} for a in apps if a["uuid"] == uuid]
+        out = []
+        for a in apps:
+            if a["uuid"] == uuid:
+                if a["pid"] not in users:
+                    users[a["pid"]] = user_of(a["pid"])
+                out.append({"pid": a["pid"], "user": users[a["pid"]], "name": a["name"], "used_mib": a["used_mib"]})
+        return out
 
     reasons: dict[int, str] = {}
     cards = []
@@ -117,6 +137,9 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
             reasons[i] = "excluded by the machine config (gpu_include/gpu_exclude)"
         elif g.free_mib < need:
             reasons[i] = f"{g.free_mib} MiB free < {need} MiB needed; processes: {_procs_text(p)}"
+        elif p and not allow_shared:
+            reasons[i] = (f"shared with {len(p)} compute process(es) not started by this run: {_procs_text(p)}; "
+                          "use it only after asking the user, with --allow-shared")
         cards.append({"index": g.index, "uuid": g.uuid, "name": g.name, "free_mib": g.free_mib,
                       "need_mib": need, "processes": p})
     if reasons:
@@ -126,12 +149,14 @@ def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *,
     return cards
 
 
-def _explicit(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query) -> "GpuLease":
+def _explicit(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query,
+              allow_shared: bool = False) -> "GpuLease":
     if not explicit:
         raise ConfigError("gpu_source is 'explicit' but no cards were given: pass --gpus i,j,...")
     if len(explicit) != n:
         raise ConfigError(f"{len(explicit)} card(s) given for a run on {n} card(s)")
-    cards = check_explicit(machine, list(explicit), need_mib, query=query, apps_query=apps_query)
+    cards = check_explicit(machine, list(explicit), need_mib, query=query, apps_query=apps_query,
+                           allow_shared=allow_shared)
     fds: list[int] = []
     try:
         if machine.lock_dir:
@@ -241,17 +266,18 @@ def _preassigned(n: int, query) -> GpuLease:
 
 def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sleep,
             clock=time.monotonic, explicit: list[int] | None = None, need_mib: int = 0,
-            apps_query=_nvidia_smi_apps) -> GpuLease:
+            apps_query=_nvidia_smi_apps, allow_shared: bool = False) -> GpuLease:
     """Pick and lock ``n`` GPUs according to ``machine``; hold the returned lease for the whole run.
 
     ``query(uuid=None)`` returns nvidia-smi csv text for all cards, or for one card when given its uuid.
     With ``gpu_source: explicit`` the cards are ``explicit`` (nvidia-smi indices): validated with
-    ``check_explicit`` against ``need_mib``, locked when ``lock_dir`` is set, never waited for.
+    ``check_explicit`` against ``need_mib`` (refused when another process uses one, unless
+    ``allow_shared``), locked when ``lock_dir`` is set, never waited for.
     """
     if machine.order != "free_desc":
         raise ConfigError(f"unsupported gpu order: {machine.order!r} (only 'free_desc')")
     if machine.gpu_source == "explicit":
-        return _explicit(machine, n, explicit, need_mib, query, apps_query)
+        return _explicit(machine, n, explicit, need_mib, query, apps_query, allow_shared)
     if machine.gpu_source == "preassigned":
         return _preassigned(n, query)
     if machine.gpu_source != "scan":

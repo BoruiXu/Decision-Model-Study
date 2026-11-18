@@ -117,7 +117,7 @@ def cmd_prepare(a) -> int:
 def cmd_resolve(a) -> int:
     try:
         m, origin = find_machine(a.machine)
-        path = resolve.resolve(load_experiment(a.exp), m, machine_origin=origin)
+        path = resolve.resolve(load_experiment(a.exp), m, machine_origin=origin, allow_shared=a.allow_shared)
     except Infeasible as e:
         print(f"infeasible: {e}", file=sys.stderr)
         for alt in e.alternatives:
@@ -129,7 +129,8 @@ def cmd_resolve(a) -> int:
 
 def cmd_run(a) -> int:
     gpus = oneshot.parse_gpus(a.gpus) if a.gpus is not None else None
-    out = oneshot.run(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine, allow_test=a.allow_test)
+    out = oneshot.run(a.exp, base=a.base, gpus=gpus, recipe=a.recipe, machine=a.machine, allow_test=a.allow_test,
+                      allow_shared=a.allow_shared)
     print(json.dumps(out, indent=2))
     return 0
 
@@ -155,7 +156,8 @@ def cmd_status(a) -> int:
 def _on_one_gpu(run, fn):
     lock = _lock_of(run)
     g = lock["machine"]["gpu"]
-    kw = {"explicit": list(g["explicit"])[:1]} if g["source"] == "explicit" else {}
+    kw = ({"explicit": list(g["explicit"])[:1], "allow_shared": bool(g.get("allow_shared"))}
+          if g["source"] == "explicit" else {})
     lease = gpu.acquire(runner._machine(lock["machine"]), 1, **kw)
     try:
         return fn(lease)
@@ -280,6 +282,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = cmd("resolve", cmd_resolve, "resolve an experiment into run.lock.yaml")
     s.add_argument("exp")
     s.add_argument("--machine", help=MACHINE_HELP)
+    s.add_argument("--allow-shared", action="store_true",
+                   help="use requested cards that carry other processes (ask the user first; recorded in the lock)")
     s = cmd("run", cmd_run, "prepare, resolve and launch in one call; prints a JSON summary and returns at once")
     s.add_argument("exp")
     s.add_argument("--base", help="catalog base (overrides or fills base in the experiment; never chosen for you)")
@@ -287,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--recipe", help="recipe file (default: the experiment's recipe, else the base's default_recipes)")
     s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows (needs approval)")
+    s.add_argument("--allow-shared", action="store_true",
+                   help="use requested cards that carry other processes (ask the user first; recorded in the lock)")
     s = cmd("check", cmd_check, "validate an experiment like ojh run (prepare, config, adapter, plan-only, "
                                 "fingerprint) without judging the cards; writes no lock and launches nothing")
     s.add_argument("exp")

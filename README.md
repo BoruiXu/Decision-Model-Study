@@ -90,7 +90,7 @@ ojh status <RUN>                          # 4. 进度；结束后打印 RESULT.m
 ```
 
 - `--base`、`--gpus` 覆盖或补上 `exp.yaml` 里的 `base`、`gpus`；没有基座就报错并列出 catalog。配方取 `--recipe`，否则 `exp.yaml` 的 `recipe`，否则基座的 `default_recipes`（joey-1 1 卡、elephant-1 2–8 卡、mammoth-1 2–8 卡）；没有对应卡数的默认值时报错并列出选项。
-- `--gpus` 的每张卡都会检查：存在、空闲显存够（resolve 的每卡估算和 `min_free_mib` 取大）、列出卡上的进程；不满足就逐卡说明原因。resolve 判定不可行时退出码 2 并列出替代方案，不会自己换基座或配方。
+- `--gpus` 的每张卡都会检查：存在、空闲显存够（resolve 的每卡估算和 `min_free_mib` 取大）、卡上没有其他计算进程；不满足就逐卡说明原因，并列出卡上进程的 pid、用户和显存。卡上已有进程（常是别人的）时默认拒绝；确认可以共用后加 `--allow-shared`，它会记进 lock。resolve 判定不可行时退出码 2 并列出替代方案，不会自己换基座或配方。
 - `ojh make-split`：`--mode select-report`（默认）把每个评测集按组分成 select/report，写成 `data.split_file`；`--mode holdout` 从一个训练文件按组切出 val，写到目录 `--out` 下的 `train.jsonl`、`val.jsonl`、`manifest.json`。确定性（默认 `--seed 20261115`），`--frac` 是 select（或 val）的比例；格式见 `ojh make-split --help` 和 `docs/design.md` 第 15 节。
 
 `<RUN>` 是 run 目录（含 `run.lock.yaml`）。训练结束（成功或失败）时 runner 写 `<RUN>/DONE`：`exit_code`、`stage`（`verify`、`acquire`、`train`、`finalize`），失败时还有一行 `error`；每个 seed 实际执行的命令在 `<RUN>/command-s<seed>.json`。之后：

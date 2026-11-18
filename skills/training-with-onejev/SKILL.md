@@ -63,6 +63,7 @@ description: Use when a user wants a OneJev decision model, router or predictor 
 |---|---|
 | `ojh eval-report <RUN> --allow-report` | 读 report 部分 |
 | 任何带 `--allow-test` 的命令 | 读 test；会记进 lock、`RESULT.md` 和登记表 |
+| `ojh run … --allow-shared` | 和卡上已有的进程（常是别人的）共用卡；会记进 lock。先把进程列表（pid、用户、显存）给用户看 |
 | `ojh cleanup <RUN> --confirm` | 先不带 `--confirm` 跑，把候选和大小给用户看 |
 | 任何 override（含换卡数、改 batch、全参↔LoRA） | 见下节 |
 | 换基座、换配方（`--recipe`）、换卡 | 用户给的输入，只有用户能改 |
@@ -86,7 +87,7 @@ overrides:
 
 | 现象 | 处理 |
 |---|---|
-| `ojh run` 报 GPU 校验失败（空闲显存不够、卡上有别人的进程） | 把原因原样告诉用户，问：换哪几张卡、等一等、还是减卡。不碰别人的进程 |
+| `ojh run` 报 GPU 校验失败（空闲显存不够，或卡上已有计算进程：默认拒绝，列出 pid、用户、显存） | 把原因和进程列表原样告诉用户，问：换哪几张卡、等一等、减卡，还是共用这张卡。只有用户明确同意共用，才加 `--allow-shared` 重跑。不碰别人的进程 |
 | `ojh run` 报不可行（Infeasible），列出替代方案 | 列给用户选（等卡、加卡、换小基座、LoRA）。不自己选 |
 | 训练中 OOM，或另一位用户中途占了卡（`nvidia-smi` 里有别人的进程） | 被占卡：告诉用户，问换卡还是等。真 OOM：提议 override `onejev.batch_tokens` 减半（再不行 `onejev.max_rows`），用户同意后重跑 |
 | plan-only 失败 | 多半是数据或适配器的问题：回 `adapting-data-for-onejev` 自测，修好后重跑 |

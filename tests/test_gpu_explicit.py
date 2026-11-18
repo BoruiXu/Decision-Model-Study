@@ -37,18 +37,40 @@ def test_parse_apps():
     assert parse_apps("No running processes found\n") == []
 
 
+def user_of(pid):
+    return {77: "alice", 4242: "bob"}.get(pid, "?")
+
+
 def test_check_explicit_ok_lists_processes():
-    cards = check_explicit(machine(), [1, 0], need_mib=40000, query=query, apps_query=apps)
-    assert [c["index"] for c in cards] == [1, 0] and [c["uuid"] for c in cards] == ["GPU-b", "GPU-a"]
-    assert cards[0]["processes"] == [{"pid": 77, "name": "/usr/bin/other", "used_mib": 10000}]
-    assert cards[1]["processes"] == [] and cards[0]["free_mib"] == 70000
+    cards = check_explicit(machine(), [3, 0], need_mib=40000, query=query, apps_query=apps, user_of=user_of)
+    assert [c["index"] for c in cards] == [3, 0] and [c["uuid"] for c in cards] == ["GPU-d", "GPU-a"]
+    assert cards[0]["processes"] == [] and cards[0]["free_mib"] == 81000
+
+
+def test_shared_card_refused_by_default_with_its_processes():
+    with pytest.raises(GpuUnavailable) as e:
+        check_explicit(machine(), [1, 0], need_mib=40000, query=query, apps_query=apps, user_of=user_of)
+    msg = str(e.value)
+    assert "GPU 1: shared with 1 compute process(es) not started by this run" in msg
+    assert "pid 77 (user alice, /usr/bin/other, 10000 MiB)" in msg and "--allow-shared" in msg
+    assert set(e.value.reasons) == {1}
+    cards = check_explicit(machine(), [1, 0], need_mib=40000, query=query, apps_query=apps, user_of=user_of,
+                           allow_shared=True)
+    assert cards[0]["processes"] == [{"pid": 77, "user": "alice", "name": "/usr/bin/other", "used_mib": 10000}]
+
+
+def test_acquire_explicit_honours_allow_shared():
+    with pytest.raises(GpuUnavailable, match="shared"):
+        acquire(machine(), 1, explicit=[1], need_mib=1000, query=query, apps_query=apps)
+    lease = acquire(machine(), 1, explicit=[1], need_mib=1000, query=query, apps_query=apps, allow_shared=True)
+    assert lease.uuids == ["GPU-b"]
 
 
 def test_check_explicit_reasons_per_card():
     with pytest.raises(GpuUnavailable) as e:
         check_explicit(machine(gpu_exclude=[3]), [2, 7, 3, 0], need_mib=40000, query=query, apps_query=apps)
     msg = str(e.value)
-    assert "GPU 2: 9000 MiB free < 40000 MiB needed" in msg and "pid 4242 python3 71000 MiB" in msg
+    assert "GPU 2: 9000 MiB free < 40000 MiB needed" in msg and "pid 4242 (user ?, python3, 71000 MiB)" in msg
     assert "GPU 7: not found" in msg
     assert "GPU 3: excluded" in msg
     assert "GPU 0" not in msg.split("\n", 1)[1]  # card 0 is fine
@@ -77,8 +99,8 @@ def test_acquire_explicit_locks_when_lock_dir_set(tmp_path):
 
 
 def test_acquire_explicit_without_lock_dir_takes_no_locks():
-    lease = acquire(machine(), 1, explicit=[1], need_mib=1000, query=query, apps_query=apps)
-    assert lease.uuids == ["GPU-b"] and lease.names == ["NVIDIA A100-SXM4-80GB"] and lease._fds == []
+    lease = acquire(machine(), 1, explicit=[0], need_mib=1000, query=query, apps_query=apps)
+    assert lease.uuids == ["GPU-a"] and lease.names == ["NVIDIA A100-SXM4-80GB"] and lease._fds == []
 
 
 def test_acquire_explicit_needs_the_cards():
@@ -112,11 +134,24 @@ def resolve_explicit(tmp_path, gpus, **kw):
 
 
 def test_resolve_with_explicit_cards(tmp_path):
-    lock = yaml.safe_load(resolve_explicit(tmp_path, [1, 3]).read_text())
+    lock = yaml.safe_load(resolve_explicit(tmp_path, [0, 3]).read_text())
     assert lock["n_gpus"] == 2
-    assert lock["machine"]["gpu"]["source"] == "explicit" and lock["machine"]["gpu"]["explicit"] == [1, 3]
+    assert lock["machine"]["gpu"]["source"] == "explicit" and lock["machine"]["gpu"]["explicit"] == [0, 3]
+    assert lock["machine"]["gpu"]["allow_shared"] is False
     cards = lock["feasibility"]["cards"]
-    assert [c["uuid"] for c in cards] == ["GPU-b", "GPU-d"] and cards[0]["processes"][0]["pid"] == 77
+    assert [c["uuid"] for c in cards] == ["GPU-a", "GPU-d"] and cards[0]["processes"] == []
+
+
+def test_resolve_refuses_a_shared_card_unless_allowed(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    with pytest.raises(Infeasible) as e:
+        resolve_explicit(tmp_path / "a", [1])
+    assert "shared with 1 compute process" in str(e.value)
+    assert any("--allow-shared" in a and "ask" in a for a in e.value.alternatives)
+    lock = yaml.safe_load(resolve_explicit(tmp_path / "b", [1], allow_shared=True).read_text())
+    assert lock["machine"]["gpu"]["allow_shared"] is True
+    assert lock["feasibility"]["cards"][0]["processes"][0]["pid"] == 77
 
 
 def test_resolve_explicit_card_without_memory_is_infeasible(tmp_path):
@@ -138,7 +173,7 @@ def test_runner_passes_explicit_cards_to_acquire(tmp_path):
     from test_runner import FakeLease, FakePopen, make_lock
     from harness.runner import run
     path, lock, run_dir = make_lock(tmp_path, seeds=(42,))
-    lock["machine"]["gpu"].update(source="explicit", explicit=[1, 3])
+    lock["machine"]["gpu"].update(source="explicit", explicit=[1, 3], allow_shared=True)
     lock["estimate_gib"] = 32.0
     path.write_text(yaml.safe_dump(lock))
     seen = {}
@@ -148,4 +183,4 @@ def test_runner_passes_explicit_cards_to_acquire(tmp_path):
         return FakeLease()
     FakePopen.codes = [0]
     assert run(path, acquire=fake_acquire, popen=FakePopen, finalize=lambda rd: None, killpg=lambda *a: None) == 0
-    assert seen == {"source": "explicit", "n": 2, "explicit": [1, 3], "need_mib": 32768}
+    assert seen == {"source": "explicit", "n": 2, "explicit": [1, 3], "need_mib": 32768, "allow_shared": True}

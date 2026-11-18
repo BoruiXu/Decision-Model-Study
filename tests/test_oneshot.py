@@ -190,3 +190,26 @@ def test_cli_check(tmp_path, monkeypatch, capsys):
                      "--machine", str(ws / "machine.yaml")]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["cards_checked"] is False and out["plan"]["steps"] == 10
+
+
+def test_run_refuses_a_shared_card_and_records_allow_shared(tmp_path, monkeypatch, capsys):
+    ws = workspace(tmp_path)
+    shared = APPS + "GPU-a, 31337, vllm, 55000\n"
+    tmux = Tmux()
+    with pytest.raises(Infeasible) as e:
+        oneshot.run(ws / "exp.yaml", base="joey-1", gpus=[0], machine=str(ws / "machine.yaml"),
+                    query=lambda uuid=None: CARDS, apps_query=lambda: shared,
+                    plan_runner=lambda lock: "PLAN_OK\n10 steps for 1 ranks\n",
+                    fingerprint=lambda: {"driver_version": "570"}, tmux=tmux)
+    assert "pid 31337" in str(e.value) and "vllm" in str(e.value) and tmux.calls == []
+    out = oneshot.run(ws / "exp.yaml", base="joey-1", gpus=[0], machine=str(ws / "machine.yaml"),
+                      allow_shared=True, query=lambda uuid=None: CARDS, apps_query=lambda: shared,
+                      plan_runner=lambda lock: "PLAN_OK\n10 steps for 1 ranks\n",
+                      fingerprint=lambda: {"driver_version": "570"}, tmux=tmux)
+    lock = yaml.safe_load((Path(out["run_dir"]) / "run.lock.yaml").read_text())
+    assert lock["machine"]["gpu"]["allow_shared"] is True and out["allow_shared"] is True
+    assert out["gpus"][0]["processes"][0]["pid"] == 31337
+    seen = {}
+    monkeypatch.setattr(oneshot, "run", lambda *a, **kw: seen.update(kw) or {"ok": 1})
+    assert cli.main(["run", str(ws / "exp.yaml"), "--base", "joey-1", "--gpus", "0", "--allow-shared"]) == 0
+    assert seen["allow_shared"] is True

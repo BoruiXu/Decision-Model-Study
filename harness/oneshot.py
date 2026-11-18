@@ -87,10 +87,12 @@ def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, r
 
 
 def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, recipe: str | None = None,
-        machine: str | None = None, allow_test: bool = False, query=None, apps_query=None, plan_runner=None,
-        fingerprint=None, tmux=None) -> dict:
+        machine: str | None = None, allow_test: bool = False, allow_shared: bool = False, query=None,
+        apps_query=None, plan_runner=None, fingerprint=None, tmux=None) -> dict:
+    """``allow_shared``: the requested cards may carry other users' processes (only after asking the user);
+    recorded in the lock."""
     m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test)
-    lock_path = resolve.resolve(exp, m, machine_origin=origin, **_probes(
+    lock_path = resolve.resolve(exp, m, machine_origin=origin, allow_shared=allow_shared, **_probes(
         query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
     started = launch.launch(lock_path, tmux=tmux or launch._tmux)
 
@@ -101,6 +103,7 @@ def run(exp_path, *, base: str | None = None, gpus: list[int] | None = None, rec
             "done": started["done"], "base": exp.base,
             "recipe": {"path": exp.recipe, "source": source, "mode": lock["mode"]},
             "gpus": feas.get("cards") or lock["machine"]["gpu"].get("explicit") or lock["n_gpus"],
+            "allow_shared": bool(lock["machine"]["gpu"].get("allow_shared")),
             "data_sha256": {"source": lock["data"]["source_sha256"], **lock["data"]["sha256"]},
             "machine": origin, "result": str(run_dir / "RESULT.md"),
             "next": f"ojh status {run_dir}"}
