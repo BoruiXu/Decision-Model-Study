@@ -1,81 +1,115 @@
 ---
 name: training-with-onejev
-description: Use when training a OneJev decision model (full fine-tune or LoRA) from a dataset on any single GPU node — preparing data, resolving a run lock, launching, monitoring, finalizing (checkpoint selection, thresholds, baselines, gate) and recording the result. 训练 OneJev 决策模型、全参或 LoRA、任意单机 GPU 节点。
+description: Use when a user wants a OneJev decision model, router or predictor trained on their data on a GPU node — they give a data location, GPU ids or a base (joey-1, elephant-1, mammoth-1, onejev-qwen3.5-*) — or asks about a run's progress, RESULT.md, OOM, an infeasible resolve, a DONE error, report/test evaluation or checkpoint cleanup. 训练 OneJev 决策模型、全参或 LoRA、查进度、看结果、清理 checkpoint。
 ---
 
 # 用 OneJev 训练决策模型
 
-本 repo 把一份数据训练成：选好的 checkpoint、逐题预测、阈值、和基线的对比、一条登记记录。
-所有参数来自三处：**机器配置**（每人每台机器一份，模板见 `examples/machine.example.yaml`）、**实验配置**（示例见 `examples/dynamicserve_v1_repro.yaml`）、**lock**（`run.lock.yaml`，执行时只读它）。skill 只写流程和判断，不写任何取值。下面的 `<machine.yaml>`、`<exp.yaml>`、`<RUN>`、`<host>` 都由使用方给出。
+## 概览
+
+用户只给三样：**数据位置、GPU、基座**。agent 认数据、写实验配置（必要时写适配器），`ojh` 脚本做机械的事（转数据、解析、启动、选模、评测、登记），结束后 agent 读 `RESULT.md` 汇报。
+
+**基座、卡、训练方式、标签含义都由用户决定。** agent 可以列选项、给建议，不能替用户选，也不能悄悄换。
 
 ## 在哪里运行
 
-`ojh` 装在有 GPU 的机器上，在那里运行。`setup.sh` 不会激活 `.venv`，所以要写全路径 `<repo>/.venv/bin/ojh`（`<repo>` 是本 repo 在 GPU 机器上的位置）；下文的 `ojh` 都是它的简写。你不在 GPU 机器上时，用 ssh 调用，例如 `ssh <host> <repo>/.venv/bin/ojh status <RUN>`。`status` 输出很短，通过 ssh 看很便宜。记录和登记表都留在 GPU 机器的 `out_root` 下。第一次使用先在 GPU 机器上执行 `bash setup.sh <machine.yaml>`（建环境，并执行 `ojh setup`：拉 OneJev、打补丁、校验 sha256），再 `<repo>/.venv/bin/ojh fetch-base <基座名> --machine <machine.yaml>`（基座在 `catalog/bases/`）。
+- `ojh` 在 GPU 机器上运行，写全路径 `<repo>/.venv/bin/ojh`（下文简写 `ojh`）。不在 GPU 机器上就 `ssh <host> <repo>/.venv/bin/ojh …`。
+- 数据要在 GPU 机器上读得到；用户给的路径在哪台机器上不清楚时，在第 1 步一起问。
+- 第一次用先按 `README.md` 安装，并 `ojh fetch-base <基座>`（下载固定版本的权重，不需要审批）。
+- 机器配置可选，按优先级取：`--machine` > `$OJH_MACHINE` > `~/.config/onejev-harness/machine.yaml` > 自动推断。
 
-配置里的路径可以用 `~` 和 `$VAR`；相对路径按所在配置文件的目录解析（配方找不到时再按 repo 根目录，如 `examples/recipes/…`），所以在哪个目录下运行都一样。机器配置的 `forbidden_write_roots` 下的目录不会被写，要写的路径在其下时命令报 `ConfigError`。
+## 主流程
 
-## 流程
-
-1. **prepare**：`ojh prepare <exp.yaml> --machine <machine.yaml>`。适配器把数据转成 OneJev 行，校验 schema、id 唯一、target 分布和 split 字段，按配置派生训练子集，并把 sha256 和实验配置里的 `data.train_sha256` 比对，不一致就停。输出写到 `<out_root>/<name>/prepared/`。数据格式不是 OneJev 行时，先用 `adapting-data-for-onejev` skill。
-2. **resolve**：`ojh resolve <exp.yaml> --machine <machine.yaml>`。检测 GPU，结合数据、机器、基座、配方解析出 `<out_root>/<name>/<run_id>/run.lock.yaml`（命令会打印路径），并在目标机器上跑 plan-only，按每 epoch 步数的 1/8 设评测和保存间隔。放不下时退出码是 2，并在 stderr 列出替代方案（`alternative: …`）；harness 不会自动换方式。
-3. **launch**：`ojh launch <RUN>/run.lock.yaml`。在 tmux 里依次核对 prepared 数据的 sha256、取卡加锁、按 seed 训练（每个 seed 的命令先写进 `<RUN>/command-s<seed>.json`）、自动 finalize、写 `DONE` 完成标记（`exit_code`、`stage`，失败时还有一行 `error`）。命令**立即返回**会话名、日志路径和完成标记路径。
-4. **status**：`ojh status <RUN>`，输出当前 step / 总 step、最近一次评测、预计剩余时间和占用的卡。
-5. **finalize**：launch 结束时自动调用；失败或想重跑时 `ojh finalize <RUN>`。它选 checkpoint、重载后逐题打分、跑训练基线（TF-IDF、分组先验、全选正类、oracle）、定阈值、出对比表并判门，写 `RUN_CARD.md` 并登记。
-6. **写结论**：读 `<RUN>/RUN_CARD.md` 后，用 `ojh note <RUN> "<一句话结论和依据>"` 填登记表里的 `conclusion`。没有 `conclusion` 的记录算未完成，`ojh table` 默认不显示（加 `--all` 才显示）。`ojh table --machine <machine.yaml>` 把登记表渲染成对比表。
-
-## 长任务规则（不要轮询）
-
-`ojh launch` 返回后，**立即向用户回报会话名、日志路径和完成标记路径，然后停下**。不要写等待循环，不要隔几秒查一次。用户回来问或之后再需要时，才用 `ojh status <RUN>` 看一次；`DONE` 存在就看 `RUN_CARD.md`。
-
-## 三个判断点（只有这三处需要你判断，其余都是确定性的）
-
-1. **改 override**。需要偏离配方时，在实验配置的 `overrides` 里写，**每项都必须有原因**：
-   ```yaml
-   overrides:
-     onejev.batch_tokens: {value: 8192, reason: "OOM at step 3, see runner.log"}
+1. **确认三样输入**，缺什么问什么，一次问完：
+   - 数据位置（文件或目录）。
+   - GPU 卡号（如 `0` 或 `2,3`）。没给就问，不要自己挑卡。
+   - 基座。没给就列出 `<repo>/catalog/bases/` 里的基座和参数量（`params_b`），请用户选；**不要替用户选**。
+   - 同时告诉用户实验工作区的位置：默认 `~/onejev-work/<实验名>/`，`<实验名>` = 数据名-基座（数据是文件取文件名去后缀，是目录取目录名；如 `/data/qa.csv` + joey-1 → `qa-joey-1`），用户可以改。工作区**不在本 repo 里**；机器配置的 `forbidden_write_roots` 覆盖了它时，换个位置并告诉用户。
+2. **认数据，写 `exp.yaml`**。**REQUIRED SUB-SKILL:** `adapting-data-for-onejev`。产出是工作区里的 `exp.yaml`，必要时还有 `adapter.py`、`splits.json`。用户对标签含义和判定问题的确认在这一步拿到。
+3. **启动**：
+   ```bash
+   ojh run <工作区>/exp.yaml --base <基座> --gpus <i,j,...>
    ```
-   键只能是 `mode`、`gpus`、`fsdp`、`onejev.<flag>`、`lora.<字段>`。`onejev.` 下不能写 harness 自己推导的标志（`full_finetune`、`fsdp`、`attention`、`readout`、`multimodal`、`eval_every`、`save_every`、`seed`、`name`、`train`、`eval`、`model`、`runs_dir` 等），要用对应的键。改完重新 `ojh resolve`，得到新的 lock；lock 里会记录每个 override 和原因。不要直接改 lock 里的参数，也不要在 lock 之外改任何东西。
-2. **写适配器**：数据不是 OneJev 行时，见 `adapting-data-for-onejev`。
-3. **按故障表处理**（见下）。
+   - 它依次 prepare → resolve → launch，**立即返回**一段 JSON：`run_dir`、`session`、`log`、`DONE`。
+   - 配方由 `ojh run` 按基座的 catalog 条目和卡数自动取，agent 不挑；只有用户要求时才加 `--recipe`。
+   - 非零退出：把报错原因和列出的替代方案原样告诉用户，**问用户选哪个**。不要自己换基座、配方、卡或训练方式再跑。
+4. **交回，不轮询**（见下节）。
+5. **结束后读 `<run_dir>/RESULT.md`**（机器可读的在 `result.json`），按下面的汇报格式回报。
+6. 用户认可结论后，`ojh note <run_dir> "<一句话结论和依据>"` 写进登记表。没有结论的记录 `ojh table` 默认不显示。
 
-## 全参 vs LoRA
+## 启动之后：交回，不轮询
 
-- 训练方式（`full` | `lora`）只来自配方（配方必须显式写 `mode`）或一条带原因的 override。harness 从不自动切换。
-- 全参放不下时，`resolve` 会在 `Infeasible` 的替代方案里列出 LoRA，你可以向用户提议，但**切换前要先问用户**，且只能写成 `mode` override 并写明原因。LoRA 多卡只能用 DDP（每张卡放一份完整 bf16 基座），OneJev 的 FSDP 只支持全参。
-- 同一组对比实验里，全参和 LoRA 的结果**分开看**，不能混在一起比；对比只在训练方式相同、数据和评测集相同的 run 之间做。
+- **被编排的子 agent**：把 `ojh run` 的 JSON 原样交回调用方，立即结束本轮。
+- **独立运行**：把 `session`、`log`、`DONE` 路径告诉用户，然后停下。之后用户问起才 `ojh status <run_dir>` 看一次。
+- 用户明确要你盯着时，也只偶尔看：两次 `ojh status` 之间至少隔 30 分钟，按它给的剩余时间定下次。
+- 任何情况下都不写 `sleep`/`while`/`watch` 循环，不隔几秒查一次。
+- `DONE` 存在就结束了：`exit_code` 为 0 读 `RESULT.md`；否则看 `stage` 和 `error`，查故障表。
 
-## 审批规则（先问用户，得到明确的“可以”再做）
+## 汇报格式（读 RESULT.md 后）
 
-- `ojh cleanup <RUN> --confirm`：先不带 `--confirm` 运行，列出候选和大小给用户看；只有用户同意才加 `--confirm`。没有 `--confirm` 不删任何东西。
-- `ojh eval-report <RUN> --allow-report`，以及任何带 `--allow-test` 的命令（`prepare`、`eval-report`）：report 和 test 部分默认不读；train 文件里有 split 以 `test` 开头的行时，`prepare` 也会拒绝。用 `--allow-test` 要用户批准。`prepare --allow-test` 会写进 `prepared.json` 和 lock，finalize 和 `eval-report` 沿用它，`RUN_CARD.md` 和登记记录里都会写明读过 test。
-- 推送本 repo（`git push`）。
-- 全参和 LoRA 之间的切换（见上）。
+1. 选中的 step 和 checkpoint；复评 NLL 是否对上。
+2. 指标对比表：路由器 vs 基线（TF-IDF、分组先验、长度）和 oracle，每项带 bootstrap 置信区间，按评测集分列。置信区间大面积重叠时说“没有显著差别”，不说“更好”。
+3. 阈值：各预算下的阈值、实际不一致率和承接率；最佳 Jaccard 阈值。
+4. 门的结论（通过/未通过）和原因。
+5. `RESULT.md` 里的所有警告，原样列出。
+6. 下一步建议（例如是否值得跑 report）。跑 report/test 要先问用户。
+
+## 审批点（先问，得到明确的“可以”再做）
+
+| 动作 | 说明 |
+|---|---|
+| `ojh eval-report <RUN> --allow-report` | 读 report 部分 |
+| 任何带 `--allow-test` 的命令 | 读 test；会记进 lock、`RESULT.md` 和登记表 |
+| `ojh cleanup <RUN> --confirm` | 先不带 `--confirm` 跑，把候选和大小给用户看 |
+| 任何 override（含换卡数、改 batch、全参↔LoRA） | 见下节 |
+| 换基座、换配方（`--recipe`）、换卡 | 用户给的输入，只有用户能改 |
+| `git push` 本 repo | |
+
+## 改设置：只能写 override，带原因
+
+```yaml
+overrides:
+  onejev.batch_tokens: {value: 8192, reason: "OOM at step 3, see runner.log"}
+```
+
+- 键只能是 `mode`、`gpus`、`fsdp`、`onejev.<flag>`、`lora.<字段>`；harness 自己推导的标志（`full_finetune`、`fsdp`、`attention`、`readout`、`eval_every`、`save_every`、`seed`、`model` 等）不能写在 `onejev.` 下。
+- 冒烟短跑：`onejev.max_steps`（评测间隔仍按完整 epoch 算，中途只评一次）。
+- 写好后重新 `ojh run`，得到新 lock。**不要改 `run.lock.yaml`**，执行时只读它。
+- 全参放不下时，替代方案里会有 LoRA；向用户提议，同意后才写 `mode` override。全参和 LoRA 的结果分开比，不混在一张对比里。
 
 ## 故障表
 
-先看 `<RUN>/runner.log` 和 `ojh status <RUN>`，再对照：
+先看 `DONE`（`exit_code`、`stage`、`error`）、`<run_dir>/runner.log`、`ojh status <run_dir>`。
 
 | 现象 | 处理 |
 |---|---|
-| OOM（CUDA out of memory） | 先写 override `onejev.batch_tokens` 调低（例如减半），每项写原因；还不行再调低 `onejev.max_rows`。重新 `ojh resolve`，再 `ojh launch` |
-| FLA kernel 报错 | 写 override `onejev.disable_fla_kernels: true`，写明原因；不能悄悄加标志 |
-| NCCL 超时 | 先查这些卡上是否有别人的进程（`nvidia-smi`）；或用 `gpus` override 减少卡数后重新 resolve，写明原因 |
-| plan-only 失败（resolve 阶段） | 多半是数据或适配器的问题：检查 `prepared/` 里的 `train.jsonl`、适配器输出，重新 `ojh prepare` |
-| `DONE` 的 `stage` 是 `verify`，`error` 说 prepared 数据的 sha256 和 lock 对不上 | `resolve` 之后又跑过 `prepare`。重新 `ojh resolve` 得到新 lock，再 `ojh launch`；不要改 lock |
-| `ConfigError: refusing to write … forbidden_write_roots` | 要写的目录在禁止写入的目录下。问用户后改机器配置里的 `out_root`、`registry`、`lock_dir` 或 `model_dir` |
-| 等卡超时（`GpuWaitTimeout`） | 继续等，或调整机器配置里的 GPU 规则（`gpu_include` / `gpu_exclude` / `min_free_mib` / `wait_timeout_s`），再重新 launch |
-| 复评 NLL 对不上（rescore 与训练时的 NLL 差超阈值） | **不要手改任何数字**。run 的状态是 `failed`，原因写在 `RUN_CARD.md`，如实向用户报告 |
-| resolve 报不可行（`Infeasible`，退出码 2） | 按替代方案选：等卡、减卡、换更小的基座，或（问过用户后）写 `mode` override 换训练方式 |
-| finalize 的门没过（状态 `failed`） | 记录照常写。如实报告：路由器没有超过 TF-IDF 或分组先验。不要为了过门改评测配置 |
+| `ojh run` 报 GPU 校验失败（空闲显存不够、卡上有别人的进程） | 把原因原样告诉用户，问：换哪几张卡、等一等、还是减卡。不碰别人的进程 |
+| `ojh run` 报不可行（Infeasible），列出替代方案 | 列给用户选（等卡、加卡、换小基座、LoRA）。不自己选 |
+| 训练中 OOM，或另一位用户中途占了卡（`nvidia-smi` 里有别人的进程） | 被占卡：告诉用户，问换卡还是等。真 OOM：提议 override `onejev.batch_tokens` 减半（再不行 `onejev.max_rows`），用户同意后重跑 |
+| plan-only 失败 | 多半是数据或适配器的问题：回 `adapting-data-for-onejev` 自测，修好后重跑 |
+| prepare 报 `data.train_sha256` 不一致 | 数据文件变了。告诉用户，问是否是新数据版本；确认后才更新 `train_sha256` |
+| `DONE` 的 `stage: verify`，prepared 的 sha256 和 lock 对不上 | 启动后又有人 prepare 了同名实验。重新 `ojh run`，不要改 lock |
+| `DONE` 的 `stage: acquire`（等卡超时） | 告诉用户，问等多久或换卡 |
+| `DONE` 的 `stage: train` | 看 `runner.log` 末尾：OOM / FLA kernel（提议 override `onejev.disable_fla_kernels: true`）/ NCCL 超时（查别人的进程，或提议减卡） |
+| `DONE` 的 `stage: finalize`；复评 NLL 对不上 | 不手改任何数字，如实报告；可以 `ojh finalize <run_dir>` 重跑收尾 |
+| 门没过 | 记录照常写。如实说路由器没超过哪条基线；不改评测配置去凑 |
+| 基座权重不存在 | `ojh fetch-base <基座>` 后重跑 |
+| `ojh` 没有 `run`/`inspect`/`make-split` 子命令，或找不到 `examples/exp.template.yaml` | GPU 机器上的 repo 版本旧。告诉用户更新并重装；不要自己补代码，也不要退回分步命令拼流程 |
 
-## run 目录里有什么
+## 常见错误
 
-`run.lock.yaml`（全部设置）、`command-s<seed>.json`（每个 seed 实际执行的命令、工作目录和 runner 设置的环境变量）、`runner.log`、`DONE`（退出码、阶段，失败时的 `error`）、`timing.json`、`checkpoint.sha256`、`predictions_select.jsonl`、`deletion_candidates.json`、`dropped.json`、`RUN_CARD.md`（一页摘要：选中的 checkpoint、复评 NLL、对照表、阈值、门、overrides、删除候选）。每个 seed 的 checkpoint 在 `runs/<实验名>-s<seed>/` 下。
+| 错误 | 正确做法 |
+|---|---|
+| 用户没说基座，agent 挑了一个“合适的” | 列出 catalog，请用户选 |
+| GPU 校验失败后自己换了别的卡或减了卡数 | 报原因，问用户 |
+| 不可行时自己切到 LoRA | 提议，用户同意后写 `mode` override |
+| `ojh run` 之后 `sleep 600` 再查，或循环查 `status` | 交回 JSON 或告诉用户路径，停下 |
+| 只报路由器 AUC，不报基线和置信区间 | 按汇报格式：对比基线、oracle，带 CI |
+| OOM 后直接改 `run.lock.yaml` | 写带原因的 override，问用户，重跑 |
+| 为了看效果顺手跑了 `eval-report` 或 `--allow-test` | 先问 |
+| 把工作区、`exp.yaml`、适配器放进本 repo | 放在工作区（repo 之外） |
+| 清理磁盘时直接 `cleanup --confirm` | 先列候选，问用户 |
 
-## 不要做的事
+## 进阶：分步命令
 
-- 在 lock 之外改参数而不记录；
-- 读 test 或 report 部分而没有用户批准；
-- 自动删 checkpoint；
-- 放不下时自己切到 LoRA（或反过来）；
-- 阻塞等训练结束或轮询。
+`ojh run` 包了 `prepare`、`resolve`、`launch`；要单独重做某一步时用它们（`ojh <cmd> --help`）。`finalize` 可单独重跑；`ojh table` 渲染登记表对比。
