@@ -114,3 +114,25 @@ def test_per_eval_set_tables_with_cis(tmp_path):
     assert by_set["a"]["methods"]["model"]["auc_ci95"] is not None and "tfidf" in by_set["b"]["methods"]
     assert "### Metrics on eval set a (select part, 15 questions)" in md
     assert "### Metrics on eval set b (select part, 15 questions)" in md
+
+
+import pytest  # noqa: E402
+
+from harness.config import FieldsSpec  # noqa: E402
+
+
+@pytest.mark.parametrize("consistency", [None, "meta.f"])
+def test_empty_budgets_through_finalize_and_result(tmp_path, consistency):
+    fields = FieldsSpec(label="target.yes", group="meta.cat", consistency=consistency, text="messages")
+    run_dir, lock = make_run(tmp_path, evaluator=EvaluatorSpec(budgets=[], bootstrap_reps=10), fields=fields)
+    out = finalize(run_dir, scorer=FakeScorer())
+    assert not [f for f in out["failures"] if "gate" not in f], out["failures"]
+    res = json.loads((run_dir / "result.json").read_text())
+    s = res["seeds"]["42"]
+    assert set(s["thresholds"]) == {"best_jaccard"}
+    methods = s["metrics"]["methods"]
+    assert not any(k.startswith("share_at_budget") for m in methods.values() for k in m)
+    assert ("oracle" in methods) == (consistency is not None)
+    md = (run_dir / "RESULT.md").read_text()
+    assert "best_jaccard" in md and "budget_" not in md and "share_at_budget" not in md
+    assert json.loads((run_dir / "thresholds.json").read_text())["42"].keys() == {"best_jaccard"}

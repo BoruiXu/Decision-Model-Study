@@ -49,7 +49,7 @@ def read_jsonl(path):
 
 
 def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evaluator=None, overrides=None,
-             drop=False, allow_test=False, extra_split=False):
+             drop=False, allow_test=False, extra_split=False, fields=None):
     rng = random.Random(0)
     src = tmp_path / "src"
     src.mkdir()
@@ -75,7 +75,7 @@ def make_run(tmp_path, recipe="joey_full_1gpu", seeds=(42,), merge=False, evalua
     exp = ExperimentConfig(
         name="exp", base="joey-1", recipe=str(RECIPES / f"{recipe}.yaml"),
         data=DataSpec(train=train, train_sha256=_sha256(train), eval=evals, split_file=str(split)),
-        fields=FieldsSpec(label="target.yes", group="meta.cat", consistency="meta.f", text="messages"),
+        fields=fields or FieldsSpec(label="target.yes", group="meta.cat", consistency="meta.f", text="messages"),
         evaluator=evaluator or EvaluatorSpec(bootstrap_reps=FAST_REPS), seeds=list(seeds), merge=merge, overrides=overrides or {})
     out = tmp_path / "out"
     prepare(exp, out / "exp" / "prepared", allow_test=allow_test)
