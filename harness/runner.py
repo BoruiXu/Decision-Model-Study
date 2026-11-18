@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -104,7 +105,10 @@ def _run(lock_path, acquire, popen, finalize, killpg) -> int:
         if acquire is None:
             from harness.gpu import acquire
         stage = "acquire"
-        lease = acquire(_machine(lock["machine"]), lock["n_gpus"])
+        g = lock["machine"]["gpu"]
+        kw = ({"explicit": list(g["explicit"]), "need_mib": math.ceil(float(lock["estimate_gib"]) * 1024)}
+              if g["source"] == "explicit" else {})
+        lease = acquire(_machine(lock["machine"]), lock["n_gpus"], **kw)
         _write_json(run_dir / "gpus.json", [{"uuid": u, "name": n} for u, n in zip(lease.uuids, lease.names)])
         repo = lock["repo_root"]
         set_env = {**lock["machine"]["env"],

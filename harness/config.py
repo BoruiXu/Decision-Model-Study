@@ -100,7 +100,7 @@ class ExperimentConfig:
     subset: SubsetSpec | None = None
     evaluator: EvaluatorSpec = field(default_factory=EvaluatorSpec)
     seeds: list[int] = field(default_factory=lambda: [42])
-    gpus: int | None = None
+    gpus: int | list[int] | None = None  # a count, or card indices (gpu source explicit)
     merge: bool = False
     overrides: dict[str, Any] = field(default_factory=dict)
 

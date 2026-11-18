@@ -14,7 +14,10 @@ out_root: <OUT_ROOT>      # 输出根目录：<out_root>/<实验名>/prepared �
 # ---- GPU 规则 ----
 # gpu_source: scan 表示扫描 nvidia-smi 后按下面的规则筛卡、加锁；
 #             preassigned 表示启动前已设好 CUDA_VISIBLE_DEVICES（例如调度系统分配的卡），
-#             直接用这些卡，跳过扫描和加锁。
+#             直接用这些卡，跳过扫描和加锁；
+#             explicit 表示用 ojh run --gpus i,j 指定的卡：逐张检查存在、空闲显存够（取 resolve 的每卡估算和
+#             min_free_mib 中较大的）、列出卡上的其他进程；配了 lock_dir 时同样加锁。没有机器配置时默认就是 explicit。
+#             --gpus 给了卡号时，无论这里写什么都按 explicit 处理。
 gpu_source: scan
 # gpu_include: [0, 1, 2, 3]   # 只允许使用这些卡；不写表示所有卡
 gpu_exclude: []               # 不允许使用的卡

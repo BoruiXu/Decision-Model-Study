@@ -13,12 +13,13 @@ from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, m
                      registry, report_eval, resolve, runner, status)
 from harness.catalog import ROOT, sha256_file
 from harness.config import ConfigError, check_writable, find_machine, load_experiment, load_machine
-from harness.gpu import GpuWaitTimeout
+from harness.gpu import GpuUnavailable, GpuWaitTimeout
 from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
 from harness.resolve import Infeasible
 
-KNOWN = (FileNotFoundError, ConfigError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout, Infeasible)
+KNOWN = (FileNotFoundError, ConfigError, ShaMismatch, IdOverlap, TestSplitRefused, ReportRefused, GpuWaitTimeout,
+         GpuUnavailable, Infeasible)
 REFUSALS = (TestSplitRefused, ReportRefused, Infeasible)
 
 
@@ -132,7 +133,9 @@ def cmd_status(a) -> int:
 
 def _on_one_gpu(run, fn):
     lock = _lock_of(run)
-    lease = gpu.acquire(runner._machine(lock["machine"]), 1)
+    g = lock["machine"]["gpu"]
+    kw = {"explicit": list(g["explicit"])[:1]} if g["source"] == "explicit" else {}
+    lease = gpu.acquire(runner._machine(lock["machine"]), 1, **kw)
     try:
         return fn(lease)
     finally:

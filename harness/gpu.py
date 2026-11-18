@@ -18,10 +18,20 @@ from .config import ConfigError, MachineConfig, check_writable
 
 RETRY_S = 30
 _QUERY = "--query-gpu=index,uuid,name,memory.free"
+_APPS = "--query-compute-apps=gpu_uuid,pid,process_name,used_memory"
 
 
 class GpuWaitTimeout(RuntimeError):
     """Not enough free GPUs became available before ``wait_timeout_s``."""
+
+
+class GpuUnavailable(RuntimeError):
+    """One or more explicitly requested cards cannot be used; ``reasons`` maps card index -> reason."""
+
+    def __init__(self, reasons: dict, cards: list | None = None):
+        self.reasons = dict(reasons)
+        self.cards = list(cards or [])  # every card nvidia-smi listed, with its processes
+        super().__init__("requested GPU(s) not usable:\n" + "\n".join(f"GPU {i}: {r}" for i, r in reasons.items()))
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,102 @@ def _nvidia_smi(uuid: str | None = None) -> str:
     if uuid is not None:
         cmd[1:1] = ["-i", uuid]
     return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+
+
+def _nvidia_smi_apps() -> str:
+    return subprocess.run(["nvidia-smi", _APPS, "--format=csv,noheader,nounits"], check=True,
+                          capture_output=True, text=True).stdout
+
+
+def parse_apps(text: str) -> list[dict]:
+    """Parse ``--query-compute-apps=gpu_uuid,pid,process_name,used_memory`` csv (no header, no units)."""
+    out = []
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4 or not parts[1].isdigit():
+            continue  # blank lines and "No running processes found"
+        used = parts[-1]
+        out.append({"uuid": parts[0], "pid": int(parts[1]), "name": ", ".join(parts[2:-1]),
+                    "used_mib": int(used) if used.isdigit() else None})
+    return out
+
+
+def _procs_text(procs: list[dict]) -> str:
+    return "; ".join(f"pid {p['pid']} {p['name']} {p['used_mib']} MiB" for p in procs) or "none"
+
+
+def check_explicit(machine: MachineConfig, indices: list[int], need_mib: int, *, query=_nvidia_smi,
+                   apps_query=_nvidia_smi_apps) -> list[dict]:
+    """Validate explicitly requested cards: each exists, is allowed by gpu_include/gpu_exclude, and has at
+    least max(need_mib, machine.min_free_mib) MiB free. Returns one dict per card (index, uuid, name,
+    free_mib, need_mib, processes) or raises GpuUnavailable with a reason per failing card."""
+    need = max(int(need_mib), machine.min_free_mib)
+    known = {g.index: g for g in parse_nvidia_smi(query())}
+    try:
+        apps = parse_apps(apps_query())
+    except Exception:  # process listing is informative only
+        apps = []
+
+    def procs(uuid):
+        return [{k: a[k] for k in ("pid", "name", "used_mib")} for a in apps if a["uuid"] == uuid]
+
+    reasons: dict[int, str] = {}
+    cards = []
+    seen = set()
+    for i in indices:
+        g = known.get(i)
+        if i in seen:
+            reasons[i] = "listed twice"
+            continue
+        seen.add(i)
+        if g is None:
+            reasons[i] = f"not found (nvidia-smi lists {sorted(known)})"
+            continue
+        p = procs(g.uuid)
+        if i in machine.gpu_exclude or (machine.gpu_include is not None and i not in machine.gpu_include):
+            reasons[i] = "excluded by the machine config (gpu_include/gpu_exclude)"
+        elif g.free_mib < need:
+            reasons[i] = f"{g.free_mib} MiB free < {need} MiB needed; processes: {_procs_text(p)}"
+        cards.append({"index": g.index, "uuid": g.uuid, "name": g.name, "free_mib": g.free_mib,
+                      "need_mib": need, "processes": p})
+    if reasons:
+        everything = [{"index": g.index, "uuid": g.uuid, "name": g.name, "free_mib": g.free_mib,
+                       "processes": procs(g.uuid)} for g in known.values()]
+        raise GpuUnavailable(reasons, everything)
+    return cards
+
+
+def _explicit(machine: MachineConfig, n: int, explicit, need_mib: int, query, apps_query) -> "GpuLease":
+    if not explicit:
+        raise ConfigError("gpu_source is 'explicit' but no cards were given: pass --gpus i,j,...")
+    if len(explicit) != n:
+        raise ConfigError(f"{len(explicit)} card(s) given for a run on {n} card(s)")
+    cards = check_explicit(machine, list(explicit), need_mib, query=query, apps_query=apps_query)
+    fds: list[int] = []
+    try:
+        if machine.lock_dir:
+            check_writable(machine, machine.lock_dir)
+            _prepare_lock_dir(machine.lock_dir)
+            reasons = {}
+            for c in cards:
+                path = os.path.join(machine.lock_dir, f"{c['uuid']}.lock")
+                fd = _try_lock(path)
+                if fd is None:
+                    reasons[c["index"]] = f"locked by another run ({path})"
+                    continue
+                fds.append(fd)
+                fresh = [x for x in parse_nvidia_smi(query(c["uuid"])) if x.uuid == c["uuid"]]
+                if not fresh or fresh[0].free_mib < c["need_mib"]:
+                    reasons[c["index"]] = (f"{fresh[0].free_mib if fresh else '?'} MiB free < {c['need_mib']} "
+                                           "MiB needed once locked")
+            if reasons:
+                raise GpuUnavailable(reasons)
+        lease = GpuLease([c["uuid"] for c in cards], [c["name"] for c in cards], fds)
+        fds = []
+        return lease
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 @dataclass
@@ -134,13 +240,18 @@ def _preassigned(n: int, query) -> GpuLease:
 
 
 def acquire(machine: MachineConfig, n: int, *, query=_nvidia_smi, sleep=time.sleep,
-            clock=time.monotonic) -> GpuLease:
+            clock=time.monotonic, explicit: list[int] | None = None, need_mib: int = 0,
+            apps_query=_nvidia_smi_apps) -> GpuLease:
     """Pick and lock ``n`` GPUs according to ``machine``; hold the returned lease for the whole run.
 
     ``query(uuid=None)`` returns nvidia-smi csv text for all cards, or for one card when given its uuid.
+    With ``gpu_source: explicit`` the cards are ``explicit`` (nvidia-smi indices): validated with
+    ``check_explicit`` against ``need_mib``, locked when ``lock_dir`` is set, never waited for.
     """
     if machine.order != "free_desc":
         raise ConfigError(f"unsupported gpu order: {machine.order!r} (only 'free_desc')")
+    if machine.gpu_source == "explicit":
+        return _explicit(machine, n, explicit, need_mib, query, apps_query)
     if machine.gpu_source == "preassigned":
         return _preassigned(n, query)
     if machine.gpu_source != "scan":

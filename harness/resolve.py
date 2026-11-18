@@ -16,7 +16,7 @@ import yaml
 
 from .catalog import ROOT, load_base, sha256_file
 from .config import ConfigError, ExperimentConfig, MachineConfig, check_writable
-from .gpu import Gpu, _nvidia_smi, parse_nvidia_smi
+from .gpu import Gpu, GpuUnavailable, _nvidia_smi, _nvidia_smi_apps, check_explicit, parse_nvidia_smi
 from .onejev import load_lock
 
 # Initial memory-estimate constants (design section 8); recalibrate after the first real runs.
@@ -238,8 +238,30 @@ def _candidate_cards(machine: MachineConfig, n: int, query) -> tuple[list[Gpu] |
     return cards, None
 
 
-def _check_feasible(machine, base, mode, n, parallel, query) -> tuple[float, dict]:
+def _explicit_feasible(machine, explicit, need, query, apps_query) -> dict:
+    need_mib = math.ceil(need * 1024)
+    try:
+        cards = check_explicit(machine, explicit, need_mib, query=query, apps_query=apps_query)
+    except GpuUnavailable as e:
+        floor = max(need_mib, machine.min_free_mib)
+        good = [c for c in e.cards if c["free_mib"] >= floor and c["index"] not in explicit
+                and c["index"] not in machine.gpu_exclude
+                and (machine.gpu_include is None or c["index"] in machine.gpu_include)]
+        alts = [("other cards with enough free memory now: "
+                 + ", ".join(f"GPU {c['index']} ({c['name']}, {c['free_mib']} MiB free)" for c in good))
+                if good else f"no other card has {floor} MiB free now",
+                "wait until the requested cards are free",
+                "a recipe or base that needs less memory per card"]
+        raise Infeasible(str(e), alts) from None
+    return {"checked": True, "need_gib_per_card": round(need, 1), "need_mib_per_card": cards[0]["need_mib"],
+            "min_free_gib": round(min(c["free_mib"] for c in cards) / 1024, 1), "cards": cards}
+
+
+def _check_feasible(machine, base, mode, n, parallel, query, explicit=None,
+                    apps_query=_nvidia_smi_apps) -> tuple[float, dict]:
     need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
+    if explicit is not None:
+        return need, _explicit_feasible(machine, explicit, need, query, apps_query)
     cards, why = _candidate_cards(machine, n, query)
     if cards is None:
         return need, {"checked": False, "reason": why}
@@ -278,8 +300,21 @@ def _source_sha(path, what: str) -> str:
     return sha256_file(path)
 
 
+def _explicit_cards(exp: ExperimentConfig, machine: MachineConfig) -> list[int] | None:
+    """Card indices when ``gpus`` lists them (``ojh run --gpus 0,1``); None for a plain count."""
+    if isinstance(exp.gpus, list):
+        if not exp.gpus or not all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in exp.gpus):
+            raise ConfigError(f"gpus must be a count or a non-empty list of card indices (got {exp.gpus!r})")
+        return list(exp.gpus)
+    if machine.gpu_source == "explicit":
+        raise ConfigError("gpu_source is 'explicit': list the cards with --gpus i,j,... (or gpus: [i, j] in "
+                          "the experiment)")
+    return None
+
+
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
-            fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None) -> Path:
+            fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None,
+            apps_query=_nvidia_smi_apps) -> Path:
     if not exp.base:
         from .catalog import CATALOG_DIR
         raise ConfigError("no base: set base in the experiment or pass --base; catalog bases: "
@@ -289,7 +324,10 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
     out_root = Path(machine.out_root)
     check_writable(machine, out_root / exp.name, machine.registry_path, machine.lock_dir)
     recipe = copy.deepcopy(_load_recipe(exp.recipe))
-    if exp.gpus is not None:
+    explicit = _explicit_cards(exp, machine)
+    if explicit is not None:
+        recipe["gpus"] = len(explicit)
+    elif exp.gpus is not None:
         recipe["gpus"] = exp.gpus
     recorded = _apply_overrides(recipe, exp.overrides)
     mode = recipe.get("mode")
@@ -305,7 +343,9 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
 
     base = load_base(exp.base)
     parallel = parallel_for(mode, base["params_b"], n, recipe.get("fsdp"))
-    need, feasibility = _check_feasible(machine, base, mode, n, parallel, query)
+    if explicit is not None and n != len(explicit):
+        raise ConfigError(f"{len(explicit)} card(s) listed but the run needs {n} (an override sets gpus)")
+    need, feasibility = _check_feasible(machine, base, mode, n, parallel, query, explicit, apps_query)
 
     prepared = Path(machine.out_root) / exp.name / "prepared"
     info_path = prepared / "prepared.json"
@@ -347,7 +387,8 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
                     "gpu": {"include": machine.gpu_include, "exclude": machine.gpu_exclude,
                             "min_free_mib": machine.min_free_mib, "lock_dir": machine.lock_dir,
                             "order": machine.order, "wait_timeout_s": machine.wait_timeout_s,
-                            "source": machine.gpu_source},
+                            "source": "explicit" if explicit is not None else machine.gpu_source,
+                            "explicit": explicit},
                     "forbidden_write_roots": list(machine.forbidden_write_roots),
                     # where these settings came from (--machine, $OJH_MACHINE, user config or inferred)
                     "origin": machine_origin or {"source": "given", "path": None}},
