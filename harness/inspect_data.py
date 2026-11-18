@@ -25,6 +25,8 @@ from harness.prepare import validate_rows
 
 EXTS = {".jsonl": "jsonl", ".json": "json", ".csv": "csv", ".tsv": "tsv", ".parquet": "parquet"}
 MAX_DISTINCT = 20  # a field with at most this many distinct scalar values lists them with counts
+GROUP_MAX = 500  # up to this many distinct values a repeating field is a candidate group (top values shown)
+TOP_K = 20
 TEXT_LEN = 20  # strings at least this long on average are reported as text-like
 TRUNC = 200  # sample string truncation
 MAX_DEPTH = 4
@@ -193,11 +195,12 @@ class _Field:
         self.types: dict[str, int] = {}
         self.distinct: dict = {}
         self.overflow = False
+        self.by_split: dict[str, set] = {"train": set(), "other": set()}  # values in train / other rows
         self.n_num, self.lo, self.hi, self.total = 0, None, None, 0.0
         self.str_len = self.str_n = 0
         self.list_len = self.list_n = 0
 
-    def add_row(self, values: list) -> None:
+    def add_row(self, values: list, tag: str | None = None) -> None:
         if any(v is not None for v in values):
             self.rows += 1
         for v in values:
@@ -218,15 +221,29 @@ class _Field:
             if t in ("str", "int", "float", "bool") and not self.overflow:
                 key = (t, v)
                 self.distinct[key] = self.distinct.get(key, 0) + 1
-                if len(self.distinct) > MAX_DISTINCT:
+                if tag in self.by_split:
+                    self.by_split[tag].add(key)
+                if len(self.distinct) > GROUP_MAX:
                     self.overflow, self.distinct = True, {}
+                    self.by_split = {"train": set(), "other": set()}
 
     def facts(self, n_rows: int) -> dict:
         out: dict = {"types": dict(sorted(self.types.items())), "fill": self.rows / n_rows if n_rows else 0.0}
-        n_scalar = sum(self.distinct.values())
-        if self.distinct and not self.overflow and len(self.distinct) < n_scalar:
+        n_scalar, n_distinct = sum(self.distinct.values()), len(self.distinct)
+        if self.overflow:
+            out["distinct_more_than"] = GROUP_MAX
+        elif n_distinct:
+            out["distinct"] = n_distinct
             items = sorted(self.distinct.items(), key=lambda kv: (-kv[1], str(kv[0][1])))
-            out["values"] = [{"value": v, "count": c} for (_, v), c in items]
+            if n_distinct <= MAX_DISTINCT and n_distinct < n_scalar:
+                out["values"] = [{"value": v, "count": c} for (_, v), c in items]
+            elif n_distinct < n_scalar:
+                out["top_values"] = [{"value": v, "count": c} for (_, v), c in items[:TOP_K]]
+            kinds = {t for t, _ in self.distinct}
+            if 2 <= n_distinct and 2 * n_distinct <= n_scalar and kinds <= {"str", "int"}:
+                out["group_candidate"] = True  # repeating values: candidate fields.group / --group
+                if self.by_split["train"] and self.by_split["other"]:
+                    out["values_only_in_non_train_rows"] = len(self.by_split["other"] - self.by_split["train"])
         if self.n_num:
             out.update(min=self.lo, max=self.hi, mean=self.total / self.n_num,
                        unit_interval=0.0 <= self.lo and self.hi <= 1.0)
@@ -245,17 +262,39 @@ class _Facts:
         self.n = 0
         self.fields: dict[str, _Field] = {}
 
-    def add(self, r) -> None:
+    def add(self, r, tag: str | None = None) -> None:
         self.n += 1
         seen: dict = {}
         if isinstance(r, dict):
             for k, v in r.items():
                 _walk(v, str(k), seen)
         for path, values in seen.items():
-            self.fields.setdefault(path, _Field()).add_row(values)
+            self.fields.setdefault(path, _Field()).add_row(values, tag)
 
     def result(self) -> dict:
         return {p: f.facts(self.n) for p, f in self.fields.items()}
+
+    def value_sets(self) -> dict[str, set]:
+        """Distinct values of the candidate group fields (kept out of the printed report)."""
+        return {p: {v for _, v in f.distinct} for p, f in self.fields.items()
+                if not f.overflow and f.facts(self.n).get("group_candidate")}
+
+
+TRAIN_VALUE = re.compile(r"^(train|training)([_\-.].*)?$", re.I)
+
+
+def _row_tag(r, split_cols) -> str | None:
+    """"train" or "other" from the row's split-like columns, None when it has no split value."""
+    vals = [v for p, v in split_values(r) if isinstance(v, str)]
+    for p in split_cols:
+        cur = r
+        for part in p.split("."):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        if isinstance(cur, str):
+            vals.append(cur)
+    if not vals:
+        return None
+    return "train" if any(TRAIN_VALUE.match(v) for v in vals) else "other"
 
 
 def field_facts(rows) -> dict:
@@ -330,7 +369,7 @@ def _scan(out: dict, rows_fn, n_samples: int) -> None:
         if isinstance(r, dict) and row_is_test(r, test_cols):
             tests += 1  # counted only: no fields, values, samples or schema errors from test rows
             continue
-        facts.add(r)
+        facts.add(r, _row_tag(r, list(out["split_columns"])) if isinstance(r, dict) else None)
         if not isinstance(r, dict):
             non_dict += 1
             continue
@@ -347,6 +386,7 @@ def _scan(out: dict, rows_fn, n_samples: int) -> None:
     if tests:
         out["test_rows"] = tests
     out["fields"], out["samples"] = facts.result(), samples
+    out["_value_sets"] = facts.value_sets()
     if non_dict:
         n_err += 1
         errors = (errors + ["not every row is a JSON object"])[:5]
@@ -425,10 +465,30 @@ def data_files(path) -> tuple[list[Path], list[dict]]:
     return keep, skipped
 
 
+def _cross_file(reports: list[dict]) -> None:
+    """For each non-train file: how many values of each candidate group field never occur in the
+    train-named files (name hint train/training); the value sets themselves are dropped."""
+    train = [r for r in reports if r.get("name_hint") in ("train", "training") and r.get("_value_sets")]
+    seen: dict[str, set] = {}
+    for r in train:
+        for path, vals in r["_value_sets"].items():
+            seen.setdefault(path, set()).update(vals)
+    for r in reports:
+        sets = r.pop("_value_sets", None) or {}
+        if train and r not in train:
+            outside = {p: len(v - seen[p]) for p, v in sets.items() if p in seen}
+            if outside:
+                r["values_not_in_train_files"] = outside
+    for r in train:
+        r.pop("_value_sets", None)
+
+
 def inspect_path(path, rows: int = 3) -> dict:
     files, skipped = data_files(path)
     root = Path(path) if Path(path).is_dir() else None
-    return {"path": str(Path(path).resolve()), "files": [inspect_file(f, rows, root) for f in files],
+    reports = [inspect_file(f, rows, root) for f in files]
+    _cross_file(reports)
+    return {"path": str(Path(path).resolve()), "files": reports,
             "skipped": skipped}
 
 
@@ -474,9 +534,22 @@ def render(report: dict) -> str:
                     bits.append(f"avg len {x['avg_len']}" + (" (text-like)" if x["text_like"] else ""))
                 if "avg_items" in x:
                     bits.append(f"avg items {x['avg_items']}")
+                if "distinct" in x or "distinct_more_than" in x:
+                    bits.append(f"distinct {x['distinct']}" if "distinct" in x
+                                else f"distinct > {x['distinct_more_than']}")
+                if x.get("group_candidate"):
+                    bits.append("group candidate"
+                                + (f", {x['values_only_in_non_train_rows']} value(s) only in non-train rows"
+                                   if "values_only_in_non_train_rows" in x else ""))
                 if "values" in x:
                     bits.append("values " + ", ".join(f"{_fmt(v['value'])}={v['count']}" for v in x["values"]))
+                elif "top_values" in x:
+                    bits.append(f"top {len(x['top_values'])}: "
+                                + ", ".join(f"{_fmt(v['value'])}={v['count']}" for v in x["top_values"]))
                 lines.append(f"  {path}: " + "; ".join(bits))
+            if f.get("values_not_in_train_files"):
+                lines.append("values never seen in the train-named file(s): "
+                             + ", ".join(f"{p}: {n}" for p, n in f["values_not_in_train_files"].items()))
         for i, s in enumerate(f["samples"]):
             lines.append(f"sample {i + 1}: " + json.dumps(s, ensure_ascii=False))
     return "\n".join(lines)

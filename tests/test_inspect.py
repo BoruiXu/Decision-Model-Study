@@ -236,3 +236,35 @@ def test_split_file_with_metadata_like_prepare_accepts(tmp_path):
                                          eval={"val_id": EvalSetSpec(train_labels=str(tmp_path / "val_id.jsonl"))}))
     parts = build_eval_parts(exp)  # prepare accepts the same file
     assert len(parts.select_rows) == 2
+
+
+def write_csv(path, header, rows):
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(header)
+        w.writerows(rows)
+
+
+def test_group_candidates_up_to_hundreds_of_values(tmp_path):
+    write_csv(tmp_path / "data.csv", ["id", "text", "source", "label"],
+              [[f"q{i}", f"some request text number {i}", f"src{i % 79}", i % 2] for i in range(400)])
+    f = files_of(inspect_path(tmp_path))["data.csv"]["fields"]
+    src = f["source"]
+    assert src["distinct"] == 79 and src["group_candidate"] is True and "values" not in src
+    assert len(src["top_values"]) == 20 and src["top_values"][0]["count"] == 6
+    assert f["id"].get("group_candidate") is not True and f["text"].get("group_candidate") is not True
+    assert f["label"]["values"] and f["label"]["distinct"] == 2
+    assert "source: " in render(inspect_path(tmp_path)) and "group candidate" in render(inspect_path(tmp_path))
+
+
+def test_values_only_outside_train_rows_and_files(tmp_path):
+    rows = [[f"t{i}", f"src{i % 10}", "train"] for i in range(100)]
+    rows += [[f"v{i}", f"src{i % 13}", "val"] for i in range(52)]  # src10, src11, src12 never in train rows
+    write_csv(tmp_path / "all.csv", ["id", "source", "split"], rows)
+    write_csv(tmp_path / "train.csv", ["id", "source"], [[f"a{i}", f"s{i % 8}"] for i in range(80)])
+    write_csv(tmp_path / "dev.csv", ["id", "source"], [[f"b{i}", f"s{i % 13}"] for i in range(52)])
+    fs = files_of(inspect_path(tmp_path))
+    assert fs["all.csv"]["fields"]["source"]["values_only_in_non_train_rows"] == 3
+    assert fs["dev.csv"]["values_not_in_train_files"] == {"source": 5}
+    assert "values_not_in_train_files" not in fs["train.csv"]
+    assert "_value_sets" not in json.dumps(inspect_path(tmp_path))

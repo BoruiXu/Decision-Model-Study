@@ -443,7 +443,7 @@ repo = skill + 固定版本的 OneJev + 脚本。用户只给三样：**数据�
 只读，不写任何文件，不做判断。`<path>` 是文件或目录（目录递归，跳过隐藏项）。支持 jsonl、json、csv、tsv；装了 pyarrow 时也读 parquet，否则列进 `skipped`。每个文件（`--json` 的键）：
 
 - `type`、`size_bytes`、`rows`；`name_hint`：文件名里的 train/training/val/valid/validation/dev/test/eval；
-- `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格在文本不变时（没有前导零、没有 `+`）才按数统计，id 类列（id、uid、`*_id` 等）一律保持字符串，空单元格算缺失；jsonl、csv、tsv 逐行流式读取；读不了的文件（非 UTF-8 等）在该文件下给出 `error`，其余文件照常；
+- `fields`：每个点分路径（列表元素记作 `[]`，例如 `conversation[].role`）的 `types`（类型计数）、`fill`（填充率）；`distinct`（不同值的个数，超过 500 时改给 `distinct_more_than`）；低基数（≤20 个不同值且不是每行一个）时 `values`（取值和计数），21–500 个时 `top_values`（最多的 20 个及计数）；字符串或整数、平均每个值至少两行、2–500 个不同值的字段标 `group_candidate`（候选的分组字段），同一文件里有 train 行和其他行时再给 `values_only_in_non_train_rows`（只出现在非 train 行的取值个数）；有名为 train 的文件时，其他文件给 `values_not_in_train_files`（各候选分组字段里 train 文件没有的取值个数）；数值的 `min`/`max`/`mean`/`unit_interval`（是否都在 [0,1]）；字符串的 `avg_len`/`text_like`（平均长度 ≥20）；列表的 `avg_items`。csv/tsv 单元格在文本不变时（没有前导零、没有 `+`）才按数统计，id 类列（id、uid、`*_id` 等）一律保持字符串，空单元格算缺失；jsonl、csv、tsv 逐行流式读取；读不了的文件（非 UTF-8 等）在该文件下给出 `error`，其余文件照常；
 - `split_columns`：名字像 split（split、set、fold、partition 等）或取值都像 split 名的低基数字段，及各取值的行数；
 - `split_file`：和 prepare 的读法一致，JSON 里每个带 `assignment` 映射的顶层条目算一个评测集，给出各集的 select/report 数（其他取值计入 `other`，prepare 读到这种行会报错）；条目里的其他键和其他顶层键（如 seed、created、method）忽略，后者列在 `split_file_other_keys`；
 - `onejev`：`passes`、`errors`、`first_errors`，用 `prepare.validate_rows` 检查是否已是 OneJev 行；
