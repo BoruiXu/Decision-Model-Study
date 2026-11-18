@@ -279,7 +279,13 @@ def _source_sha(path, what: str) -> str:
 
 
 def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
-            fingerprint=None, now: dt.datetime | None = None) -> Path:
+            fingerprint=None, now: dt.datetime | None = None, machine_origin: dict | None = None) -> Path:
+    if not exp.base:
+        from .catalog import CATALOG_DIR
+        raise ConfigError("no base: set base in the experiment or pass --base; catalog bases: "
+                          + ", ".join(sorted(p.stem for p in CATALOG_DIR.glob("*.yaml"))))
+    if not exp.recipe:
+        raise ConfigError("no recipe: set recipe in the experiment or pass --recipe")
     out_root = Path(machine.out_root)
     check_writable(machine, out_root / exp.name, machine.registry_path, machine.lock_dir)
     recipe = copy.deepcopy(_load_recipe(exp.recipe))
@@ -342,7 +348,9 @@ def resolve(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi,
                             "min_free_mib": machine.min_free_mib, "lock_dir": machine.lock_dir,
                             "order": machine.order, "wait_timeout_s": machine.wait_timeout_s,
                             "source": machine.gpu_source},
-                    "forbidden_write_roots": list(machine.forbidden_write_roots)},
+                    "forbidden_write_roots": list(machine.forbidden_write_roots),
+                    # where these settings came from (--machine, $OJH_MACHINE, user config or inferred)
+                    "origin": machine_origin or {"source": "given", "path": None}},
         "mode": mode, "lora": lora, "n_gpus": n, "parallel": parallel, "seeds": list(exp.seeds),
         "estimate_gib": round(need, 1), "feasibility": feasibility, "flags": flags, "data": data,
         "eval_sets": {k: asdict(v) for k, v in exp.data.eval.items()},

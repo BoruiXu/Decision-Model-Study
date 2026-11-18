@@ -93,8 +93,8 @@ class EvaluatorSpec:
 @dataclass
 class ExperimentConfig:
     name: str
-    base: str
-    recipe: str
+    base: str | None  # may be omitted in the file: ``ojh run --base`` supplies it
+    recipe: str | None  # may be omitted: ``ojh run --recipe`` or the base's default_recipes
     data: DataSpec
     fields: FieldsSpec
     subset: SubsetSpec | None = None
@@ -194,6 +194,37 @@ def load_machine(path) -> MachineConfig:
     return MachineConfig(**d)
 
 
+USER_MACHINE = "~/.config/onejev-harness/machine.yaml"
+
+
+def inferred_machine() -> MachineConfig:
+    """The machine used when no machine file is found: the repo's .venv python, ``$OJH_OUT_ROOT`` or
+    ``./ojh_runs`` (made absolute), ``$OJH_MODEL_DIR`` or ``~/.cache/onejev-harness/models``, the registry
+    under out_root, no lock_dir, and GPUs given explicitly (``ojh run --gpus``)."""
+    cwd = Path.cwd()
+    out_root = _abs(os.environ.get("OJH_OUT_ROOT") or "ojh_runs", cwd)
+    model_dir = _abs(os.environ.get("OJH_MODEL_DIR") or "~/.cache/onejev-harness/models", cwd)
+    return MachineConfig(python=str(ROOT / ".venv" / "bin" / "python"), model_dir=model_dir, out_root=out_root,
+                         gpu_source="explicit")
+
+
+def find_machine(path=None) -> tuple[MachineConfig, dict]:
+    """The machine config and where it came from. Order: ``path`` (``--machine``), ``$OJH_MACHINE``,
+    ``~/.config/onejev-harness/machine.yaml``, then ``inferred_machine()``."""
+    if path:
+        return load_machine(path), {"source": "--machine", "path": os.path.abspath(path)}
+    env = os.environ.get("OJH_MACHINE")
+    if env:
+        p = _expand(env)
+        if not os.path.isfile(p):
+            raise ConfigError(f"$OJH_MACHINE points to {p}, which is not a file")
+        return load_machine(p), {"source": "$OJH_MACHINE", "path": os.path.abspath(p)}
+    user = _expand(USER_MACHINE)
+    if os.path.isfile(user):
+        return load_machine(user), {"source": "user config", "path": os.path.abspath(user)}
+    return inferred_machine(), {"source": "inferred", "path": None}
+
+
 def _check_keys(d: Any, cls, prefix: str = "") -> dict:
     """Require a mapping whose keys are all fields of ``cls``."""
     where = prefix.rstrip(".") or "top level"
@@ -217,8 +248,7 @@ def _recipe_path(p, base: Path) -> str:
 def load_experiment(path) -> ExperimentConfig:
     d = _check_keys(_load_yaml(path), ExperimentConfig)
     base = _config_dir(path)
-    for k in ("name", "base", "recipe"):
-        _require(d, k)
+    _require(d, "name")
     data = _check_keys(_section(d, "data"), DataSpec, "data.")
     fields_ = _check_keys(_section(d, "fields"), FieldsSpec, "fields.")
     train = _require(data, "train", "data.")
@@ -247,7 +277,8 @@ def load_experiment(path) -> ExperimentConfig:
         evaluator.path = _abs(evaluator.path, base)
     kw = {k: d[k] for k in ("seeds", "gpus", "merge", "overrides") if k in d}
     return ExperimentConfig(
-        name=d["name"], base=d["base"], recipe=_recipe_path(d["recipe"], base),
+        name=d["name"], base=d.get("base"),
+        recipe=_recipe_path(d["recipe"], base) if d.get("recipe") is not None else None,
         data=DataSpec(train=_abs(train, base), eval=eval_sets, **data_kw),
         fields=FieldsSpec(label=label, **{k: fields_.get(k) for k in ("group", "consistency", "text")}),
         subset=subset, evaluator=evaluator, **kw,

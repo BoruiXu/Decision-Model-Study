@@ -12,7 +12,7 @@ import yaml
 from harness import (cleanup, fetch_base, finalize, gpu, inspect_data, launch, make_split, onejev, prepare,
                      registry, report_eval, resolve, runner, status)
 from harness.catalog import ROOT, sha256_file
-from harness.config import ConfigError, check_writable, load_experiment, load_machine
+from harness.config import ConfigError, check_writable, find_machine, load_experiment, load_machine
 from harness.gpu import GpuWaitTimeout
 from harness.prepare import IdOverlap, ShaMismatch, TestSplitRefused
 from harness.report_eval import ReportRefused
@@ -81,7 +81,7 @@ def cmd_make_split(a) -> int:
 
 
 def cmd_setup(a) -> int:
-    load_machine(a.machine)
+    find_machine(a.machine)
     lock = onejev.load_lock()
     vendor = ROOT / "vendor"
     vendor.mkdir(exist_ok=True)
@@ -92,14 +92,14 @@ def cmd_setup(a) -> int:
 
 
 def cmd_fetch_base(a) -> int:
-    m = load_machine(a.machine)
+    m, _ = find_machine(a.machine)
     check_writable(m, Path(m.model_dir) / a.name)
     print(fetch_base.fetch_base(a.name, m.model_dir))
     return 0
 
 
 def cmd_prepare(a) -> int:
-    m, exp = load_machine(a.machine), load_experiment(a.exp)
+    (m, _), exp = find_machine(a.machine), load_experiment(a.exp)
     out = Path(m.out_root) / exp.name / "prepared"
     check_writable(m, out)
     info = prepare.prepare(exp, out, allow_test=a.allow_test)
@@ -109,7 +109,8 @@ def cmd_prepare(a) -> int:
 
 def cmd_resolve(a) -> int:
     try:
-        path = resolve.resolve(load_experiment(a.exp), load_machine(a.machine))
+        m, origin = find_machine(a.machine)
+        path = resolve.resolve(load_experiment(a.exp), m, machine_origin=origin)
     except Infeasible as e:
         print(f"infeasible: {e}", file=sys.stderr)
         for alt in e.alternatives:
@@ -190,6 +191,8 @@ def cmd_cleanup(a) -> int:
     return 0
 
 
+MACHINE_HELP = "machine config (default: $OJH_MACHINE, then ~/.config/onejev-harness/machine.yaml, else inferred)"
+
 MAKE_SPLIT_HELP = """Deterministic, group-aware splits (same inputs and seed -> same output).
 
 --mode select-report (default): for each FILE (an eval set; its name is the file stem, or NAME=PATH),
@@ -241,17 +244,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--mode", choices=("select-report", "holdout"), default="select-report")
     s.add_argument("--allow-test", action="store_true", help="read test* rows and files (needs approval)")
     s = cmd("setup", cmd_setup, "fetch OneJev and the patch, verify sha256")
-    s.add_argument("--machine", required=True)
+    s.add_argument("--machine", help=MACHINE_HELP)
     s = cmd("fetch-base", cmd_fetch_base, "download a catalog base model and verify it")
     s.add_argument("name")
-    s.add_argument("--machine", required=True)
+    s.add_argument("--machine", help=MACHINE_HELP)
     s = cmd("prepare", cmd_prepare, "validate and convert experiment data")
     s.add_argument("exp")
-    s.add_argument("--machine", required=True)
+    s.add_argument("--machine", help=MACHINE_HELP)
     s.add_argument("--allow-test", action="store_true", help="read split test* rows")
     s = cmd("resolve", cmd_resolve, "resolve an experiment into run.lock.yaml")
     s.add_argument("exp")
-    s.add_argument("--machine", required=True)
+    s.add_argument("--machine", help=MACHINE_HELP)
     s = cmd("launch", cmd_launch, "start a run in tmux and return at once")
     s.add_argument("lock")
     s = cmd("status", cmd_status, "short progress report of a run")

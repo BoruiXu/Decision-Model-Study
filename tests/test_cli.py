@@ -104,10 +104,10 @@ def test_cleanup_lists_but_keeps_without_confirm(tmp_path, capsys):
 
 
 def test_resolve_infeasible_exits_2(monkeypatch, capsys):
-    def boom(exp, machine):
+    def boom(exp, machine, **kw):
         raise Infeasible("too big", ["use 8 gpus"])
     monkeypatch.setattr(cli, "load_experiment", lambda p: None)
-    monkeypatch.setattr(cli, "load_machine", lambda p: None)
+    monkeypatch.setattr(cli, "find_machine", lambda p: (None, {"source": "--machine", "path": p}))
     monkeypatch.setattr(cli.resolve, "resolve", boom)
     assert cli.main(["resolve", "e.yaml", "--machine", "m.yaml"]) == 2
     assert "use 8 gpus" in capsys.readouterr().err
