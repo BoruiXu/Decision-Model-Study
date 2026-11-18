@@ -479,7 +479,7 @@ prepared 数据放在 `<out_root>/<name>/prepared/`，`prepared.json` 记下生�
 
 ### `ojh check`（不看卡的检查）
 
-参数同 `ojh run`。依次做 prepare、配置和配方、适配器和参数与 prepared 的一致性、plan-only、环境指纹，打印 JSON（每卡显存估算、plan、指纹、数据 sha256），不判断卡、不写 lock、不建 run 目录、不启动。resolve 本身也按这个顺序：卡放在最后检查，卡忙时不会挡住数据或 plan 的错误。
+参数同 `ojh run`。依次做 prepare、配置和配方、适配器和参数与 prepared 的一致性、plan-only、环境指纹，打印 JSON（每卡显存估算、plan、指纹、数据 sha256），不判断卡、不写 lock、不建 run 目录、不启动。数据 prepare 到 `<out_root>/.check/` 下的临时目录，检查完删除：已有的 `<out_root>/<name>/prepared`（可能正被一个 run 使用）不会被改动；另一份实验文件占用这个名字时，和 `ojh run` 一样拒绝。resolve 本身也按这个顺序：卡放在最后检查，卡忙时不会挡住数据或 plan 的错误。
 
 ### 指定的卡（`gpu_source: explicit`）
 

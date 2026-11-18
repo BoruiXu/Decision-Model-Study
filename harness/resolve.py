@@ -480,7 +480,8 @@ def _check_prepared(exp: ExperimentConfig, info: dict, prepared: Path, source: s
 
 
 def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner, fingerprint, machine_origin,
-           apps_query, check_gpus: bool, allow_shared: bool = False, source: str | None = None) -> tuple[dict, Path]:
+           apps_query, check_gpus: bool, allow_shared: bool = False, source: str | None = None,
+           prepared_dir=None, plan_dir=None) -> tuple[dict, Path]:
     """The lock and the adapter file. Order: config, prepared data and adapter checks, plan-only, fingerprint,
     and the cards last, so busy cards never hide a data or plan problem (``check_gpus=False`` skips them)."""
     if not exp.base:
@@ -515,7 +516,7 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
         raise ConfigError(f"{len(explicit)} card(s) listed but the run needs {n} (an override sets gpus)")
     need = estimate_gib(base["params_b"], mode, n, parallel == "fsdp")
 
-    prepared = Path(machine.out_root) / exp.name / "prepared"
+    prepared = Path(prepared_dir) if prepared_dir else Path(machine.out_root) / exp.name / "prepared"
     info_path = prepared / "prepared.json"
     if not info_path.is_file():
         raise ConfigError(f"no prepared data at {prepared}; run `ojh prepare` first")
@@ -565,7 +566,7 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
 
     lock = {
         "experiment": exp.name, "repo_root": str(ROOT),
-        "run_dir": str(out_root / exp.name / "plan"),
+        "run_dir": str(plan_dir or (out_root / exp.name / "plan")),
         "machine": {"python": machine.python, "out_root": machine.out_root, "model_dir": machine.model_dir,
                     "registry": machine.registry_path, "env": dict(machine.env),
                     "gpu": {"include": machine.gpu_include, "exclude": machine.gpu_exclude,
@@ -609,11 +610,13 @@ def _build(exp: ExperimentConfig, machine: MachineConfig, *, query, plan_runner,
 
 def check(exp: ExperimentConfig, machine: MachineConfig, *, query=_nvidia_smi, plan_runner=None,
           fingerprint=None, machine_origin: dict | None = None, apps_query=_nvidia_smi_apps,
-          source: str | None = None) -> dict:
+          source: str | None = None, prepared_dir=None, plan_dir=None) -> dict:
     """Everything resolve validates except the cards (config, prepared data, adapter, plan-only,
-    fingerprint); writes nothing and returns the would-be lock."""
+    fingerprint); writes no lock and returns the would-be lock. ``prepared_dir``/``plan_dir``: where the
+    data to check was prepared and where plan-only may write (ojh check uses a scratch dir)."""
     lock, _ = _build(exp, machine, query=query, plan_runner=plan_runner, fingerprint=fingerprint,
-                     machine_origin=machine_origin, apps_query=apps_query, check_gpus=False, source=source)
+                     machine_origin=machine_origin, apps_query=apps_query, check_gpus=False, source=source,
+                     prepared_dir=prepared_dir, plan_dir=plan_dir)
     return lock
 
 

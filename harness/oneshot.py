@@ -7,7 +7,10 @@ An infeasible setup raises ``Infeasible`` with its alternatives and launches not
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -36,8 +39,8 @@ def _n_gpus(gpus) -> int:
     return len(gpus) if isinstance(gpus, list) else int(gpus)
 
 
-def _prepared(exp_path, base, gpus, recipe, machine, allow_test, force=False):
-    """Machine, origin, experiment (base, gpus and recipe filled in) and recipe source, after prepare."""
+def _configured(exp_path, base, gpus, recipe, machine):
+    """Machine, origin, experiment (base, gpus and recipe filled in) and recipe source."""
     m, origin = find_machine(machine)
     exp = load_experiment(exp_path)
     if base:
@@ -59,6 +62,12 @@ def _prepared(exp_path, base, gpus, recipe, machine, allow_test, force=False):
     if not Path(exp.recipe).is_file():
         raise ConfigError(f"recipe not found: {exp.recipe}")
 
+    return m, origin, exp, source
+
+
+def _prepared(exp_path, base, gpus, recipe, machine, allow_test, force=False):
+    """As _configured, after preparing the data into <out_root>/<name>/prepared."""
+    m, origin, exp, source = _configured(exp_path, base, gpus, recipe, machine)
     out = Path(m.out_root) / exp.name / "prepared"
     check_writable(m, out)
     prepare.prepare(exp, out, allow_test=allow_test, source=os.path.abspath(exp_path), force=force)
@@ -73,10 +82,25 @@ def check(exp_path, *, base: str | None = None, gpus: list[int] | None = None, r
           machine: str | None = None, allow_test: bool = False, force: bool = False, query=None, apps_query=None,
           plan_runner=None, fingerprint=None) -> dict:
     """``ojh check``: what ``ojh run`` validates except the cards (prepare, config, adapter, plan-only,
-    fingerprint). Writes the prepared data like run, but no lock and no run dir; launches nothing."""
-    m, origin, exp, source = _prepared(exp_path, base, gpus, recipe, machine, allow_test, force)
-    lock = resolve.check(exp, m, machine_origin=origin, source=os.path.abspath(exp_path), **_probes(
-        query=query, apps_query=apps_query, plan_runner=plan_runner, fingerprint=fingerprint))
+    fingerprint). The data is prepared into a scratch dir under <out_root>/.check and removed afterwards:
+    an existing <out_root>/<name>/prepared, which a running run may use, is never touched. Writes no lock
+    and launches nothing."""
+    m, origin, exp, source = _configured(exp_path, base, gpus, recipe, machine)
+    src = os.path.abspath(exp_path)
+    prepare.check_owner(Path(m.out_root) / exp.name / "prepared", exp, src, force)  # run would refuse too
+    scratch_root = Path(m.out_root) / ".check"
+    check_writable(m, scratch_root)
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=f"{exp.name}-", dir=scratch_root))
+    try:
+        prepare.prepare(exp, scratch / "prepared", allow_test=allow_test, source=src, force=True)
+        lock = resolve.check(exp, m, machine_origin=origin, source=src, prepared_dir=scratch / "prepared",
+                             plan_dir=scratch / "plan", **_probes(query=query, apps_query=apps_query,
+                                                                   plan_runner=plan_runner, fingerprint=fingerprint))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            scratch_root.rmdir()  # only when no other check is running
     return {"ok": True, "cards_checked": False, "base": exp.base,
             "recipe": {"path": exp.recipe, "source": source, "mode": lock["mode"]},
             "n_gpus": lock["n_gpus"], "parallel": lock["parallel"], "gpus": exp.gpus,

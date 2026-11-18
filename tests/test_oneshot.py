@@ -178,8 +178,7 @@ def test_check_validates_everything_but_the_cards(tmp_path):
     assert out["cards_checked"] is False and out["n_gpus"] == 1 and out["base"] == "joey-1"
     assert out["recipe"]["source"] == "catalog default" and out["fingerprint"]["driver_version"] == "570"
     assert out["estimate_gib_per_card"] == 32.0 and out["data_sha256"]["train.jsonl"]
-    exp_dir = tmp_path / "out" / "one"
-    assert sorted(p.name for p in exp_dir.iterdir()) == ["prepared"]  # no run dir, no lock
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == []  # nothing persistent: no prepared, no lock
 
 
 def test_cli_check(tmp_path, monkeypatch, capsys):
@@ -213,3 +212,33 @@ def test_run_refuses_a_shared_card_and_records_allow_shared(tmp_path, monkeypatc
     monkeypatch.setattr(oneshot, "run", lambda *a, **kw: seen.update(kw) or {"ok": 1})
     assert cli.main(["run", str(ws / "exp.yaml"), "--base", "joey-1", "--gpus", "0", "--allow-shared"]) == 0
     assert seen["allow_shared"] is True
+
+
+def test_check_never_touches_an_existing_prepared_dir(tmp_path):
+    ws = workspace(tmp_path)
+    go(ws, base="joey-1", gpus=[0])  # a real run prepared the data (and may be training on it)
+    prepared = tmp_path / "out" / "one" / "prepared"
+    before = {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in prepared.iterdir()}
+    (ws / "train.jsonl").write_text((ws / "train.jsonl").read_text().splitlines()[0] + "\n")  # data edited since
+    seen = {}
+    out = oneshot.check(ws / "exp.yaml", base="joey-1", gpus=[0], machine=str(ws / "machine.yaml"),
+                        plan_runner=lambda lock: seen.update(run_dir=lock["run_dir"], train=lock["data"]["train"])
+                        or "PLAN_OK\n1 steps for 1 ranks\n",
+                        fingerprint=lambda: {"driver_version": "570"})
+    assert out["counts"]["train"] == 1  # checked the edited data ...
+    assert {p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in prepared.iterdir()} == before  # ... elsewhere
+    assert seen["train"].startswith(str(tmp_path / "out" / ".check")) and seen["run_dir"].startswith(
+        str(tmp_path / "out" / ".check"))
+    assert not (tmp_path / "out" / ".check").exists()  # cleaned up
+
+
+def test_check_refuses_another_experiments_name_like_run(tmp_path):
+    ws = workspace(tmp_path)
+    go(ws, base="joey-1", gpus=[0])
+    other = tmp_path / "other"
+    other.mkdir()
+    for f in ("train.jsonl", "val.jsonl", "exp.yaml", "machine.yaml"):
+        (other / f).write_text((ws / f).read_text())
+    with pytest.raises(ConfigError, match="--force"):
+        oneshot.check(other / "exp.yaml", base="joey-1", gpus=[0], machine=str(other / "machine.yaml"),
+                      plan_runner=lambda lock: "PLAN_OK\n1 steps for 1 ranks\n", fingerprint=lambda: {})

@@ -229,7 +229,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             f.write(dumps_line(r))
 
 
-def _check_owner(out_dir: Path, exp: ExperimentConfig, source: str | None, force: bool) -> None:
+def check_owner(out_dir: Path, exp: ExperimentConfig, source: str | None, force: bool) -> None:
     """Refuse to overwrite data prepared from another experiment file that shares this experiment name."""
     info_path = out_dir / "prepared.json"
     if source is None or force or not info_path.is_file():
@@ -246,7 +246,7 @@ def prepare(exp: ExperimentConfig, out_dir: Path, *, allow_test: bool = False, s
     """``source``: the experiment file; data prepared from another file with the same experiment name is
     not overwritten unless ``force``."""
     out_dir = Path(out_dir)
-    _check_owner(out_dir, exp, source, force)
+    check_owner(out_dir, exp, source, force)
     data = exp.data
     src_sha = _sha256(data.train)
     if data.train_sha256 is None:
