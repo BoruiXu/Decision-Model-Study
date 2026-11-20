@@ -1,0 +1,47 @@
+{
+ "elliptic_pp_addr_sqo/train.jsonl": {
+  "md5": "dfe2f80f0301478c0f5db74bafc9baa8",
+  "rows": 169438,
+  "illicit": 7859
+ },
+ "elliptic_pp_addr_sqo/val.jsonl": {
+  "md5": "d5bb5c38be2acf4286b4c9cc39b616c3",
+  "rows": 24225,
+  "illicit": 1838
+ },
+ "elliptic_pp_addr_sqo/test.jsonl": {
+  "md5": "58557a5ad164d2788efcce1f6ed8e69c",
+  "rows": 97756,
+  "illicit": 5023
+ },
+ "elliptic_pp_tx_sqo/train.jsonl": {
+  "md5": "d20bcce80ce4ab8eef1986b249d70e40",
+  "rows": 26381,
+  "illicit": 2871
+ },
+ "elliptic_pp_tx_sqo/val.jsonl": {
+  "md5": "586c9630a189a7ea57ce36529848b08b",
+  "rows": 3513,
+  "illicit": 591
+ },
+ "elliptic_pp_tx_sqo/test.jsonl": {
+  "md5": "47838d5bb8374dc2c5f1fa0546c43ca0",
+  "rows": 16670,
+  "illicit": 1083
+ },
+ "elliptic_pp_tx_sqo_named/train.jsonl": {
+  "md5": "34ee034fdcb301e177d39fc040594484",
+  "rows": 26381,
+  "illicit": 2871
+ },
+ "elliptic_pp_tx_sqo_named/val.jsonl": {
+  "md5": "99fea6d85b264f404dfd7bc8393152d0",
+  "rows": 3513,
+  "illicit": 591
+ },
+ "elliptic_pp_tx_sqo_named/test.jsonl": {
+  "md5": "9b82dfdc236481ff50c08dbe275435fe",
+  "rows": 16670,
+  "illicit": 1083
+ }
+}

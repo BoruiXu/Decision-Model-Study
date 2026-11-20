@@ -1,0 +1,6 @@
+pandas==3.1.0
+numpy==2.4.6
+pyarrow==26.0.0
+scikit-learn==1.9.1
+gdown
+transformers   # optional: only for the token-length statistics in CHECKS.md

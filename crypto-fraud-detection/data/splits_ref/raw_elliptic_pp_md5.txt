@@ -1,0 +1,9 @@
+c994e6fac1567511ee0db58e647a30bd  data/raw/elliptic_pp/AddrAddr_edgelist.csv
+9903c8c7b9622baaca7a17b02abff837  data/raw/elliptic_pp/AddrTx_edgelist.csv
+2b7f2943f6ba695ef2c65f21c1d79437  data/raw/elliptic_pp/TxAddr_edgelist.csv
+dcea36b2bb059c2f9910c00b050ce04f  data/raw/elliptic_pp/txs_classes.csv
+ae69bde1407c9320c0124a557693a479  data/raw/elliptic_pp/txs_edgelist.csv
+1fb3398c2e4a7752c442977c07b91a85  data/raw/elliptic_pp/txs_features.csv
+1b02cf346ea7f9857c5ddea5733412f7  data/raw/elliptic_pp/wallets_classes.csv
+1be4df51c200aa394285ba5a41b7b345  data/raw/elliptic_pp/wallets_features_classes_combined.csv
+76d2452415dd8eaee5d3a21aaa49f312  data/raw/elliptic_pp/wallets_features.csv
