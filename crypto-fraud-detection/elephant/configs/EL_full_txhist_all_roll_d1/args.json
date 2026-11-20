@@ -1,0 +1,19 @@
+{
+  "onejev": "$ONEJEV_ROOT",
+  "init": "ckpt/onejev/EL_full_txhist_all_s0/ckpt-step800",
+  "init_trained_through": 29,
+  "data": "data/onejev/addr_txhist_noul",
+  "name": "EL_full_txhist_all",
+  "mode": "full",
+  "nproc": 2,
+  "lr": 1e-06,
+  "replay": 0.5,
+  "delay": 1,
+  "first": 35,
+  "last": 49,
+  "seed": 0,
+  "ckpt": "ckpt/EL_full_txhist_all_roll_d1",
+  "results": "results/elephant",
+  "sft_args": "",
+  "python": "$ONEJEV_PYTHON"
+}
