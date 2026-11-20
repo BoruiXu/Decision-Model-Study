@@ -2,7 +2,7 @@
 
 Same samples, split and features as the LLM experiments: fit on train (steps 1-29),
 score val and test, write results/addr/<model>_{val,test}.parquet for eval_decisions.py.
-Usage: python scripts/baseline_addr.py [data_dir] [results_dir]
+Usage: python baselines/baseline_addr.py [data_dir] [results_dir]
 """
 import sys
 from pathlib import Path

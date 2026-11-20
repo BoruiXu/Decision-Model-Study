@@ -10,7 +10,7 @@ features. XGB hyper-parameters = baseline_addr.py's XGB (no class reweighting, l
 GADBench reweights).
   static       : fit on steps 1-29 -> results/addr/XGBG_{val,test}.parquet
   --roll refit : before test step t, refit on steps <= t-delay (as rolling_xgb_addr.py) -> XGBG_roll_d1_test
-Usage: python scripts/xgb_graph_addr.py [--roll refit]
+Usage: python baselines/xgb_graph_addr.py [--roll refit]
 """
 import argparse
 import shutil

@@ -1,9 +1,9 @@
 """Rolling (refit every step) XGBoost on the transaction-history state (data/onejev/addr_txhist_noul), the
-txhist counterpart of scripts/rolling_xgb_addr.py: same protocol (for each test step t = 35-49, refit on all
+txhist counterpart of baselines/rolling_xgb_addr.py: same protocol (for each test step t = 35-49, refit on all
 labeled rows with step <= t - delay, score step t), same XGB settings, and the same flattened features as
-scripts/xgb_txhist.py (whose flat() it reuses). Writes results/addr_txhist/XGB_txhist_roll_d{delay}_test.parquet;
+baselines/xgb_txhist.py (whose flat() it reuses). Writes results/addr_txhist/XGB_txhist_roll_d{delay}_test.parquet;
 the val file is the static model's val predictions (as for XGB_roll_d1), so eval_decisions.py picks the threshold on val.
-Usage: python scripts/rolling_xgb_txhist.py [--data data/onejev/addr_txhist_noul] [--out results/addr_txhist] [--delay 1]
+Usage: python baselines/rolling_xgb_txhist.py [--data data/onejev/addr_txhist_noul] [--out results/addr_txhist] [--delay 1]
 """
 import argparse
 import json
@@ -27,7 +27,7 @@ out.mkdir(parents=True, exist_ok=True)
 ROLES = ["sent", "received", "both"]
 
 
-def flat(r):  # identical to scripts/xgb_txhist.py
+def flat(r):  # identical to baselines/xgb_txhist.py
     s, txs = r["state"]["summary"], r["state"]["transactions"]
     f = dict(s)
     fields = [k for k in txs[0] if k != "role"]

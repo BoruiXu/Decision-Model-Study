@@ -3,7 +3,7 @@
 For each test step t (35-49), refit on all labeled rows with step <= t - delay and score step t.
 delay models label latency (1 step ~ 2 weeks). Writes results/addr/XGB_roll_d{delay}_test.parquet;
 the val file is the static model's val predictions so eval_decisions.py picks its threshold on val.
-Usage: python scripts/rolling_xgb_addr.py [data_dir] [results_dir]
+Usage: python baselines/rolling_xgb_addr.py [data_dir] [results_dir]
 """
 import shutil
 import sys

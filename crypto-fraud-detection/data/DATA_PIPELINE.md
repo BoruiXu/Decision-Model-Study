@@ -175,4 +175,4 @@ diff -r data/processed/elliptic_pp_tx_sqo/budgets data/splits_ref/elliptic_pp_tx
 
 | 内容 | 生成命令 | 说明 |
 |---|---|---|
-| GNN 图快照 | `gnn_addr.py` 第一次运行时自动缓存到 `.../graph_snapshots.pt` | 每个时间步一张图：节点是该步的全部 (地址, 步) 行（包括未知标签）；边是同一步内交易的输入地址到输出地址，转成无向，去掉自环；特征做 signed log1p，再用训练集的统计量标准化 |
+| GNN 图快照 | `baselines/gnn_addr.py` 第一次运行时自动缓存到 `.../graph_snapshots.pt` | 每个时间步一张图：节点是该步的全部 (地址, 步) 行（包括未知标签）；边是同一步内交易的输入地址到输出地址，转成无向，去掉自环；特征做 signed log1p，再用训练集的统计量标准化 |

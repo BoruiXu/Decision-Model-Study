@@ -1,8 +1,8 @@
 """Control for the transaction-history state: XGB on exactly what Elephant sees in data/onejev/addr_txhist_noul,
 flattened to a table (summary fields; the newest --k transactions in listed order, padded with NaN; min / max / mean
-of each transaction field over the listed transactions). Same XGB settings as scripts/baseline_addr.py.
+of each transaction field over the listed transactions). Same XGB settings as baselines/baseline_addr.py.
 Shows whether the information in the new state still separates the classes, independently of the LLM.
-Usage: python scripts/xgb_txhist.py [--data data/onejev/addr_txhist_noul] [--out results/addr_txhist]
+Usage: python baselines/xgb_txhist.py [--data data/onejev/addr_txhist_noul] [--out results/addr_txhist]
 """
 import argparse
 import json

@@ -14,7 +14,7 @@ like the LLMs), Adam, full-batch per step graph.
                   replay of 0.5 older labeled nodes per new one, lr / 5 (same protocol as the rolling LLMs)
                   -> <MODEL>_inc_roll_d1_test.parquet
 Rolling val files are copies of the static val file. Usage:
-  CUDA_VISIBLE_DEVICES=3 python scripts/gnn_addr.py --model SAGE [--roll refit|inc]
+  CUDA_VISIBLE_DEVICES=3 python baselines/gnn_addr.py --model SAGE [--roll refit|inc]
 """
 import argparse
 import shutil
