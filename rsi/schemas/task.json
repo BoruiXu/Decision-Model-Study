@@ -1,0 +1,122 @@
+{
+  "type": "object",
+  "required": ["kind", "task_id", "version", "decision", "input", "data", "metrics",
+               "promotion_rule", "stop", "budget", "resources", "eval_use_limit", "approvals"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": {"type": "string", "enum": ["task"]},
+    "task_id": {"type": "string", "pattern": "[a-z0-9][a-z0-9-]*"},
+    "version": {"type": "integer", "minimum": 1},
+    "decision": {
+      "type": "object",
+      "required": ["type", "instructions", "labels", "label_meanings"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["binary", "choice", "score"]},
+        "instructions": {"type": "string", "minLength": 1},
+        "labels": {"type": "array", "minItems": 2, "items": {"type": "string"}},
+        "label_meanings": {"type": "object", "additionalProperties": {"type": "string"}},
+        "positive": {"type": "string"}
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["format", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "format": {"type": "string", "enum": ["messages", "fields"]},
+        "description": {"type": "string"},
+        "fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "data": {
+      "type": "object",
+      "required": ["sources", "label_sources"],
+      "additionalProperties": false,
+      "properties": {
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "label_sources": {"type": "array",
+                          "items": {"type": "string", "enum": ["rule", "model_judge", "human", "outcome"]}}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["primary", "higher_is_better", "others", "baselines"],
+      "additionalProperties": false,
+      "properties": {
+        "primary": {"type": "string", "minLength": 1},
+        "higher_is_better": {"type": "boolean"},
+        "others": {"type": "array", "items": {"type": "string"}},
+        "baselines": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "resamples": {"type": "integer", "minimum": 100},
+            "seed": {"type": "integer"},
+            "level": {"type": "number"}
+          }
+        }
+      }
+    },
+    "promotion_rule": {
+      "type": "object",
+      "required": ["min_delta", "ci_lower_min", "guards"],
+      "additionalProperties": false,
+      "properties": {
+        "min_delta": {"type": "number"},
+        "ci_lower_min": {"type": ["number", "null"]},
+        "guards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["metric", "higher_is_better", "max_regression"],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {"type": "string"},
+              "higher_is_better": {"type": "boolean"},
+              "max_regression": {"type": "number", "minimum": 0}
+            }
+          }
+        }
+      }
+    },
+    "stop": {
+      "type": "object",
+      "required": ["target", "max_rounds"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {"type": ["number", "null"]},
+        "max_rounds": {"type": "integer", "minimum": 1},
+        "patience": {"type": "integer", "minimum": 1},
+        "max_attempts_per_round": {"type": "integer", "minimum": 1}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "required": ["compute_hours", "annotation_items", "api_cost"],
+      "additionalProperties": false,
+      "properties": {
+        "compute_hours": {"type": ["number", "null"]},
+        "annotation_items": {"type": ["number", "null"]},
+        "api_cost": {"type": ["number", "null"]}
+      }
+    },
+    "resources": {"type": "object"},
+    "eval_use_limit": {"type": "integer", "minimum": 1},
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reproduction_tolerance": {"type": "number"},
+        "max_decision_mismatch_rate": {"type": "number"}
+      }
+    },
+    "quality_checks": {"type": "object"},
+    "approvals": {
+      "type": "array",
+      "items": {"type": "string",
+                "enum": ["task_change", "over_budget", "use_testset", "refresh_sets", "plan", "delete"]}
+    }
+  }
+}

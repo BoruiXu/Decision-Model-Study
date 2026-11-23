@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "required": ["trainset_id", "valset_id", "strategy", "budget", "trials", "default_candidate",
+               "best_candidate", "gain_vs_default"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["search"]},
+    "trainset_id": {"type": "string", "minLength": 1},
+    "valset_id": {"type": "string", "minLength": 1},
+    "strategy": {"type": "string", "minLength": 1},
+    "budget": {
+      "type": "object",
+      "required": ["compute_hours"],
+      "additionalProperties": false,
+      "properties": {"compute_hours": {"type": "number", "minimum": 0}}
+    },
+    "trials": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["candidate_id", "config", "metric_val", "compute_hours", "status"],
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {"type": ["string", "null"], "minLength": 1},
+          "config": {"type": "object"},
+          "metric_val": {"type": ["number", "null"]},
+          "compute_hours": {"type": "number", "minimum": 0},
+          "status": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "default_candidate": {"type": "string", "minLength": 1},
+    "best_candidate": {"type": "string", "minLength": 1},
+    "gain_vs_default": {
+      "type": "object",
+      "required": ["metric", "delta"],
+      "additionalProperties": false,
+      "properties": {"metric": {"type": "string", "minLength": 1}, "delta": {"type": "number"}}
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "required": ["module", "owner", "failure", "hypothesis", "action", "result", "knowledge",
+               "automation", "artifacts"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["record"]},
+    "module": {"type": "string", "enum": ["data", "train", "tune", "deliver", "judge", "orchestrator"]},
+    "owner": {"type": "string", "minLength": 1},
+    "failure": {"type": "string"},
+    "hypothesis": {"type": "string"},
+    "action": {"type": "string"},
+    "result": {
+      "type": "object",
+      "required": ["metric", "before", "after", "conclusion"],
+      "additionalProperties": false,
+      "properties": {
+        "metric": {"type": "string"},
+        "before": {"type": ["number", "null"]},
+        "after": {"type": ["number", "null"]},
+        "conclusion": {"type": "string", "enum": ["success", "failure", "inconclusive"]}
+      }
+    },
+    "knowledge": {"type": "string"},
+    "automation": {"type": "string", "enum": ["manual", "scripted", "automated"]},
+    "artifacts": {"type": "array", "items": {"type": "string"}}
+  }
+}

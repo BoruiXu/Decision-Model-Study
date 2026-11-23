@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "required": ["label_method", "parent_trainset", "changes", "quality"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["trainset"]},
+    "label_method": {"type": "string"},
+    "parent_trainset": {"type": ["string", "null"]},
+    "changes": {"type": "string"},
+    "quality": {
+      "type": "object",
+      "required": ["passed", "checks"],
+      "additionalProperties": false,
+      "properties": {
+        "passed": {"type": "boolean"},
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "value", "threshold", "passed"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "value": {"type": ["number", "string", "boolean", "null"]},
+              "threshold": {"type": ["number", "string", "boolean", "null"]},
+              "passed": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

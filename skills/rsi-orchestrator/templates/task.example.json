@@ -1,0 +1,94 @@
+{
+  "kind": "task",
+  "task_id": "txn-review",
+  "version": 1,
+  "decision": {
+    "type": "choice",
+    "instructions": "Pick the handling for a transaction.",
+    "labels": [
+      "allow",
+      "block",
+      "review"
+    ],
+    "label_meanings": {
+      "allow": "let it through",
+      "block": "reject it",
+      "review": "send to a human"
+    }
+  },
+  "input": {
+    "format": "messages",
+    "description": "A single user message."
+  },
+  "data": {
+    "sources": [
+      "transaction-log-export"
+    ],
+    "label_sources": [
+      "rule",
+      "human",
+      "outcome"
+    ]
+  },
+  "metrics": {
+    "primary": "accuracy",
+    "higher_is_better": true,
+    "others": [
+      "log_loss",
+      "block_recall"
+    ],
+    "baselines": [
+      "majority",
+      "group_prior"
+    ],
+    "ci": {
+      "resamples": 1000,
+      "seed": 0,
+      "level": 0.95
+    }
+  },
+  "promotion_rule": {
+    "min_delta": 0.01,
+    "ci_lower_min": 0.0,
+    "guards": [
+      {
+        "metric": "block_recall",
+        "higher_is_better": true,
+        "max_regression": 0.02
+      }
+    ]
+  },
+  "stop": {
+    "target": 0.9,
+    "max_rounds": 6,
+    "patience": 3,
+    "max_attempts_per_round": 3
+  },
+  "budget": {
+    "compute_hours": 24,
+    "annotation_items": 500,
+    "api_cost": 50
+  },
+  "resources": {
+    "gpus": 1,
+    "notes": "replace with real resources; optional resources.train_command (absolute path) overrides the default <repo root>/skills/rsi-train/bin/train"
+  },
+  "eval_use_limit": 3,
+  "delivery": {
+    "reproduction_tolerance": 1e-6,
+    "max_decision_mismatch_rate": 0
+  },
+  "quality_checks": {
+    "min_rows": 2000,
+    "max_near_dup_rate": 0.01,
+    "min_label_agreement": 0.8
+  },
+  "approvals": [
+    "task_change",
+    "over_budget",
+    "use_testset",
+    "refresh_sets",
+    "plan",
+    "delete"
+  ]
+}

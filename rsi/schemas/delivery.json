@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "required": ["candidate_id", "evalset_id", "valset_id", "package", "runtime"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["delivery"]},
+    "candidate_id": {"type": "string", "minLength": 1},
+    "evalset_id": {"type": "string", "minLength": 1},
+    "valset_id": {"type": "string", "minLength": 1},
+    "testset_id": {"type": "string", "minLength": 1},
+    "package": {
+      "type": "object",
+      "required": ["location", "entry", "environment"],
+      "additionalProperties": false,
+      "properties": {
+        "location": {"type": "string", "minLength": 1},
+        "entry": {"type": "string", "minLength": 1},
+        "environment": {"type": "string", "minLength": 1}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["latency_ms_p50", "latency_ms_p95", "cost_per_1k", "consistent_with_offline"],
+      "additionalProperties": false,
+      "properties": {
+        "latency_ms_p50": {"type": "number", "minimum": 0},
+        "latency_ms_p95": {"type": "number", "minimum": 0},
+        "cost_unit": {"type": "string", "minLength": 1},
+        "cost_per_1k": {"type": ["number", "null"]},
+        "consistent_with_offline": {"type": "boolean"}
+      }
+    }
+  }
+}
