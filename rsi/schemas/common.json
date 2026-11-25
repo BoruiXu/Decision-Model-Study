@@ -1,0 +1,40 @@
+{
+  "type": "object",
+  "required": ["kind", "id", "task_id", "task_version", "round", "producer", "created_at", "parents", "files"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["trainset", "valset", "evalset", "testset", "corpus", "pool", "candidate",
+                                        "search", "delivery", "feedback", "evaluation", "plan", "record"]},
+    "id": {"type": ["string", "null"]},
+    "task_id": {"type": "string", "minLength": 1},
+    "task_version": {"type": "integer", "minimum": 1},
+    "round": {"type": "integer", "minimum": 1},
+    "producer": {"type": "string", "enum": ["orchestrator", "data", "train", "tune", "deliver", "judge"]},
+    "created_at": {"type": "string", "minLength": 1},
+    "parents": {"type": "array", "items": {"type": "string"}},
+    "files": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "rows": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "external": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["location", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+          "location": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "notes": {"type": "string"}
+  }
+}

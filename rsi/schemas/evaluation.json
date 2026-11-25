@@ -1,0 +1,68 @@
+{
+  "type": "object",
+  "required": ["delivery_id", "candidate_id", "evalset_id", "best_before", "metrics", "deltas",
+               "recommendation", "failures", "uses_testset"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["evaluation"]},
+    "delivery_id": {"type": "string", "minLength": 1},
+    "candidate_id": {"type": "string", "minLength": 1},
+    "evalset_id": {"type": "string", "minLength": 1},
+    "best_before": {
+      "type": ["object", "null"],
+      "required": ["version", "evaluation_id"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "evaluation_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["candidate", "best", "baselines"],
+      "additionalProperties": false,
+      "properties": {
+        "candidate": {"type": "object", "additionalProperties": {"type": "number"}},
+        "best": {"type": ["object", "null"], "additionalProperties": {"type": "number"}},
+        "baselines": {"type": "object", "additionalProperties": {"type": "object"}}
+      }
+    },
+    "deltas": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["delta", "ci_low", "ci_high"],
+        "additionalProperties": false,
+        "properties": {
+          "delta": {"type": "number"},
+          "ci_low": {"type": "number"},
+          "ci_high": {"type": "number"}
+        }
+      }
+    },
+    "recommendation": {
+      "type": "object",
+      "required": ["decision", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "decision": {"type": "string", "enum": ["promote", "keep"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issue", "evidence", "attribution", "module"],
+        "additionalProperties": false,
+        "properties": {
+          "issue": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string"},
+          "attribution": {"type": "string", "minLength": 1},
+          "module": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "uses_testset": {"type": "boolean"},
+    "metrics_test": {"type": "object", "additionalProperties": {"type": "number"}}
+  }
+}

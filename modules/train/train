@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""The framework's train command for the training-tuning module (the contract in the module skill):
+
+  train --task <task.json> --trainset <dir> --trainset-id <id> --valset <dir> --valset-id <id>
+        --config <config.json> --config-source <default|tune|search id> --round <n>
+        --producer train --out <candidate dir> --marker <marker path>
+
+--producer accepts train only: the data module does not train (whether a new trainset helps is judged by the round's
+training-tuning and judge dispatches); the producer data of older candidates stays readable (rsi's schemas).
+
+Trains one configuration with trsi's own code (the same run.yaml, ojh launch and candidate packing an agent's search
+uses), blocks until the ojh run ends (or its tmux session is gone without a DONE: a failure), waits (up to 2 minutes)
+for ojh's tmux session to end, packs it as the candidate --out (scoring on the card it trained on when that card
+qualifies, as `trsi collect --gpu` checks it, else on another; while no card qualifies it tries again every 30 s, up
+to 10 minutes) and writes the marker last: `ok`, or `failed` and the reason on the second line. Exit code 0 exactly when
+the marker says ok. Stopped by SIGTERM or SIGINT, it ends its ojh training (tmux kill-session) and writes failed; a
+stop while ojh starts the training is handled once its tmux session is known. Reads only the trainset,
+the valset, the config and the task; needs no agent. It rewrites <dirname(--out)>/progress.json (the framework's module
+progress file; trsi.progress) when it starts, at every check of the ojh run, at the end and when it fails; two train
+commands with --out in the same directory overwrite each other's. A failure to write it is only printed.
+
+config.json: {"base", "recipe", "overrides", "seed", "max_steps"}, every key optional, defaults in DEFAULTS: joey-1, the
+catalog default recipe (null), no overrides, seed 0, max_steps null. overrides maps onejev.<flag> and lora.<field> to
+values; max_steps is the override onejev.max_steps. Relative recipe paths are looked up under modules/train, then under
+the ojh repository.
+
+From the task: resources.onejev.python (the ojh .venv python: this command re-runs itself in it, and it is
+model.predict's interpreter), ojh_bin, env_file, machine (else $RSI_ONEJEV_MACHINE), resources.gpu_ids (the cards it
+may use). Environment: RSI_TRAIN_GPUS ("0" or "0,1") picks the cards, else the idle ones nvidia-smi shows;
+RSI_TRAIN_POLL is the seconds between checks of the ojh run (default 60). Work files (run.yaml, records) go to
+<out>.trsi/, next to the candidate; the ojh experiment is named after the task and "train-" + the first 8 hex digits
+of the sha256 of the real path of --out, so trainings of the same configuration into different --out do not collide.
+
+code_version.sha256 of every candidate trsi packs is this file's sha256. The versions below are part of it: change
+TRSI_VERSION with every change to modules/train/trsi (trsi refuses to run under another), OJH_COMMIT and ONEJEV_COMMIT
+when the ojh installation moves.
+"""
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import os
+import shutil
+import signal
+import sys
+import time
+
+TRSI_VERSION = "1.4.3"
+OJH_COMMIT = "ca0e8f0"
+ONEJEV_COMMIT = "81ce62f"
+DEFAULTS = {"base": "joey-1", "recipe": None, "overrides": {}, "seed": 0, "max_steps": None}
+HERE = os.path.dirname(os.path.abspath(__file__))
+TRAINING = {}   # the ojh training while it runs: {"session", "run_dir"}, for a stop
+RUN = {}        # {"run": the trsi RunConfig} once run.yaml is written, for progress.json on the failure path
+PENDING = []    # a stop signal that came while ojh was starting the training
+SESSION_WAIT_S = 120   # after DONE, how long to wait for ojh's tmux session to end before packing
+CARD_WAIT_S = 600      # how long packing tries again (every 30 s, or RSI_TRAIN_POLL when shorter) while no card qualifies
+
+
+class Stopped(BaseException):
+    """SIGTERM or SIGINT; a BaseException, so no `except Exception` (progress.json's) swallows it."""
+
+
+def on_signal(signum, frame):
+    raise Stopped("stopped by %s" % signal.Signals(signum).name)
+
+
+def defer_signal(signum, frame):
+    PENDING.append(signum)
+
+
+def stop_handlers(handler):
+    signal.signal(signal.SIGTERM, handler)
+    signal.signal(signal.SIGINT, handler)
+
+
+def reexec_in_ojh_python(task):
+    """Run again in resources.onejev.python (trsi needs pyyaml, model.predict the ojh .venv)."""
+    python = ((task.get("resources") or {}).get("onejev") or {}).get("python")
+    python = python and os.path.expandvars(os.path.expanduser(str(python)))
+    if python and "$" not in python and os.path.abspath(sys.executable) != os.path.abspath(python) \
+            and not os.environ.get("RSI_TRAIN_REEXEC"):   # a variable left unset: write_run says so
+        os.environ["RSI_TRAIN_REEXEC"] = "1"
+        os.execv(python, [python, os.path.abspath(__file__)] + sys.argv[1:])
+
+
+def trsi_call(main, *args):
+    """trsi's CLI in this process; its error message becomes the exception."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        code = main([str(a) for a in args])
+    if code != 0:
+        raise RuntimeError("trsi %s: %s" % (args[0], err.getvalue().strip() or "exit code %d" % code))
+
+
+def write_progress(run):
+    """<dirname(--out)>/progress.json (run.yaml's framework.progress_file); a failure is only printed, and not even
+    that when stderr cannot be written either (a full disk): it never stops or fails the training."""
+    try:
+        from trsi import progress
+        err = progress.write(run)
+    except Exception as e:  # write returns its errors; this guards against a bug in it
+        err = "%s: %s" % (type(e).__name__, e)
+    if err:
+        with contextlib.suppress(Exception):
+            print("train: progress.json not written: %s" % err, file=sys.stderr)
+
+
+def train(a, task):
+    sys.path.insert(0, HERE)
+    import trsi
+    from pathlib import Path
+    from trsi import archive, harness
+    from trsi.cli import main
+    from trsi.config import load_run, write_run
+
+    if trsi.__version__ != TRSI_VERSION:
+        raise RuntimeError("trsi %s is not the version this command pins (%s): update TRSI_VERSION in %s"
+                           % (trsi.__version__, TRSI_VERSION, __file__))
+    with open(a.config, encoding="utf-8") as f:
+        given = json.load(f)
+    unknown = sorted(set(given) - set(DEFAULTS))
+    if unknown:
+        raise RuntimeError("unknown config keys %s (known: %s)" % (unknown, sorted(DEFAULTS)))
+    req = dict(DEFAULTS, **given)
+    req["overrides"] = dict(req["overrides"] or {})
+    req["seed"] = int(req["seed"])
+    out = Path(a.out)
+    if out.exists() and any(out.iterdir()):
+        raise RuntimeError("--out %s exists and is not empty" % out)
+    work = Path(str(out) + ".trsi")
+    shutil.rmtree(work, ignore_errors=True)
+    run_path = write_run(work / "trsi", task_path=Path(a.task).resolve(), trainset=Path(a.trainset).resolve(),
+                         trainset_id=a.trainset_id, valset=Path(a.valset).resolve(), valset_id=a.valset_id,
+                         outdir=work, round_=a.round, producer=a.producer,
+                         run_name="train-" + hashlib.sha256(os.path.realpath(a.out).encode()).hexdigest()[:8],
+                         start_req=req,
+                         start_source=a.config_source, start_note="the train command's config", budget=None,
+                         search=False, progress_file=out.resolve().parent / "progress.json")
+    trsi_call(main, "init", run_path)
+    run = load_run(run_path)
+    RUN["run"] = run
+    write_progress(run)
+    cards = harness.free_gpus(run.gpus.ids, harness.recipe_gpus(run.start.recipe))
+    # ojh starts a tmux session before trsi records it: a stop meanwhile waits until the session is known
+    stop_handlers(defer_signal)
+    try:
+        trsi_call(main, "launch", run_path, "--start", "--seed", req["seed"], "--gpus", ",".join(map(str, cards)))
+        (tid, rec), = archive.trials(run).items()
+        TRAINING.update(session=rec.get("session"), run_dir=rec["run_dir"])
+    finally:
+        stop_handlers(on_signal)
+    if PENDING:
+        raise Stopped("stopped by %s" % signal.Signals(PENDING[0]).name)
+    poll = float(os.environ.get("RSI_TRAIN_POLL") or 60)
+    while harness.state(Path(rec["run_dir"]), rec.get("session")) == "running":
+        time.sleep(poll)
+        write_progress(run)
+    TRAINING.clear()
+    # ojh writes DONE while its runner still holds the card (a CUDA context): let the session end first (bounded)
+    end = time.time() + SESSION_WAIT_S
+    while rec.get("session") and harness.session_alive(rec["session"]) and time.time() < end:
+        time.sleep(min(poll, 5))
+    # then pack; while no card can score yet (someone else's job, the runner's last memory), try again, bounded
+    end = time.time() + CARD_WAIT_S
+    while True:
+        trsi_call(main, "collect", run_path, "--gpu", cards[0])
+        rec = archive.trial_record(run, tid)
+        if archive.state_of(rec) != "unpacked" or harness.NO_CARD not in str(rec["result"].get("pack_error")) \
+                or time.time() >= end:
+            break
+        time.sleep(min(poll, 30))
+    if archive.state_of(rec) != "done":
+        r = rec.get("result") or {}
+        raise RuntimeError("trial %s (ojh run %s) %s: %s" % (tid, rec["run_dir"], archive.state_of(rec),
+                                                             r.get("pack_error") or r.get("error")))
+    if out.exists():
+        out.rmdir()
+    os.replace(rec["result"]["candidate_dir"], str(out))
+    write_progress(run)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="train", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    for name in ("task", "trainset", "trainset-id", "valset", "valset-id", "config", "config-source", "round",
+                 "producer", "out", "marker"):
+        ap.add_argument("--" + name, required=True)
+    a = ap.parse_args()
+    a.round = int(a.round)
+    if a.producer != "train":
+        ap.error("--producer must be train (the data module does not train)")
+    out, marker = os.path.realpath(a.out), os.path.realpath(a.marker)
+    if os.path.commonpath([out, marker]) == out:
+        ap.error("--marker must be outside the candidate directory")
+    stop_handlers(on_signal)
+    try:
+        with open(a.task, encoding="utf-8") as f:
+            task = json.load(f)
+        reexec_in_ojh_python(task)
+        train(a, task)
+    except (Exception, Stopped) as e:  # the marker is always written, last
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if TRAINING.get("session"):
+            try:   # nothing may keep the marker from being written
+                from trsi import harness
+                try:
+                    running = harness.state(TRAINING["run_dir"], TRAINING["session"]) == "running"
+                except Exception:
+                    running = True   # its state cannot be read: end it all the same
+                if running:
+                    harness.kill_session(TRAINING["session"])
+                    e = "%s; ended the ojh training (tmux session %s)" % (e, TRAINING["session"])
+            except Exception as k:
+                e = "%s; could not end the ojh training (tmux session %s: %s: %s)" % (
+                    e, TRAINING["session"], type(k).__name__, k)
+        if RUN.get("run") is not None:
+            write_progress(RUN["run"])   # never raises: nothing may keep the marker from being written
+        with open(marker, "w") as f:
+            f.write("failed\n%s\n" % str(e).replace("\n", " "))
+        print("train failed: %s" % e, file=sys.stderr)
+        return 1
+    with open(marker, "w") as f:
+        f.write("ok\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

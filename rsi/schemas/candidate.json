@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "required": ["trainset_id", "valset_id", "config", "config_source", "code_version", "model", "metrics_val",
+               "baselines_val", "train_gate", "cost"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["candidate"]},
+    "trainset_id": {"type": "string", "minLength": 1},
+    "valset_id": {"type": "string", "minLength": 1},
+    "config": {"type": "object"},
+    "config_source": {"type": "string", "minLength": 1},
+    "config_request": {
+      "type": "object",
+      "required": ["base", "recipe", "overrides", "seed", "max_steps"],
+      "additionalProperties": false,
+      "properties": {
+        "base": {"type": ["string", "null"], "minLength": 1},
+        "recipe": {"type": ["string", "null"], "minLength": 1},
+        "overrides": {"type": "object"},
+        "seed": {"type": ["integer", "null"]},
+        "max_steps": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "code_version": {
+      "type": "object",
+      "required": ["entry", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "entry": {"type": "string", "minLength": 1},
+        "sha256": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["location", "sha256", "load", "predict"],
+      "additionalProperties": false,
+      "properties": {
+        "location": {"type": "string", "minLength": 1},
+        "sha256": {"type": ["string", "null"]},
+        "load": {"type": "string", "minLength": 1},
+        "predict": {"type": "string", "minLength": 1}
+      }
+    },
+    "metrics_val": {"type": "object", "additionalProperties": {"type": "number"}},
+    "baselines_val": {
+      "type": "object",
+      "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}}
+    },
+    "train_gate": {
+      "type": "object",
+      "required": ["passed", "detail"],
+      "additionalProperties": false,
+      "properties": {"passed": {"type": "boolean"}, "detail": {"type": "string"}}
+    },
+    "cost": {
+      "type": "object",
+      "required": ["compute_hours"],
+      "additionalProperties": false,
+      "properties": {"compute_hours": {"type": "number", "minimum": 0}}
+    }
+  }
+}

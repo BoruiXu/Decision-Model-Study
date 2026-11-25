@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "required": ["evaluation_id", "issues", "entry_module"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["plan"]},
+    "evaluation_id": {"type": ["string", "null"], "minLength": 1},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["issue", "evidence", "attribution", "module", "change", "expected"],
+        "additionalProperties": false,
+        "properties": {
+          "issue": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string"},
+          "attribution": {"type": "string", "minLength": 1},
+          "module": {"type": "string", "minLength": 1},
+          "change": {"type": "string", "minLength": 1},
+          "expected": {
+            "type": "object",
+            "required": ["metric", "direction", "size"],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {"type": "string", "minLength": 1},
+              "direction": {"type": "string", "enum": ["up", "down"]},
+              "size": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "entry_module": {"type": "string", "enum": ["data", "train", "tune", "deliver"]}
+  }
+}

@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Example train command of the mock modules (the contract in modules/train/SKILL.md, "训练命令（接口契约）"):
+
+  train --task <task.json> --trainset <dir> --trainset-id <id> --valset <dir> --valset-id <id>
+        --config <config.json> --config-source <default|candidate or search id> --round <n>
+        --producer train --out <candidate dir> --marker <marker path>
+
+Self-contained: the training code and its defaults live in this one file, so code_version.sha256 of this file
+names the training code. It reads only the trainset, the valset and the config, needs no agent, and writes the
+marker last (first line ok or failed). The caller runs it with PYTHONPATH=<repo root> in the environment; the
+metrics come from `python3 -m rsi score`.
+
+Model (fictional spam-check task, tests/fixtures.binary_task): the words seen at least min_token_count times in
+the training rows with a spam share of at least spam_ratio are spam words; a message with a spam word is spam.
+The model follows that rule with probability q and flips it otherwise (decided per message by a hash with the
+config's seed), q = capacity - 0.2 * |log10(lr) + 1| clipped to [0.02, 0.99]: lr 0.1 is the sweet spot, a larger
+capacity is better. The candidate directory holds model.json and the prediction entry `predict` (model.predict).
+Its config_request says what was asked for, in configuration paths (rsi.space): base mock-spam, recipe default,
+the config keys that differ from DEFAULTS as overrides.onejev.<key>, and the seed.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import math
+import os
+import re
+import stat
+import subprocess
+import sys
+
+VERSION = "mock-train 1.4"
+DEFAULTS = {"capacity": 0.85, "lr": 0.05, "epochs": 3, "seed": 0, "min_token_count": 3, "spam_ratio": 0.8}
+
+PREDICT = r'''#!/usr/bin/env python3
+"""Prediction entry of a mock spam-check candidate (model.predict):
+predict --inputs <inputs.jsonl> --out <predictions.jsonl> [--timing <per-row ms.jsonl>]
+Reads id and state.messages of each input row (input.messages in rows of old workspaces) and model.json beside
+this file; stdlib only."""
+import argparse, hashlib, json, os, re, time
+
+
+def h01(*parts):
+    d = hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8")).hexdigest()
+    return int(d[:12], 16) / float(16 ** 12)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--inputs", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--timing")
+    a = ap.parse_args()
+    here = os.path.dirname(os.path.realpath(__file__))
+    with open(os.path.join(here, "model.json"), encoding="utf-8") as f:
+        model = json.load(f)
+    spam, q, seed = set(model["spam_tokens"]), model["q"], model["seed"]
+    with open(a.inputs, encoding="utf-8") as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    out, times = [], []
+    for r in rows:
+        t0 = time.perf_counter()
+        text = " ".join(m["content"] for m in (r["state"] if "state" in r else r["input"])["messages"])
+        rule = "yes" if any(t in spam for t in re.findall(r"[a-z]+|[\u4e00-\u9fff]+", text.lower())) else "no"
+        dec = rule if h01(text, seed, "flip") < q else ("no" if rule == "yes" else "yes")
+        p = round(0.55 + 0.4 * h01(text, seed, "conf"), 6)
+        other = "no" if dec == "yes" else "yes"
+        out.append({"id": r["id"], "probs": {dec: p, other: round(1 - p, 6)}, "decision": dec,
+                    "uncertainty": round(1 - p, 6)})
+        times.append({"id": r["id"], "ms": (time.perf_counter() - t0) * 1000.0})
+    with open(a.out, "w", encoding="utf-8") as f:
+        for o in out:
+            f.write(json.dumps(o, sort_keys=True) + "\n")
+    if a.timing:
+        with open(a.timing, "w", encoding="utf-8") as f:
+            for t in times:
+                f.write(json.dumps(t) + "\n")
+
+
+main()
+'''
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read())
+    return h.hexdigest()
+
+
+def read_jsonl(path):
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def tokens(text):
+    return re.findall(r"[a-z]+|[\u4e00-\u9fff]+", text.lower())  # English words, runs of CJK characters
+
+
+def text_of(row):
+    """The text of a row: its state.messages (input.messages in rows of old workspaces), joined."""
+    state = row["state"] if "state" in row else row["input"]
+    return " ".join(m["content"] for m in state["messages"])
+
+
+def hard(t):
+    return "yes" if t.get("yes", 0) >= t.get("no", 0) else "no"
+
+
+def train(args):
+    task = read_json(args.task)
+    given = read_json(args.config)
+    unknown = sorted(set(given) - set(DEFAULTS))
+    if unknown:
+        raise RuntimeError("unknown config keys %s (known: %s)" % (unknown, sorted(DEFAULTS)))
+    config = dict(DEFAULTS)
+    config.update(given)  # fully resolved: every key the code uses
+    tman = read_json(os.path.join(args.trainset, "manifest.json"))
+    vman = read_json(os.path.join(args.valset, "manifest.json"))
+    train_rows_path = os.path.join(args.trainset, tman["files"]["rows"]["path"])
+    train_rows = read_jsonl(train_rows_path)
+    val_rows = os.path.join(args.valset, vman["files"]["rows"]["path"])
+    val_inputs = os.path.join(args.valset, vman["files"]["inputs"]["path"])
+    counts = {}
+    for r in train_rows:
+        y = hard(r["target"])
+        for t in set(tokens(text_of(r))):
+            c = counts.setdefault(t, [0, 0])
+            c[0 if y == "yes" else 1] += 1
+    spam = sorted(t for t, (s, h) in counts.items()
+                  if s + h >= config["min_token_count"] and s / float(s + h) >= config["spam_ratio"])
+    q = config["capacity"] - 0.2 * abs(math.log10(config["lr"]) + 1.0)
+    q = round(max(0.02, min(0.99, q)), 6)
+    out = args.out
+    os.makedirs(out, exist_ok=True)
+    model = {"spam_tokens": spam, "q": q, "seed": config["seed"], "trained_by": VERSION}
+    with open(os.path.join(out, "model.json"), "w", encoding="utf-8") as f:
+        json.dump(model, f, indent=2, sort_keys=True)
+    pred = os.path.join(out, "predict")
+    with open(pred, "w", encoding="utf-8") as f:
+        f.write(PREDICT)
+    os.chmod(pred, os.stat(pred).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    pv = os.path.join(out, "predictions_val.jsonl")
+    subprocess.run([pred, "--inputs", val_inputs, "--out", pv], check=True)
+    p = subprocess.run(["python3", "-m", "rsi", "score", "--task", args.task, "--labels", val_rows,
+                        "--predictions", pv, "--train", train_rows_path], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if p.returncode != 0:
+        raise RuntimeError("rsi score failed: %s" % p.stderr.strip())
+    sc = json.loads(p.stdout)
+    primary, higher = task["metrics"]["primary"], task["metrics"]["higher_is_better"]
+    mine = sc["metrics"][primary]
+    behind = [b for b, v in sorted(sc["baselines"].items())
+              if primary in v and not (mine > v[primary] if higher else mine < v[primary])]
+    others = ", ".join("%s %.4f" % (b, v[primary]) for b, v in sorted(sc["baselines"].items()) if primary in v)
+    detail = ("val %s %.4f beats %s" % (primary, mine, others) if not behind else
+              "val %s %.4f does not beat %s" % (primary, mine, ", ".join(
+                  "%s %.4f" % (b, sc["baselines"][b][primary]) for b in behind)))
+    parents = [x for x in (args.trainset_id, args.valset_id) if x != "unregistered"]
+    if args.config_source != "default":
+        parents.append(args.config_source)
+    me = os.path.realpath(__file__)
+    manifest = {
+        "kind": "candidate", "id": None, "task_id": task["task_id"], "task_version": task["version"],
+        "round": args.round, "producer": args.producer,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "parents": parents,
+        "files": {"predictions_val": {"path": "predictions_val.jsonl", "rows": len(read_jsonl(pv))}},
+        "notes": "%s; q=%.4f; %d spam words" % (VERSION, q, len(spam)),
+        "trainset_id": args.trainset_id, "valset_id": args.valset_id,
+        "config": config, "config_source": args.config_source,
+        "config_request": {"base": "mock-spam", "recipe": "default", "seed": config["seed"], "max_steps": None,
+                           "overrides": {"onejev": dict((k, v) for k, v in sorted(config.items())
+                                                        if k != "seed" and DEFAULTS[k] != v)}},
+        "code_version": {"entry": me, "sha256": sha256(me)},
+        "model": {"location": "model.json", "sha256": sha256(os.path.join(out, "model.json")),
+                  "load": "spam words and follow rate q in model.json, read by ./predict", "predict": "predict"},
+        "metrics_val": sc["metrics"], "baselines_val": sc["baselines"],
+        "train_gate": {"passed": not behind, "detail": detail},
+        "cost": {"compute_hours": round(0.05 * config["epochs"] / 3.0, 4)},
+    }
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="train")
+    for a in ("task", "trainset", "trainset-id", "valset", "valset-id", "config", "config-source", "round",
+              "producer", "out", "marker"):
+        ap.add_argument("--" + a, required=True)
+    args = ap.parse_args()
+    args.round = int(args.round)
+    if args.producer != "train":
+        ap.error("--producer must be train (the data module does not train)")
+    out, marker = os.path.realpath(args.out), os.path.realpath(args.marker)
+    if os.path.commonpath([out, marker]) == out:
+        ap.error("--marker must be outside the candidate directory")
+    try:
+        train(args)
+    except Exception as e:  # the marker is always written, last
+        with open(marker, "w") as f:
+            f.write("failed\n%s\n" % e)
+        print("train failed: %s" % e, file=sys.stderr)
+        return 1
+    with open(marker, "w") as f:
+        f.write("ok\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

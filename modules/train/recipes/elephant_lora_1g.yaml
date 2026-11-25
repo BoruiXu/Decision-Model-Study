@@ -1,0 +1,24 @@
+# Elephant-1 LoRA on 1 GPU: the Elliptic team recipe (crypto-fraud-detection elephant/scripts/run_elephant_ft.sh,
+# lora mode), written as a harness recipe. Settings are the ones OneJev actually used in that team run (args.json):
+# lr 1e-4, 1 epoch, 64 rows per step, LoRA r 32 / alpha 64 / dropout 0.05, Brier weight 1.
+# Peak memory about 30 GB; one epoch of Elliptic txhist (169k rows) takes 3-4 h on an H200, 7-7.5 h on an A100.
+mode: lora
+gpus: 1
+onejev:
+  split: train
+  dtype: bfloat16
+  lr: 1.0e-4
+  epochs: 1
+  brier_weight: 1
+  warmup_frac: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  max_len: 16384
+  batch_tokens: 16384
+  max_rows: 64
+  accum_rows: 64
+  log_every: 1
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05

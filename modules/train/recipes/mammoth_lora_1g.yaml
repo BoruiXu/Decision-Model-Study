@@ -1,0 +1,24 @@
+# Mammoth-1 LoRA on 1 GPU: the same settings as elephant_lora_1g.yaml, only the base differs (so a model-choice
+# candidate changes one thing; LoRA autocast stays off, as in the Elliptic runs). Peak memory about 75 GB: an H200 (143 GB) fits; an 80 GB A100/H100 is tight.
+# On Elliptic txhist one epoch took 9.5-18 h on an H200. Larger models usually want a smaller lr (see
+# reference/lessons.md); try onejev.lr as a separate candidate.
+mode: lora
+gpus: 1
+onejev:
+  split: train
+  dtype: bfloat16
+  lr: 1.0e-4
+  epochs: 1
+  brier_weight: 1
+  warmup_frac: 0.03
+  weight_decay: 0
+  max_grad_norm: 1
+  max_len: 16384
+  batch_tokens: 16384
+  max_rows: 64
+  accum_rows: 64
+  log_every: 1
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05

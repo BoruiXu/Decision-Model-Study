@@ -1,0 +1,76 @@
+{
+  "kind": "task",
+  "task_id": "elliptic-addr-txhist",
+  "version": 1,
+  "decision": {
+    "type": "binary",
+    "instructions": "Is this Bitcoin address involved in illicit activity?",
+    "labels": ["yes", "no"],
+    "label_meanings": {
+      "yes": "illicit: the address is involved in illicit activity",
+      "no": "licit: the address is not involved in illicit activity"
+    },
+    "positive": "yes"
+  },
+  "input": {
+    "format": "object",
+    "description": "The transaction history of one Elliptic++ bitcoin address up to its time step: the OneJev txhist state as 01_build_data.sh builds it, kept as built. An object with three top-level keys: entity (what the object describes), summary (an overview of the history) and transactions (the address's transactions)."
+  },
+  "data": {
+    "sources": [
+      {"path": "<ROWS_DIR>", "about": "01_build_data.sh 写的 Elliptic++ 地址级 OneJev txhist 行：train.jsonl（时间步 1–29）、val.jsonl（30–34）、test.jsonl（35–49）；val_sub4000.jsonl 不用"}
+    ],
+    "label_sources": ["human"],
+    "rows": {
+      "about": "一行一个（地址，时间步）：train、val、test.jsonl 的每一行写成一行，id 沿用上游的（addr_<时间步>_<地址>）；state 原样（OneJev txhist：entity、summary、transactions）；question 用任务的问题；target 原样（yes 是 illicit），上游 meta.y 只用来核对它；meta.state_id 是地址；时间步写进 meta.extra.step（上游 meta.step，没有时从 id 取）；上游 meta 的 y、post43、seen_in_train 不写出；label_source 是 human，n_obs 是 1",
+      "expect": {"rows": 291419, "label_counts": {"yes": 14720, "no": 276699}}
+    },
+    "split": {"sizes": {"trainset": 1000, "valset": 500, "evalset": 500, "testset": 1000}}
+  },
+  "quality_checks": {
+    "min_rows": 1000,
+    "min_positive_rows": 20
+  },
+  "metrics": {
+    "primary": "auprc",
+    "higher_is_better": true,
+    "others": ["brier", "log_loss", "auc", "accuracy", "macro_f1"],
+    "baselines": ["majority"],
+    "ci": {"resamples": 1000, "seed": 0, "level": 0.95}
+  },
+  "promotion_rule": {
+    "min_delta": 0.01,
+    "ci_lower_min": null,
+    "guards": [
+      {"metric": "brier", "higher_is_better": false, "max_regression": 0.005},
+      {"metric": "log_loss", "higher_is_better": false, "max_regression": 0.02}
+    ]
+  },
+  "stop": {"target": null, "max_rounds": 1},
+  "budget": {"compute_hours": 8, "annotation_items": null, "api_cost": null},
+  "resources": {
+    "train_command": "<REPO_ROOT>/modules/train/train",
+    "onejev": {
+      "python": "<OJH_PYTHON>",
+      "ojh_bin": "<OJH_BIN>",
+      "machine": "<OJH_MACHINE>",
+      "env_file": "<OJH_ENV_FILE>",
+      "default_config": {"base": "joey-1", "recipe": null, "overrides": {}, "seed": 0, "max_steps": null},
+      "estimate": {"joey-1": "<JOEY1_GPU_HOURS>"}
+    },
+    "gpu_ids": "<GPU_IDS>"
+  },
+  "search_space": {
+    "overrides.onejev.lr": [5e-06, 1e-05, 2e-05],
+    "overrides.onejev.warmup_frac": [0.03, 0.1],
+    "seed": [0, 1, 2]
+  },
+  "search": {"max_configs": 3, "probe_margin": 0.01, "accept_margin": 0.01},
+  "eval_use_limit": 3,
+  "delivery": {"reproduction_tolerance": 0.0001, "max_decision_mismatch_rate": 0.001},
+  "flow": {"checkin_minutes": 30, "max_continues": 30},
+  "runner": {
+    "claude": {"command": ["<CLAUDE_BIN>", "-p", "--dangerously-skip-permissions", "--output-format", "json"]}
+  },
+  "approvals": ["task_change", "over_budget", "use_testset", "refresh_sets", "plan", "delete"]
+}

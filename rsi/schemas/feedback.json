@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "kind": {"type": "string", "enum": ["feedback"]},
+    "delivery_id": {"type": "string", "minLength": 1},
+    "candidate_id": {"type": "string", "minLength": 1}
+  }
+}
