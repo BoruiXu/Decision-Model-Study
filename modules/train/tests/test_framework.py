@@ -177,6 +177,7 @@ def test_collect_packs_a_valid_candidate(env, monkeypatch):
     y = [int(rows[p["id"]]["target"]["yes"] == 1) for p in preds]
     assert rec["result"]["metrics"]["ece"] == pytest.approx(ece(y, [p["probs"]["yes"] for p in preds]))
     assert not (rd / "predictions_select.jsonl").exists()
+    assert not (cand / "policy.json").exists() and set(m["files"]) == {"predictions_val"}   # no policy section
 
 
 def test_collect_skips_a_broken_trial(env, monkeypatch):
@@ -416,7 +417,7 @@ def test_train_command_contract(env, tmp_path, monkeypatch):
     assert p.returncode == 0 and marker == ["ok"], p.stderr
     assert "can score this candidate now" in p.stdout                    # tried again once a card was free
     monkeypatch.delenv("FAKE_GPU_BUSY_ONCE")
-    assert [r[3] for r in json.loads((tmp_path / "progress.json").read_text())["table"]["rows"]] == ["完成"]
+    assert [r[3] for r in json.loads((tmp_path / "progress.json").read_text())["table"]["rows"]] == ["done"]
     assert [c["cuda"] for c in _jsonl(calls)] == ["GPU-fake-1"]   # scored on the card it trained on
     v = env.rsi("validate", "candidate", out, "--task", env.task_json)
     assert v.returncode == 0, v.stdout + v.stderr

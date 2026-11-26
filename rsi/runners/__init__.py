@@ -3,11 +3,14 @@
 claude  ClaudeCodeRunner, a headless Claude Code session (the default of `rsi run`)
 mock    MockRunner, a script per module (tests and flow simulations)
 manual  ManualRunner, a person fills the output directory
+code    CodeRunner, a code module's fixed command (rsi.flow.CODE_MODULES): no `--runner` choice; the engine gives it to
+        a code module's dispatches whatever `--runner` says, except mock (rsi.engine.Engine.runner_for)
 """
 import os
 
 from rsi.runners.base import Runner
 from rsi.runners.claude import ClaudeCodeRunner
+from rsi.runners.code import CodeRunner
 from rsi.runners.manual import ManualRunner
 from rsi.runners.mock import MockRunner
 from rsi.workspace import RsiError
@@ -38,7 +41,10 @@ def attach_runner(name, ws):
         return ManualRunner()
     if name == "mock":
         return MockRunner(None)
+    if name == "code":
+        return CodeRunner.from_task(ws.task())
     return Runner()
 
 
-__all__ = ["Runner", "ClaudeCodeRunner", "ManualRunner", "MockRunner", "RUNNERS", "make_runner", "attach_runner"]
+__all__ = ["Runner", "ClaudeCodeRunner", "CodeRunner", "ManualRunner", "MockRunner", "RUNNERS", "make_runner",
+           "attach_runner"]

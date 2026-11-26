@@ -1,56 +1,56 @@
-# 已经学到的（Elliptic++ 地址任务，交易历史输入）
+# What has been learned (Elliptic++ address task, transaction history input)
 
-**注意**：下面的数是 2026-11-21 至 23 直接用 OneJev（81ce62f + serve.patch）跑的，还没有经过 harness。指标是完整验证集（第 30–34 步，24,225 个地址，1,838 个非法）上的 AUPRC，checkpoint 按验证子集的 AUPRC 选。harness 默认按 NLL 选 checkpoint，经 harness 重跑后数会有出入。
+**Note**: the numbers below come from runs made directly with OneJev (81ce62f + serve.patch) on 2026-11-21 to 23, not yet through the harness. The metric is the AUPRC on the full valset (steps 30–34, 24,225 addresses, 1,838 illicit), with the checkpoint chosen by the AUPRC on a validation subset. The harness chooses the checkpoint by NLL by default, so the numbers will differ once rerun through the harness.
 
-## 起点
+## Start
 
-| 方案 | 种子 0 / 1 / 2 | 平均 |
+| Config | Seed 0 / 1 / 2 | Mean |
 |---|---|---|
-| elephant-1 LoRA，团队配方（`recipes/elephant_lora_1g.yaml`） | 0.883 / 0.905 / 0.918 | 0.902（标准差 0.0175） |
-| 对照：XGBoost，同样的交易历史输入 | — | 0.885 |
-| 对照：不训练的基座 | — | 0.05–0.06（低于随机的 0.076） |
+| elephant-1 LoRA, team recipe (`recipes/elephant_lora_1g.yaml`) | 0.883 / 0.905 / 0.918 | 0.902 (standard deviation 0.0175) |
+| Baseline: XGBoost, same transaction history input | — | 0.885 |
+| Baseline: the untrained base | — | 0.05–0.06 (below random, 0.076) |
 
-不训练的决策模型在这个任务上排序是反的（AUROC 0.28–0.39），必须微调。
+On this task the untrained decision model ranks backwards (AUROC 0.28–0.39); it must be fine-tuned.
 
-## 试过的改动（都和团队配方比）
+## Changes tried (all against the team recipe)
 
-| 改动 | 种子 0 / 1 / 2 | 平均差 | 结论 |
+| Change | Seed 0 / 1 / 2 | Mean delta | Conclusion |
 |---|---|---|---|
-| 换 mammoth-1（学习率不变） | 0.895 / 0.929 / 0.889 | +0.002 | 没赢；验证分数在第 1200 步后一路下降 |
-| mammoth-1 + 学习率减半（5e-5） | 0.907 / — / — | +0.024（种子 0） | 最有希望，但没过 0.035；最好在第 800 步，最后一步掉到 0.804 |
-| 训练 2 个 epoch | 0.876 / 0.869 / 0.919 | −0.014 | 死路 |
-| 批大小减半（accum_rows 32） | 0.876 / 0.902 / — | −0.005 | 死路 |
-| Brier 权重 3 | 0.831 / 0.721 / 0.907 | −0.082 | 死路 |
-| 去掉输入增强 | 0.782 / 0.886 / 0.811 | −0.076 | 死路 |
-| elephant-1 全参（2 张 H200） | 0.616 / — / — | −0.27 | 保存点之间在 0.30 和 0.68 之间跳，ECE 0.31；查清原因前不当候选 |
+| Switch to mammoth-1 (same learning rate) | 0.895 / 0.929 / 0.889 | +0.002 | No win; the validation score fell all the way after step 1200 |
+| mammoth-1 + half the learning rate (5e-5) | 0.907 / — / — | +0.024 (seed 0) | The most promising, but did not pass 0.035; best at step 800, down to 0.804 at the last step |
+| Train 2 epochs | 0.876 / 0.869 / 0.919 | −0.014 | Dead end |
+| Half the batch size (accum_rows 32) | 0.876 / 0.902 / — | −0.005 | Dead end |
+| Brier weight 3 | 0.831 / 0.721 / 0.907 | −0.082 | Dead end |
+| No input augmentation | 0.782 / 0.886 / 0.811 | −0.076 | Dead end |
+| elephant-1 full (2 H200) | 0.616 / — / — | −0.27 | Checkpoints jump between 0.30 and 0.68, ECE 0.31; not a candidate until the cause is found |
 
-## 四条经验
+## Four lessons
 
-1. **短跑筛选不可信**：两次筛选的排名相关只有 0.08；筛选看好的 4 个改动，完整训练一个都没赢。
-2. **3 个种子分不出小改进**：换种子的标准差 0.0175，3 个种子只能确认 0.035 以上的改进。
-3. **换大模型要连学习率一起调**：27B 沿用 9B 的学习率，曲线早早见顶后下降；学习率减半后种子 0 从 0.895 升到 0.907。
-4. **借来的改法先查前提**：别处有效的改动，先写下它为什么有效，再看这里是否满足，不满足就不花卡。
+1. **Short-run screening cannot be trusted**: the rankings of two screenings correlated at only 0.08; of the 4 changes a screening favoured, not one won after full training.
+2. **3 seeds cannot tell small improvements apart**: the standard deviation across seeds is 0.0175, so 3 seeds can confirm only improvements above 0.035.
+3. **With a larger model, tune the learning rate too**: 27B on 9B's learning rate peaked early and then fell; with half the learning rate, seed 0 went from 0.895 to 0.907.
+4. **Check the premise of a borrowed change first**: for a change that worked elsewhere, first write down why it worked, then see whether that holds here; when it does not, spend no GPU on it.
 
-另外，1/4 数据的小环境和完整训练排名对不上（相关 0.09–0.37），不能用来比较方案。
+Also, the small setting with 1/4 of the data does not rank like full training (correlation 0.09–0.37) and cannot be used to compare configs.
 
-## 成本参考
+## Cost reference
 
-| 模型 / 方式 | 峰值显存 | 卡 | 1 个 epoch（169k 行） | 存储 |
+| Model / mode | Peak GPU memory | GPUs | 1 epoch (169k rows) | Storage |
 |---|---|---|---|---|
-| elephant-1 LoRA | 30 GB | 1 张 | H200 3–4 h，H100 约 5 h，A100 7–7.5 h | 每个保存点 337 MB，一次 1.7 GB |
-| elephant-1 全参（FSDP） | 每张 86 GB | 2 张 H200（2 张 80 GB 卡放不下） | 1.6 h | 每个保存点 15 GB，一次 71 GB |
-| mammoth-1 LoRA | 75 GB | 1 张 H200 | 9.5–18 h | 每个保存点 0.9 GB，一次 4.4 GB |
-| mammoth-1 全参 | 4 张 H200 也放不下 | — | — | — |
+| elephant-1 LoRA | 30 GB | 1 | H200 3–4 h, H100 about 5 h, A100 7–7.5 h | 337 MB per checkpoint, 1.7 GB per run |
+| elephant-1 full (FSDP) | 86 GB each | 2 H200 (2 80 GB GPUs are not enough) | 1.6 h | 15 GB per checkpoint, 71 GB per run |
+| mammoth-1 LoRA | 75 GB | 1 H200 | 9.5–18 h | 0.9 GB per checkpoint, 4.4 GB per run |
+| mammoth-1 full | Does not fit even on 4 H200 | — | — | — |
 
-按 A100 卡时折算：elephant-1 LoRA 一个种子约 8，mammoth-1 LoRA 约 23（H200 约是 A100 的 1.7 倍快）。
+In A100 GPU hours: about 8 per seed for elephant-1 LoRA, about 23 for mammoth-1 LoRA (an H200 is about 1.7 times as fast as an A100).
 
-## 环境上踩过的坑
+## Environment pitfalls met
 
-| 现象 | 原因 | 处理 |
+| Symptom | Cause | Fix |
 |---|---|---|
-| 训练变慢 2.5 倍 | 别的任务叠在同一张卡上抢算力 | 关键的训练放在没有别人任务的卡上 |
-| 存 checkpoint 时爆显存 | 存盘要额外显存，邻居此刻用量低于峰值 | 估显存时按峰值加存盘余量 |
-| 批大小改动实际多看或少看样本（accum_rows 32 多 27%，128 少 12%） | 每步实际装进的行数随行长变化 | 比较时看日志里实际每步的样本数 |
-| 逐步损失在 0.01 和 0.7–1.0 之间跳 | 长度相近的行同批，而长度和标签强相关 | 看曲线先平滑，不要据此判断训练坏了 |
-| H100、H200 上经 harness 训练，第 1 步反向就失败，要求装 tilelang | flash-linear-attention 0.5.2 在 Hopper 卡上不用 Triton 3.4 的反向内核，改用 tilelang；harness 的 `setup.sh` 没装 tilelang 和 causal-conv1d。tilelang 即时编译要 CUDA 12.8 的 nvcc，系统自带的 12.0 和 gcc 13 不兼容 | 在 harness 的环境里补装 tilelang 0.1.15、causal-conv1d 1.7.0（带上 harness 的 `-c constraints.txt`，causal-conv1d 加 `--no-build-isolation`，安装时设 `CUDA_HOME=/usr/local/cuda-12.8`）；机器配置的 `env` 里设 `CUDA_HOME` 和把 `/usr/local/cuda-12.8/bin` 放到 `PATH` 前面。torch、triton、flash-linear-attention 的版本不动。`install_env.sh` 做这些（见 `README.md`「装环境」） |
-| 训练完成，harness 收尾被 signal 15 杀掉（xtrah200） | 机器上的显卡看门狗：一个进程 10 分钟里用卡的时间不到 20% 就先警告、2 分钟后杀掉；一个用户 20 分钟里总用卡率低于 10% 会被强制登出。收尾先在验证集上重新打分（用卡，约 4.5 分钟），exp.yaml 有 `fields.text` 时接着在 CPU 上训 TF-IDF 和长度基线，这时进程还占着卡 | exp.yaml 不设 `fields.text`（`trsi init` 生成的 exp.yaml 不设）；不要让进程占着卡空等 |
+| Training 2.5 times slower | Another job stacked on the same GPU competes for compute | Put the important trainings on GPUs with no one else's jobs |
+| GPU memory overflow when saving a checkpoint | Saving needs extra GPU memory, and a neighbour's use was below its peak at that moment | Estimate GPU memory at the peak plus a margin for saving |
+| A batch size change actually sees more or fewer samples (accum_rows 32 sees 27% more, 128 sees 12% fewer) | The rows actually packed per step vary with row length | When comparing, look at the actual samples per step in the log |
+| The per-step loss jumps between 0.01 and 0.7–1.0 | Rows of similar length are batched together, and length correlates strongly with the label | Smooth the curve before reading it; do not conclude from this that training is broken |
+| On H100 and H200, training through the harness fails at the first backward step, asking for tilelang | flash-linear-attention 0.5.2 does not use Triton 3.4's backward kernel on Hopper GPUs and uses tilelang instead; the harness's `setup.sh` installs neither tilelang nor causal-conv1d. tilelang's just-in-time compilation needs CUDA 12.8's nvcc; the system's 12.0 does not work with gcc 13 | Install tilelang 0.1.15 and causal-conv1d 1.7.0 into the harness's environment (with the harness's `-c constraints.txt`, `--no-build-isolation` for causal-conv1d, `CUDA_HOME=/usr/local/cuda-12.8` during the install); in the machine config's `env`, set `CUDA_HOME` and put `/usr/local/cuda-12.8/bin` first in `PATH`. The versions of torch, triton and flash-linear-attention do not move. `install_env.sh` does all this (see "Installing the environment" in `README.md`) |
+| The training finished, and the harness wrap-up was killed by signal 15 (xtrah200) | The machine's GPU watchdog: a process that used its GPU less than 20% of the time over 10 minutes is warned, then killed 2 minutes later; a user whose total GPU use is below 10% over 20 minutes is logged out by force. The wrap-up first scores again on the valset (using the GPU, about 4.5 minutes), and when exp.yaml has `fields.text` it then trains TF-IDF and length baselines on the CPU while the process still holds the GPU | Do not set `fields.text` in exp.yaml (the exp.yaml `trsi init` writes does not set it); never let a process hold a GPU idle |

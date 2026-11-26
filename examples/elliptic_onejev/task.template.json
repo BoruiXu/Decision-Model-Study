@@ -14,22 +14,36 @@
   },
   "input": {
     "format": "object",
-    "description": "The transaction history of one Elliptic++ bitcoin address up to its time step: the OneJev txhist state as 01_build_data.sh builds it, kept as built. An object with three top-level keys: entity (what the object describes), summary (an overview of the history) and transactions (the address's transactions)."
+    "description": "The transaction history of one Elliptic++ bitcoin address up to its time step: the OneJev txhist state as 01_build_data.sh builds it, kept as built. An object with three top-level keys: entity (what the object describes), summary (an overview of the history) and transactions (the address's transactions).",
+    "verbatim": []
+  },
+  "features": {
+    "adapter": "examples/elliptic_onejev/features_adapter.py",
+    "constraints": [
+      {"nonneg": ["transactions[].steps_ago", "transactions[].tx_total_btc", "transactions[].tx_fee_btc",
+                  "transactions[].tx_num_input_addresses", "transactions[].tx_num_output_addresses",
+                  "transactions[].tx_smallest_output_btc", "transactions[].tx_largest_output_btc"]},
+      {"integer": ["transactions[].steps_ago", "transactions[].tx_num_input_addresses",
+                   "transactions[].tx_num_output_addresses"]},
+      {"order": ["transactions[].tx_smallest_output_btc", "transactions[].tx_largest_output_btc",
+                 "transactions[].tx_total_btc"]}
+    ]
   },
   "data": {
     "sources": [
-      {"path": "<ROWS_DIR>", "about": "01_build_data.sh 写的 Elliptic++ 地址级 OneJev txhist 行：train.jsonl（时间步 1–29）、val.jsonl（30–34）、test.jsonl（35–49）；val_sub4000.jsonl 不用"}
+      {"path": "<ROWS_DIR>", "about": "the Elliptic++ address-level OneJev txhist rows 01_build_data.sh writes: train.jsonl (time steps 1–29), val.jsonl (30–34), test.jsonl (35–49); val_sub4000.jsonl is not used"}
     ],
     "label_sources": ["human"],
     "rows": {
-      "about": "一行一个（地址，时间步）：train、val、test.jsonl 的每一行写成一行，id 沿用上游的（addr_<时间步>_<地址>）；state 原样（OneJev txhist：entity、summary、transactions）；question 用任务的问题；target 原样（yes 是 illicit），上游 meta.y 只用来核对它；meta.state_id 是地址；时间步写进 meta.extra.step（上游 meta.step，没有时从 id 取）；上游 meta 的 y、post43、seen_in_train 不写出；label_source 是 human，n_obs 是 1",
+      "about": "one row per (address, time step): each row of train, val and test.jsonl becomes one row, keeping the upstream id (addr_<time step>_<address>); state as it is (OneJev txhist: entity, summary, transactions); question is the task's question; target as it is (yes is illicit), the upstream meta.y used only to check it; meta.state_id is the address; the time step goes into meta.extra.step (the upstream meta.step, or taken from the id when missing); the upstream meta's y, post43, seen_in_train are not written out; label_source is human, n_obs is 1",
       "expect": {"rows": 291419, "label_counts": {"yes": 14720, "no": 276699}}
     },
     "split": {"sizes": {"trainset": 1000, "valset": 500, "evalset": 500, "testset": 1000}}
   },
   "quality_checks": {
     "min_rows": 1000,
-    "min_positive_rows": 20
+    "min_positive_rows": 20,
+    "max_synthetic_share": 0.3
   },
   "metrics": {
     "primary": "auprc",
@@ -46,8 +60,9 @@
       {"metric": "log_loss", "higher_is_better": false, "max_regression": 0.02}
     ]
   },
-  "stop": {"target": null, "max_rounds": 1},
-  "budget": {"compute_hours": 8, "annotation_items": null, "api_cost": null},
+  "stop": {"target": null, "max_rounds": 3},
+  "budget": {"compute_hours": 8, "annotation_items": null, "api_cost": "<API_USD_BUDGET>",
+             "agent_cost": "<AGENT_USD_BUDGET>"},
   "resources": {
     "train_command": "<REPO_ROOT>/modules/train/train",
     "onejev": {
@@ -56,7 +71,7 @@
       "machine": "<OJH_MACHINE>",
       "env_file": "<OJH_ENV_FILE>",
       "default_config": {"base": "joey-1", "recipe": null, "overrides": {}, "seed": 0, "max_steps": null},
-      "estimate": {"joey-1": "<JOEY1_GPU_HOURS>"}
+      "estimate": {"joey-1": "<JOEY1_GPU_HOURS>", "elephant-1": "<ELEPHANT1_GPU_HOURS>"}
     },
     "gpu_ids": "<GPU_IDS>"
   },
@@ -66,6 +81,12 @@
     "seed": [0, 1, 2]
   },
   "search": {"max_configs": 3, "probe_margin": 0.01, "accept_margin": 0.01},
+  "policy": {"objective": "f1"},
+  "compare": {
+    "baselines": ["lr", "gbdt", "mlp", "zero_shot", "few_shot", "team_recipe"],
+    "team_recipe": {"base": "elephant-1", "recipe": "recipes/elephant_lora_1g.yaml", "overrides": {}, "seed": 0,
+                    "max_steps": null}
+  },
   "eval_use_limit": 3,
   "delivery": {"reproduction_tolerance": 0.0001, "max_decision_mismatch_rate": 0.001},
   "flow": {"checkin_minutes": 30, "max_continues": 30},

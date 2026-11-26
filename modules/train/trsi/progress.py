@@ -4,12 +4,12 @@ file, then os.replace) after `trsi launch`, at every poll of `trsi watch`, befor
 trial, and by the train command; write() returns its error instead of raising, so a progress file that cannot be
 written never stops a watch, a collect or a training.
 
-  summary   the trainings running and their cards, how many wait to start, the trial being packed
-  facts     配置 (configurations proposed / search.max_configs), GPU 小时 (spent / the brief's budget), 当前方案 (the
-            incumbent's candidate id and its changes from the start), in this order
-  table     one row per trial of this run: trial, changes from the start, seed, state (等待开始 / 训练 k/n 步 · 剩约 m 分
-            from the ojh training log / 打包中（卡 i） / 完成，未打包 / 完成 / 失败：<reason>), cards, time, the
-            primary metric on the valset
+  summary   the trainings running and their GPUs, how many wait to start, the trial being packed, joined by "; "
+  facts     configs (configurations proposed / search.max_configs), GPU hours (spent / the brief's budget), incumbent
+            (the incumbent's candidate id and its changes from the start), in this order
+  table     one row per trial of this run: trial, changes from the start, seed, state (waiting to start / training
+            step k/n · about m min left from the ojh training log / packing (GPU i) / done, not packed / done /
+            failed: <reason>), GPUs, time, the primary metric on the valset
   notes     the STOP line `trsi next` prints (cli.stop_reason) and the packing errors of unpacked trials
 """
 from __future__ import annotations
@@ -84,42 +84,53 @@ def _epoch(s) -> float | None:
 
 
 def _hours(x: float) -> str:
-    return "无上限" if math.isinf(x) else f"{x:.1f}".rstrip("0").rstrip(".")
+    return "no limit" if math.isinf(x) else f"{x:.1f}".rstrip("0").rstrip(".")
 
 
 def _duration(seconds: float) -> str:
     m = round(max(seconds, 0) / 60)
-    return f"{m} 分" if m < 120 else f"{m / 60:.1f} 小时"
+    return f"{m} min" if m < 120 else f"{m / 60:.1f} h"
+
+
+def _count(n: int, word: str) -> str:
+    """`n` and `word`, with an "s" added unless n is 1: "1 trial", "3 trials"."""
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _gpus(cards: list[str]) -> str:
+    """The GPUs of the trials in words, "GPU 2" or "GPUs 0, 4, 6" (one trial's entry may name several: "0, 1")."""
+    joined = ", ".join(cards)
+    return ("GPU " if len(joined.split(", ")) == 1 else "GPUs ") + joined
 
 
 def _value(v) -> str:
     if v is None:
-        return "默认"
+        return "default"
     if isinstance(v, float):
         return re.sub(r"e([+-])0+(\d)", r"e\1\2", f"{v:g}")   # 5e-06 -> 5e-6
     return str(v).lower() if isinstance(v, bool) else str(v)
 
 
 def changes(run: RunConfig, c: Candidate) -> str:
-    """A configuration's config_request against the start's, key by key ("base mammoth-1，lr 5e-6"; the seed is
-    left out); 起点 when they are the same."""
+    """A configuration's config_request against the start's, key by key ("base mammoth-1, lr 5e-6"; the seed is
+    left out); "start" when they are the same."""
     a = config_request(run.start, 0, run.space.recipe_names)
     b = config_request(c, 0, run.space.recipe_names)
     out = [f"base {b['base']}"] if a["base"] != b["base"] else []
     if a["recipe"] != b["recipe"]:
-        out.append("recipe " + (Path(b["recipe"]).stem if b["recipe"] else "默认"))
+        out.append("recipe " + (Path(b["recipe"]).stem if b["recipe"] else "default"))
     for k in sorted(set(a["overrides"]) | set(b["overrides"])):
         if not _same(a["overrides"].get(k), b["overrides"].get(k)):
             out.append(f"{k.split('.', 1)[-1]} {_value(b['overrides'].get(k))}")
     if not _same(a["max_steps"], b["max_steps"]):
         out.append(f"max_steps {_value(b['max_steps'])}")
-    return "，".join(out) or "起点"
+    return ", ".join(out) or "start"
 
 
 def _state(tid: str, rec: dict, packing: tuple[str, str] | None) -> tuple[str, str]:
     """(the state column, its kind: training, queued, packing, ended, done or failed)."""
     if packing and packing[0] == tid:
-        return f"打包中（卡 {packing[1]}）", "packing"
+        return f"packing (GPU {packing[1]})", "packing"
     st = archive.state_of(rec)
     if st == "running":
         run_dir = Path(rec["run_dir"])
@@ -127,17 +138,18 @@ def _state(tid: str, rec: dict, packing: tuple[str, str] | None) -> tuple[str, s
         if ojh == "running":
             step = train_step(run_dir / f"train-s{rec['seed']}.log")
             if step is None:
-                return "等待开始", "queued"
+                return "waiting to start", "queued"
             k, n, eta = step
-            return f"训练 {k}/{n} 步" + ("" if eta is None else f" · 剩约 {_duration(eta * 3600)}"), "training"
+            left = "" if eta is None else f" · about {_duration(eta * 3600)} left"
+            return f"training step {k}/{n}{left}", "training"
         if ojh == "done":
-            return "完成，未打包", "ended"
+            return "done, not packed", "ended"
         st, rec = "failed", {"result": {"error": harness.read_result(run_dir, rec["seed"]).error}}
     if st == "unpacked":
-        return "完成，未打包", "ended"
+        return "done, not packed", "ended"
     if st == "done":
-        return "完成", "done"
-    return "失败：" + str((rec.get("result") or {}).get("error") or "原因不明")[:80], "failed"
+        return "done", "done"
+    return "failed: " + str((rec.get("result") or {}).get("error") or "reason unknown")[:80], "failed"
 
 
 def _row(run: RunConfig, tid: str, rec: dict, packing, cards: str | None, start: float | None, end: float | None,
@@ -172,45 +184,47 @@ def build(run: RunConfig, packing: tuple[str, str] | None = None, now: float | N
     rows, kinds, notes = [], {}, []
     for tid, rec in archive.trials(run).items():
         le = launch.get(tid)
-        cards = "、".join(str(g) for g in le.get("gpus") or ()) if le else None
+        cards = ", ".join(str(g) for g in le.get("gpus") or ()) if le else None
         try:
             row, kind = _row(run, tid, rec, packing, cards, _epoch(le.get("t")) if le else None, ended_at.get(tid),
                              now)
         except Exception as e:  # one unreadable trial does not hide the others
-            row, kind = [tid, None, rec.get("seed"), _clip(f"读不了状态：{type(e).__name__}: {e}", CELL_CHARS),
-                         cards or None, None, None], "failed"
+            row, kind = [tid, None, rec.get("seed"),
+                         _clip(f"cannot read the state: {type(e).__name__}: {e}", CELL_CHARS), cards or None, None,
+                         None], "failed"
         rows.append(row)
         kinds.setdefault(kind, []).append(cards)
         err = (rec.get("result") or {}).get("pack_error")
         if err and rec.get("status") == "done" and not (rec.get("result") or {}).get("candidate_dir"):  # unpacked
-            notes.append(_clip(f"{tid}：{err}", NOTE_CHARS))
+            notes.append(_clip(f"{tid}: {err}", NOTE_CHARS))
     parts = []
     if kinds.get("training"):
         cs = [c for c in kinds["training"] if c]
-        parts.append(f"{len(kinds['training'])} 个训练在跑" + (f"（卡 {'、'.join(cs)}）" if cs else ""))
+        parts.append(f"training {_count(len(kinds['training']), 'trial')}" + (f" ({_gpus(cs)})" if cs else ""))
     if kinds.get("queued"):
-        parts.append(f"{len(kinds['queued'])} 个在排队（等待开始）")
+        parts.append(f"{_count(len(kinds['queued']), 'trial')} waiting to start")
     if packing:
-        parts.append(f"1 个在打包（卡 {packing[1]}）")
+        parts.append(f"packing 1 trial (GPU {packing[1]})")
     if not parts:
-        done = [f"{len(kinds[k])} 个{w}" for k, w in (("done", "完成"), ("ended", "完成未打包"), ("failed", "失败"))
-                if kinds.get(k)]
-        parts.append("没有在跑的训练" + ("：" + "，".join(done) if done else "，还没有试验"))
+        done = [f"{len(kinds[k])} {w}" for k, w in (("done", "done"), ("ended", "done but not packed"),
+                                                    ("failed", "failed")) if kinds.get(k)]
+        parts.append("nothing training" + (": " + ", ".join(done) if done else ", no trials yet"))
     proposed = {e["candidate"] for e in archive.events(run, "propose")}
     mc = run.rules.max_configs
     inc = archive.incumbent(run)
-    scheme = "未初始化" if inc is None else f"{inc[1]}（{changes(run, inc[0])}）"
+    scheme = "not initialized" if inc is None else f"{inc[1]} ({changes(run, inc[0])})"
     try:
         stop = stop_reason(run)
     except Exception as e:  # the notes are not worth losing the rest
         stop = f"STOP check failed: {type(e).__name__}: {e}"
     return {
-        "version": 1, "updated_at": _iso(now), "summary": "，".join(parts),
-        "facts": [{"label": "配置", "value": f"{len(proposed)}/{'无上限' if mc is None else mc}"},
-                  {"label": "GPU 小时", "value": f"{_hours(spent(run))}/{_hours(run.budget_gpu_h)}"},
-                  {"label": "当前方案", "value": _clip(scheme, VALUE_CHARS)}],
-        "table": {"title": f"trsi 运行 {run.run_name} 的试验",
-                  "columns": ["试验", "相对起点的改动", "seed", "状态", "卡", "用时", f"验证集 {m}"], "rows": rows},
+        "version": 1, "updated_at": _iso(now), "summary": "; ".join(parts),
+        "facts": [{"label": "configs", "value": f"{len(proposed)}/{'no limit' if mc is None else mc}"},
+                  {"label": "GPU hours", "value": f"{_hours(spent(run))}/{_hours(run.budget_gpu_h)}"},
+                  {"label": "incumbent", "value": _clip(scheme, VALUE_CHARS)}],
+        "table": {"title": f"Trials of trsi run {run.run_name}",
+                  "columns": ["trial", "changes from the start", "seed", "state", "GPU", "time", f"valset {m}"],
+                  "rows": rows},
         "notes": ([stop] if stop else []) + notes,
     }
 

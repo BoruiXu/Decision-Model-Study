@@ -4,21 +4,31 @@ open_dispatches(ws) lists the dispatches still open (OPEN_STATUSES: not launched
 hand-back not processed yet) with what the pages and the status line show of each: its stage, launch, check-ins, long
 job and the module's progress.json (rsi.progress). now_line(ws) says it in one line (spec §6):
 
-  20:23 第1轮 ② 训练调优 d-0001 · 第 3 批：3 个训练在跑（卡 0、4、6） · 配置 3/3 · GPU 小时 1.3/8 · 当前方案 c43 · 下次检查 20:46
+  20:23 round 1 ② Train & tune d-0001 · training 3 trials (GPUs 0, 4, 6) · configs 3/3 · GPU hours 1.3/8 · incumbent c4339e55d6 (lr 5e-6) · next check-in 20:46 | budget: GPU hours 1.3/8 · agent $ 4.20/–
 
-local HH:MM and the round, then for each open dispatch 「stage id · what it does · its first 3 facts · next check-in
-HH:MM」, joined by 「 ｜ 」; after a stop, the overview's stopped lead comes first (what the stop has yet to end).
-What it does: 「等你回答（q-NNNN）」 while STATE waits on a question tied to the dispatch
+local HH:MM and the round, then for each open dispatch "stage id · what it does · its first 3 facts · next check-in
+HH:MM", joined by " | ", and last " | budget: " with the short spend ledger (ledger_short) when it has anything; after a
+stop, the overview's stopped lead comes first (what the stop has yet to end).
+What it does: "waiting for the user (q-NNNN)" while STATE waits on a question tied to the dispatch
 (its ref or dispatch_id: a hand-back's question, an over_budget hold, the check-in cap; then no next check-in: ruling
 R5, the line must show that the run waits on the user), else the progress summary (marked when stale), else said from
-its status. With no open dispatch: 「等你回答（q-NNNN）」 while STATE waits on a question, the number of questions the
-pages list (notes.md's too) while there are some, else the overview's lead (rsi.dashboard.now_lead; its question form
-points at the page). now_key(ws) is what a status line changes with: the engine prints one after a step only when
-it differs from the last line's (a heartbeat brings the numbers of progress.json, which are no change).
+its status. With no open dispatch: "waiting for the user (q-NNNN)" while STATE waits on a question, the number of
+questions the pages list (notes.md's too) while there are some, else the overview's lead (rsi.dashboard.now_lead; its
+question form points at the page). After the head the line starts in lower case (a card's lead starts upper case).
+now_key(ws) is what a status line changes with: the engine prints one after a step only when it differs from the last
+line's (a heartbeat brings the numbers of progress.json, which are no change).
+
+ledger_text(ws) is the spend ledger in one line (spec §4.9), for `rsi status`, e.g.
+
+  GPU hours 1.3/8 · data LLM $ 4.20/20 · agent $ 31.50/– · annotation 0/–
+
+each resource used/budget (– without one), the two dollar accounts apart, then "spend-file problems <n>" when lines of
+the spend files had problems (Workspace.spend_problems). now_line ends with its short form (ledger_short: only the
+resources with a budget or a use, and the problems) after " | budget: ".
 
 For the overview's other live panels: handback_notes(ws) lists the latest hand-backs (each dispatch's handback.json and
-the copies handback-<n>.json the engine keeps, newest file first) with their notes and questions (「agent 的判断」);
-round_best_val(ws) is the current round's best registered candidate on the validation set (「当前最佳」). Reads only,
+the copies handback-<n>.json the engine keeps, newest file first) with their notes and questions ("Agent judgement");
+round_best_val(ws) is the current round's best registered candidate on the validation set ("Current best"). Reads only,
 never raises on a module's file.
 """
 import datetime
@@ -30,15 +40,16 @@ import stat
 from rsi import dashboard as D
 from rsi import flow as F
 from rsi import progress as P
-from rsi.rules import flow_settings, is_number
+from rsi.rules import amount_text, flow_settings, is_number, ledger
+from rsi.timing import plural
 from rsi.workspace import parse_utc
 
 OPEN_STATUSES = ("pending", "running", "long_job", "handed_back")
 # The launch modes (a dispatch record's launch_mode) in words.
-MODE_WORDS = {"first": "首次", "resume": "退回", "continue": "长任务收尾", "followup": "第二部分", "answer": "送回回答",
-              "checkin": "定时检查", "fresh": "新会话"}
+MODE_WORDS = {"first": "first", "resume": "return", "continue": "long-job wrap-up", "followup": "second part",
+              "answer": "answer sent back", "checkin": "check-in", "fresh": "fresh session"}
 FACTS_SHOWN = 3  # the facts of progress.json a status line shows (the module puts the important ones first)
-SEP = " ｜ "
+SEP = " | "
 # A dispatch's hand-backs in its output directory: handback.json (the current launch's) and the copies the engine
 # keeps when the next launch starts (handback-<n>.json, handback-<n>-<k>.json for a second copy of launch n).
 HANDBACK_FILE = re.compile(r"^handback(?:-(\d+)(?:-\d+)?)?\.json$")
@@ -108,20 +119,21 @@ def _doing(x):
     """What open dispatch `x` does, in words: the question it waits on, else its progress summary, else said from its
     status."""
     if x["question_id"]:
-        return "等你回答（%s）" % x["question_id"]
+        return "waiting for the user (%s)" % x["question_id"]
     p = x["progress"]
     if p and p.get("summary"):
-        return p["summary"] + ("（进度 %d 分钟没有更新）" % int(p["age_s"] // 60) if p.get("stale") else "")
+        return p["summary"] + (" (no progress update for %s)" % plural(int(p["age_s"] // 60), "minute")
+                               if p.get("stale") else "")
     if x["status"] == "pending":
-        return "待启动"
+        return "not launched yet"
     if x["status"] == "running":
         mode = "" if x["mode"] == "first" else " · %s" % MODE_WORDS.get(x["mode"], x["mode"])
-        return "%s 运行中（第 %d 次启动%s）" % (x["skill"], x["launches"], mode)
+        return "%s running (launch %d%s)" % (x["skill"], x["launches"], mode)
     if x["status"] == "long_job" and x["marker"]:
         if not x["marker_done"]:
-            return "长任务在跑，等完成标记 %s" % os.path.basename(x["marker"])
-        return "长任务已完成，等 rsi run 收尾"
-    return "已交回，等登记"
+            return "long job running, waiting for completion marker %s" % os.path.basename(x["marker"])
+        return "long job done, waiting for rsi run to wrap it up"
+    return "handed back, waiting to be registered"
 
 
 def _segment(x):
@@ -129,7 +141,7 @@ def _segment(x):
     p = x["progress"]
     parts += ["%s %s" % fact for fact in ((p or {}).get("facts") or [])[:FACTS_SHOWN]]
     if x["checkin_due"] is not None and not x["question_id"]:
-        parts.append("下次检查 %s" % x["checkin_due"].astimezone().strftime("%H:%M"))
+        parts.append("next check-in %s" % x["checkin_due"].astimezone().strftime("%H:%M"))
     return " · ".join(parts)
 
 
@@ -138,12 +150,13 @@ def _idle(ws):
     milestone before it is asked, notes.md's), else the overview's lead."""
     w = _waiting(ws)
     if w:
-        return "等你回答（%s）" % w["id"]
+        return "waiting for the user (%s)" % w["id"]
     progress = D.module_progress(ws)
     questions = D.pending_questions(ws, progress)
     view = D._view(ws, progress)
-    if questions and not ws.state["stopped"] and view[0] != "plan":  # the lead's 「上方的问题」 points at the page
-        return "等你在 Claude 里回答 %d 个问题（进度页面上列着）" % len(questions)
+    if questions and not ws.state["stopped"] and view[0] != "plan":  # the lead's "question above" points at the page
+        return "waiting for the user to answer %s in Claude (listed on the progress page)" % plural(len(questions),
+                                                                                                   "question")
     return D.now_lead(ws, progress, questions, view)
 
 
@@ -151,12 +164,38 @@ def now_line(ws, now=None):
     """The status line (spec §6; see the module docstring) at `now` (a datetime, local when naive; default now): one
     line, whatever the texts it quotes hold."""
     now = (now or datetime.datetime.now()).astimezone()
-    head = "%s 第%d轮 " % (now.strftime("%H:%M"), ws.state["round"])
+    head = "%s round %d " % (now.strftime("%H:%M"), ws.state["round"])
     ds = open_dispatches(ws, now)
     text = SEP.join(_segment(x) for x in ds) if ds else _idle(ws)
     if ds and ws.state["stopped"]:  # the open dispatches are what the stop has yet to end: say it has stopped
         text = D.stopped_texts(ws, F.next_action(ws))[0] + SEP + text
+    text = text[:1].lower() + text[1:]  # a lead from the pages ("Next: ...", "Stopped: ...") continues the line
+    spend = ledger_short(ws)
+    if spend:
+        text += SEP + "budget: " + spend
     return head + re.sub(r"\s*[\r\n]+\s*", " ", text)
+
+
+def _ledger_parts(ws, short):
+    """"<label> <used>/<budget>" for each resource of rsi.rules.RESOURCES (dollars with two decimals; – without a
+    budget; `short`: only those with a budget or a use), then "spend-file problems <n>" when there were any."""
+    parts = ["%s %s/%s" % (label, amount_text(key, used), amount_text(None, budget))
+             for key, label, used, budget in ledger(ws.task(), ws.state) if not short or budget is not None or used]
+    n = ws.spend_problems()
+    if n:
+        parts.append("spend-file problems %d" % n)
+    return parts
+
+
+def ledger_text(ws):
+    """The spend ledger in one line, every resource, joined by " · " (`rsi status`)."""
+    return " · ".join(_ledger_parts(ws, False))
+
+
+def ledger_short(ws):
+    """The spend ledger's part of the status line: the resources with a budget or a use and the spend-file problems,
+    joined by " · "; "" when there is none."""
+    return " · ".join(_ledger_parts(ws, True))
 
 
 def _handback(path):

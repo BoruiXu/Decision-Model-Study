@@ -17,9 +17,11 @@ import uuid
 from unittest import mock
 
 import fixtures
+from rsi import flow as F
 from rsi import gpus as G
 from rsi import rows
-from rsi.runners import ClaudeCodeRunner, ManualRunner, MockRunner, make_runner
+from rsi import schema
+from rsi.runners import ClaudeCodeRunner, CodeRunner, ManualRunner, MockRunner, attach_runner, make_runner
 from rsi.runners import base
 from rsi.runners.base import pid_alive
 from rsi.workspace import RsiError, now_iso
@@ -435,6 +437,114 @@ class TestMockRunner(RunnerCase):
         # A record without a pid: nothing running to attach to.
         res = MockRunner(self.scripts).poll(MockRunner(self.scripts).attach(self.ws, self.dispatch()))
         self.assertTrue(res["lost"])
+
+
+# A code module's command (rsi.runners.code): logs each launch's --mode, waits for the release file (at most 30
+# seconds), then hands back.
+CODE_COMMAND = r'''#!@PYTHON@
+import json, os, sys, time
+a = sys.argv[1:]
+out = a[a.index("--outdir") + 1]
+with open(os.path.join(out, "launches.log"), "a") as f:
+    f.write(a[a.index("--mode") + 1] + "\n")
+end = time.time() + 30
+while not os.path.exists(@RELEASE@) and time.time() < end:
+    time.sleep(0.02)
+with open(os.path.join(out, "handback.json"), "w") as f:
+    json.dump({"status": "ok", "artifacts": [], "marker": None, "notes": "", "questions": []}, f)
+'''
+
+
+def task_with_command(command):
+    task = fixtures.binary_task()
+    task["runner"] = {"code": {"commands": {"compare": command}, "timeout_s": 600}}
+    return task
+
+
+class TestCodeRunner(RunnerCase):
+    """CodeRunner: a code module's dispatch runs a fixed command (the task's runner.code.commands.<module>, else
+    modules/<module>/run) with the brief, the output directory and the launch mode."""
+
+    def setUp(self):
+        super(TestCodeRunner, self).setUp()
+        self.outdir = "work/round-1/compare"
+        os.makedirs(os.path.join(self.ws.root, self.outdir))
+        self.release = os.path.join(self.root, "release")
+        self.cmd = os.path.join(self.root, "compare-cmd")
+        with open(self.cmd, "w") as f:
+            f.write(CODE_COMMAND.replace("@PYTHON@", sys.executable).replace("@RELEASE@", repr(self.release)))
+        os.chmod(self.cmd, 0o755)
+
+    def launches(self):
+        with open(self.out("launches.log")) as f:
+            return f.read().split()
+
+    def test_code_runner_command_and_modes(self):
+        task = task_with_command([self.cmd, "a"])
+        self.assertEqual(rows.check_task(task), [])
+        r = CodeRunner.from_task(task)
+        self.assertEqual((r.name, r.enforces_deny, r.timeout_s), ("code", False, 600))
+        d, out = self.dispatch(module="compare"), self.out().rstrip("/")
+        self.assertRegex(r.new_session(d), r"^code-[0-9a-f]{12}$")
+        argv = r.argv(self.ws, dict(d, launch_mode="checkin", feedback="feedback-2.md"), out, "code-1")
+        self.assertEqual(argv[:2], [self.cmd, "a"])
+        self.assertEqual(argv[argv.index("--mode") + 1], "checkin")
+        self.assertTrue(argv[-1].endswith("feedback-2.md"))
+        self.assertEqual(r.argv(self.ws, d, out, "code-1")[2:], ["--brief", self.out("brief.json"), "--outdir", out,
+                                                                "--mode", "first"])
+        plain = CodeRunner.from_task(fixtures.binary_task())
+        self.assertEqual(plain.command_for("compare"), [os.path.join(REPO, "modules", "compare", "run")])
+        self.assertEqual(plain.timeout_s, 6 * 3600)
+        # A relative path is taken from the repository root (the command runs in the output directory); a bare name
+        # is left for PATH.
+        self.assertEqual(CodeRunner({"compare": ["modules/compare/run", "x"]}).command_for("compare"),
+                         [os.path.join(REPO, "modules", "compare", "run"), "x"])
+        self.assertEqual(CodeRunner({"compare": ["python3", "x"]}).command_for("compare"), ["python3", "x"])
+        # A launch runs the command in the output directory, its exit status kept; a missing one exits 127.
+        open(self.release, "w").close()
+        res = wait_result(r, r.launch(self.ws, d, "the prompt, ignored"))
+        self.assertEqual((res["exit_code"], self.launches()), (0, ["first"]))
+        missing = CodeRunner.from_task(task_with_command([os.path.join(self.root, "nope")]))
+        self.assertIsNone(missing.argv(self.ws, d, out, "code-1"))
+        res = wait_result(missing, missing.launch(self.ws, dict(d, launches=2), "P"))
+        self.assertEqual(res["exit_code"], 127)
+        with open(res["log"]) as f:
+            self.assertIn(os.path.join(self.root, "nope"), f.read())
+        for bad in ({"commands": {"compare": []}}, {"commands": {"train": [self.cmd]}}, {"timeout_s": 0},
+                    {"command": [self.cmd]}):
+            task["runner"] = {"code": bad}
+            self.assertTrue(rows.check_task(task), bad)
+        code = schema.load_schema("task")["properties"]["runner"]["properties"]["code"]
+        self.assertEqual(sorted(code["properties"]["commands"]["properties"]), sorted(F.CODE_MODULES))
+
+    def test_code_runner_attaches_after_a_restart(self):
+        # Review focus 2: `rsi run` killed while the command works inline, then run again: the next run finds the
+        # command and waits for it (its exit status from the file the launch keeps); it never launches a second one.
+        # Killed even before it recorded the pid (the record has none): the pid the launch's shell wrote first.
+        task = task_with_command([self.cmd])
+        ws = types.SimpleNamespace(root=self.ws.root, task=lambda: task)
+        record = self.dispatch(module="compare", runner="code")
+        code = ("import json, sys, types; sys.path.insert(0, %r); from rsi.runners import CodeRunner; "
+                "d, task = json.loads(sys.argv[1]), json.loads(sys.argv[2]); "
+                "ws = types.SimpleNamespace(root=sys.argv[3], task=lambda: task); "
+                "print(CodeRunner.from_task(task).launch(ws, d, 'P')['pid'])" % REPO)
+        out = subprocess.run([sys.executable, "-c", code, json.dumps(record), json.dumps(task), self.ws.root],
+                             capture_output=True, text=True)
+        pid = int(out.stdout)
+        self.addCleanup(lambda: pid_alive(pid) and os.killpg(pid, signal.SIGKILL))
+        end = time.time() + 10
+        while not (os.path.exists(self.out("agent-1.pid")) and os.path.getsize(self.out("agent-1.pid"))) \
+                and time.time() < end:
+            time.sleep(0.02)
+        self.assertNotIn("pid", record)
+        h = attach_runner("code", ws).attach(ws, record)
+        self.assertNotIn("result", h)  # found by its pid file: still running, waits
+        self.assertEqual(h["pid"], pid)
+        self.assertIsNone(h["runner"].poll(h))
+        self.assertNotIn("result", attach_runner("code", ws).attach(ws, dict(record, pid=pid)))  # by the record's
+        open(self.release, "w").close()
+        self.assertEqual(wait_result(h["runner"], h)["exit_code"], 0)  # then its result, no second launch
+        self.assertEqual(self.launches(), ["first"])
 
 
 class TestPidAlive(unittest.TestCase):

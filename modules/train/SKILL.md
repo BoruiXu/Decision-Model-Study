@@ -1,269 +1,269 @@
 ---
 name: rsi-train
-description: 由 rsi-orchestrator 派发训练调优模块时使用：在任务的配置空间里搜训练方案（底座、配方、超参、种子），训练经 onejev-harness（ojh），每个跑完的试验打包成候选；先跑种子 0 当探针，过了门槛才补种子，按规则判接不接受，最后复盘。Use when the orchestrator dispatches the RSI train (training-tuning) module; not for general model-training requests.
+description: Use when the orchestrator dispatches the RSI train module: search the task's search space for how to train (base, recipe, hyperparameters, seed), train through onejev-harness (ojh) and pack every finished trial as a candidate; run seed 0 first as the probe, add seeds only past the margin, accept or reject by rule, and review at the end; not for general model-training requests.
 ---
 
-# rsi-train：训练调优模块（Skill 2.0，`trsi` 1.4.3）
+# rsi-train: train module (Skill 2.0, `trsi` 1.5.0)
 
-训练由 onejev-harness 完成（`ojh run`）。本模块决定**怎么训练**：在任务定义的配置空间（`search_space`）里选底座、配方（全参或 LoRA）、带原因的超参改动和种子，在简报给的算力预算内比较新旧方案。一次派出是一次搜索。只做本模块的事，不派别的 subagent。
+Training is done by onejev-harness (`ojh run`). This module decides **how to train**: within the task definition's search space (`search_space`) it chooses the base, the recipe (full or LoRA), hyperparameter changes with reasons, and seeds, and compares new configs with the old within the compute budget the brief gives. One dispatch is one search. Do only this module's work and dispatch no other subagent.
 
-`trsi`（本目录的 `trsi/`）做机械的事：按简报生成 ojh 工作区，检查范围和预算，启动，等待，把每个跑完的试验打包成框架的候选，按规则判，记账，写报告和 `search`。你做判断：检查环境、选卡、读数据和训练曲线、诊断、提候选、写预测、训练期间的定时检查、复盘。
+`trsi` (this directory's `trsi/`) does the mechanical work: it builds the ojh workspace from the brief, checks the space and the budget, launches, waits, packs every finished trial as a framework candidate, judges by rule, keeps the books, and writes the report and the `search`. You do the judging: check the environment, choose GPUs, read the data and the training curves, diagnose, propose candidates, write predictions, do the check-ins during training, review.
 
-流程一览（细节见「步骤和策略子 skill」）：
+Flow at a glance (details in "Steps and strategy sub-skills"):
 
-1. 读简报；检查卡、磁盘和 ojh，从 `resources.gpu_ids` 里选空闲的卡。
-2. `trsi init` 写 run.yaml，起点成为当前方案；起点接过当前最佳版本的候选（`trsi adopt`），或训练起点的种子。
-3. 诊断，写候选（带 `note`、`prediction`），先跑种子 0（探针）。
-4. `trsi watch` 在后台等这一批试验结束，你以 `long_job` 交回；训练期间收到「# 定时检查」就检查环境。
-5. 收到「# 长任务已结束」：`trsi collect` 打包，`trsi next` 判，照它补种子、提新候选或停。
-6. 第一段交回所有候选和一份复盘 `record`；收到「# 继续：交回的第二部分」后写 `search` 交回。
+1. Read the brief; check the GPUs, the disk and ojh, and choose free GPUs from `resources.gpu_ids`.
+2. `trsi init` writes run.yaml and the start becomes the incumbent; the start takes over the current best version's candidate (`trsi adopt`), or the start's seeds are trained.
+3. Diagnose, write candidates (with `note` and `prediction`), and run seed 0 first (the probe).
+4. `trsi watch` waits in the background for this batch of trials to end, and you hand back `long_job`; during training, on `# Check-in`, check the environment.
+5. On `# Long job finished`: `trsi collect` packs, `trsi next` judges, and you add seeds, propose new candidates or stop as it says.
+6. The first part hands back all candidates and a review `record`; on `# Continue: the second part of the hand-back`, write the `search` and hand it back.
 
-不做：不改 onejev-harness、OneJev 和本模块的代码；不做评测这一层（阈值、决策策略、评测集和 test 上的评测是交付、评测模块的事）。
+Do not change onejev-harness, OneJev or this module's code; do not do the evaluation layer (evaluation on the evalset and the testset is the deliver and judge modules' work). When the task has a `policy` section, packing fits each candidate's decision policy itself (calibration and threshold on the valset, see `policy` in task.md): never fit, change or pick one yourself.
 
-## 输入
+## Inputs
 
-简报由代码生成，放在输出目录里：`brief.md`（人读）和 `brief.json`（同样的内容，结构化：`module`、`purpose`、`round`、`task_json`、`ids`、`inputs`、`outdir`、`budget_left`、`goal` 等；字段说明见框架仓库根目录下的 `skills/rsi-orchestrator/templates/brief.md`）。输入以简报的 `inputs` 为准，只读那里列出的路径。被退回时，同一个会话会收到 `feedback-<k>.md`（`<k>` 是第几次启动），写明为什么退回和要改什么：按它改好，再重新写 `handback.json`。同一个会话还会收到两种不算退回的 `feedback-<k>.md`：开头是「# 继续：交回的第二部分」的（两段式交回的后半段，例如 train 先交回试验候选、judge 先交回评测，登记后在这里拿到登记 id，再写 search 或计划），和开头是「# 用户回答了你的问题」的（见「输出」）；训练期间还有开头是「# 定时检查」的（见「长任务」）。
+The brief is built by code and placed in the output directory: `brief.md` (for people) and `brief.json` (the same content, structured: `module`, `purpose`, `round`, `task_json`, `ids`, `inputs`, `outdir`, `budget_left`, `goal` and more; the fields are described in `skills/rsi-orchestrator/templates/brief.md` under the framework repository root). The brief's `inputs` are authoritative: read only the paths listed there. When sent back, the same session gets `feedback-<k>.md` (`<k>` is the launch number), which says why it was sent back and what to change: fix that, then write `handback.json` again. The same session also gets two kinds of `feedback-<k>.md` that are not a return: one starting with `# Continue: the second part of the hand-back` (the second half of a two-part hand-back, e.g. train first hands back the trial candidates and judge the evaluation; once they are registered, it gets their registered ids here and then writes the search or the plan), and one starting with `# The user answered your questions` (see "Outputs"); during training there is also one starting with `# Check-in` (see "Long jobs").
 
-只读下面列出的产物，没列出的产物和目录不要找、不要读；不读工作区，不读登记表。
+Read only the artifacts listed below; do not look for or read any artifact or directory not listed; do not read the workspace or the registry.
 
-- `task`（任务定义 task.json）、`trainset`、`valset`：都含标签，trsi 用它们训练和打分。
-- `best_candidate`：当前最佳版本的候选（有最佳版本时才有），本次搜索的起点。
-- 已登记的 `candidate` 和 `search`（按 id 列出）：以前各次试验的配置、结果和比较。
-- `plan`：开启本轮的计划（有的话），看它分给本模块的问题。
-- 本模块以前各轮的 `record`（只给自己的）：以前试过什么、结果如何。
-- 简报的其他字段：`search_space`（配置空间，只在这里面搜）；`search`（任务的搜索设置：`search.max_configs`、`search.seeds`、`search.probe_margin`、`search.accept_margin`、`search.guards`）；`resources.onejev`（`resources.onejev.python` 是 ojh 的 `.venv` 里的 python；`resources.onejev.ojh_bin`、`resources.onejev.env_file`、`resources.onejev.machine` 是 ojh 的命令、环境变量文件和机器配置；`resources.onejev.default_config` 是没有最佳版本时的起点；`resources.onejev.estimate` 是一个种子预计的算力小时）；`resources.gpu_ids`（能用的卡，没写就是全部卡）；`checkin_minutes`（定时检查的间隔，null 是不检查）；`budget_left`（剩余预算，`budget_left.compute_hours` 是算力小时）；`dispatch_id`（这次派出，也是 trsi 的 run 名）；`train_command`（训练命令的位置，候选的 `code_version.entry` 必须是它）。
-- 本模块目录（本 skill 所在的目录）里的 `reference/`、`recipes/`，以及 trsi 和 ojh 为本次搜索写的文件（输出目录下的 `trsi/`、ojh 的运行目录和日志）也可以读。
-- 不拿评测集和封存 test：它们的文件，以及任务定义 `data.sources` 写的原始数据，一律不找、不读。
+- `task` (the task definition, task.json), `trainset`, `valset`: all with labels; trsi trains and scores with them.
+- `best_candidate`: the current best version's candidate (only when there is a best version), the start of this search.
+- The registered `candidate`s and `search`es (listed by id): the configs, results and comparisons of earlier trials.
+- `plan`: the plan that opens this round (when there is one); look at the issues it assigns to this module.
+- This module's `record`s of earlier rounds (only its own): what was tried before and how it went.
+- The brief's other fields: `search_space` (the search space; search only inside it); `search` (the task's search settings: `search.max_configs`, `search.seeds`, `search.probe_margin`, `search.accept_margin`, `search.guards`); `resources.onejev` (`resources.onejev.python` is the python in ojh's `.venv`; `resources.onejev.ojh_bin`, `resources.onejev.env_file` and `resources.onejev.machine` are ojh's command, environment file and machine config; `resources.onejev.default_config` is the start when there is no best version; `resources.onejev.estimate` is the expected compute hours of one seed); `resources.gpu_ids` (the GPUs allowed; all GPUs when not set); `checkin_minutes` (the check-in interval; null: no check-ins); `budget_left` (the budget left; `budget_left.compute_hours` is compute hours); `dispatch_id` (this dispatch, also trsi's run name); `train_command` (where the train command is; candidates' `code_version.entry` must be it).
+- The `reference/` and `recipes/` of this module's directory (the directory of this skill) may be read too, and so may the files trsi and ojh write for this search (`trsi/` in the output directory, ojh's run directories and logs).
+- No evalset and no sealed testset: never look for or read their files, nor the raw data the task definition's `data.sources` names.
 
-## 输出
+## Outputs
 
-- 若干 `candidate`：本次搜索每个打包好的试验一个，`trsi collect` 写在 `<outdir>/cand-<试验>/`：模型（选中的 checkpoint）、可直接运行的预测入口（model.predict）、完整解析后的训练配置和所要求的配置（`config_request`）、训练代码的版本（`code_version`）、所用训练集和验证集的 id、验证集预测和指标、对照组、训练门结果、成本。起点的种子也是候选；从已登记候选接过来的不再交回。
-- `record`：本次搜索的复盘，一份，写法见「实验记录」。
-- `search`：第二段交回。本次搜索的所有试验（配置、种子、验证集主指标、花费、状态）、默认候选（起点）、最佳候选、相对起点的增益，由 `trsi report` 写。
+- Several `candidate`s: one per packed trial of this search, written by `trsi collect` to `<outdir>/cand-<trial>/`: the model (the chosen checkpoint), a prediction entry that runs as it is (model.predict), the fully resolved training config and the requested config (`config_request`), the version of the training code (`code_version`), the ids of the trainset and valset used, the valset predictions and metrics, the baselines, the train gate result, the cost. The start's seeds are candidates too; one taken over from a registered candidate is not handed back again.
+- `record`: the review of this search, one; how to write it is in "Experiment records".
+- `search`: the second part of the hand-back. All trials of this search (config, seed, primary metric on the valset, cost, status), the default candidate (the start), the best candidate and the gain over the start, written by `trsi report`.
 
-每个产物写成输出目录下的一个子目录，manifest 的 id 写 null，round、task_id、task_version 按简报写，字段见 [models.md](../../docs/interfaces/models.md)。 `record` 见 [record.md](../../docs/interfaces/record.md)。
+Write each artifact as a subdirectory of the output directory, with null as the manifest's id and round, task_id and task_version as the brief says; fields in [models.md](../../docs/interfaces/models.md). `record` in [record.md](../../docs/interfaces/record.md).
 
-两段式交回：第一段以 `ok` 交回本次打包的所有 `cand-*` 子目录（已经登记过的不再列）和 `record`；引擎登记后让同一个会话接着做（`feedback-<k>.md` 开头是「# 继续：交回的第二部分」，不算退回），里面列出每个子目录的登记 id，同样的对应关系也在输出目录的 `registered-<n>.json`（每次续接一个文件，文件名在反馈里）；再写好 `search` 交回。一个候选都打包不出来时（试验都失败了），以 `failed` 交回，`notes` 写原因。
+Two-part hand-back: the first part hands back with `ok` every `cand-*` subdirectory packed this time (not those already registered) and the `record`; once the engine has registered them, it has the same session go on (`feedback-<k>.md` starts with `# Continue: the second part of the hand-back`, not a return), listing the registered id of each subdirectory; the same mapping is also in `registered-<n>.json` in the output directory (one file per continuation, its name in the feedback); then write the `search` and hand it back. When not a single candidate could be packed (all trials failed), hand back with `failed`, with the reason in `notes`.
 
-进度文件：输出目录里的 `progress.json`（简报的 `progress_file`，格式见 [progress.md](../../docs/interfaces/progress.md)）由 trsi 写（launch 之后、watch 每次轮询、collect 打包每个试验前后），进度页面和 `rsi run` 的状态行显示它；不用手写，也不要改。
+Progress file: `progress.json` in the output directory (the brief's `progress_file`, format in [progress.md](../../docs/interfaces/progress.md)) is written by trsi (after launch, at every poll of watch, before and after collect packs each trial), and the progress page and the status line of `rsi run` show it; do not write it by hand and do not change it.
 
-交回：全部产物写好、校验通过后，在输出目录写 `handback.json`：`status`（`ok`、`failed` 或 `long_job`）、`artifacts`（输出目录下的子目录名，每个产物一个）、`marker`（长任务完成标记的绝对路径，`long_job` 时必填，其他写 null）、`notes`（门数字、花费、遇到的问题；`failed` 时写原因）、`questions`（需要用户决定的事，没有写 `[]`）。引擎读到它才算交回，缺了或格式不对按交回失败处理，重新写好即可。读取很严格：不能有上面没列出的字段，`artifacts` 只能是子目录的名字（不含路径分隔符，不重复），`questions` 的每一项必须是非空字符串，`marker` 必须是绝对路径或 null，`failed` 时 `notes` 不能为空。
+Hand-back: once every artifact is written and validated, write `handback.json` in the output directory: `status` (`ok`, `failed` or `long_job`), `artifacts` (subdirectory names in the output directory, one per artifact), `marker` (the absolute path of the long job's completion marker; required with `long_job`, else null), `notes` (gate numbers, cost, problems met; with `failed`, the reason) and `questions` (what the user must decide; `[]` when nothing). The hand-back counts only once the engine reads this file; a missing or malformed file counts as a failed hand-back, and writing it again correctly is enough. Reading is strict: no field other than those above, `artifacts` holds only subdirectory names (no path separator, no repeats), every item of `questions` is a non-empty string, `marker` is an absolute path or null, and with `failed` `notes` is not empty.
 
-交回带 `questions` 时，这次交回的产物一个都不登记，引擎先问用户；用户回答后，回答送回同一个会话（`feedback-<k>.md` 开头是「# 用户回答了你的问题」，不算退回）。按回答修改或确认产物，再重新写 `handback.json`，列出要登记的全部子目录（上次列过的也要再列）。长任务（`long_job`）交回里的 `questions` 等完成标记出现后才问；它没列产物时，回答写在开头是「# 长任务已结束」的反馈里，和长任务的结果一起送回。会话是无界面的，没有人在看：要问用户的事只能写进 `questions`。
+When the hand-back has `questions`, none of the artifacts of this hand-back is registered: the engine asks the user first; once the user answers, the answer goes back to the same session (`feedback-<k>.md` starts with `# The user answered your questions`, not a return). Change or confirm the artifacts by the answer, then write `handback.json` again, listing every subdirectory to register (those listed last time too). The `questions` of a long job (`long_job`) hand-back are asked only once the completion marker is there; when it lists no artifact, the answer comes in the feedback starting with `# Long job finished`, sent back together with the long job's results. The session is headless and nobody watches it: anything to ask the user can only go into `questions`.
 
-### 训练命令（接口契约）
+### Train command (interface contract)
 
-训练命令的位置：任务定义的 `resources.train_command`（可选，绝对路径）给了就用它，没给就是 `<repo root>/modules/train/train`（`<repo root>` 是简报给的框架仓库根目录）；简报的「训练命令」一行写明实际路径。它用 trsi 的同一套代码训练一个配置、阻塞到结束、打包成候选。调用方运行它时环境里带 `PYTHONPATH=<repo root>`；它会换到任务的 `resources.onejev.python` 里运行，打包时运行 `python3 -m rsi score` 算指标，不依赖自己所在的路径。负责人的手动单次训练调用它，候选的 `code_version.entry` 都写它，所以它是本模块接口的一部分；本模块的搜索不调用它，试验一律经 `trsi launch`。数据模块不训练、不调用它：新训练集好不好，由本模块在它上面训练出候选、再由评测和当前最佳版本比较来判断。
+Where the train command is: the task definition's `resources.train_command` (optional, an absolute path) when given, else `<repo root>/modules/train/train` (`<repo root>` is the framework repository root the brief gives); the brief's "Train command" line gives the actual path. It trains one config with the same code as trsi, blocks until the end and packs a candidate. Callers run it with `PYTHONPATH=<repo root>` in the environment; it switches to the task's `resources.onejev.python` to run, runs `python3 -m rsi score` to compute the metrics when packing, and does not depend on where it is itself. The owner's manual single runs call it, and every candidate's `code_version.entry` is it, so it is part of this module's interface; this module's search does not call it, and every trial goes through `trsi launch`. The data module does not train and does not call it: whether a new trainset is better is judged by this module training candidates on it and the judge comparing them with the current best version.
 
 ```
-<训练命令> --task <task.json> --trainset <trainset 目录> --trainset-id <id> --valset <valset 目录> --valset-id <id> --config <配置文件> --config-source <default 或已登记 candidate、search 的 id> --round <n> --producer train --out <候选目录> --marker <完成标记路径>
+<train_command> --task <task.json> --trainset <trainset_dir> --trainset-id <id> --valset <valset_dir> --valset-id <id> --config <config_file> --config-source <default, or the id of a registered candidate or search> --round <n> --producer train --out <candidate_dir> --marker <marker_path>
 ```
 
-- 输入：任务定义、训练集目录、验证集目录、配置文件；其余参数写进 manifest。配置文件是 JSON：`{"base", "recipe", "overrides", "seed", "max_steps"}`，都可省，默认 joey-1、底座的单卡默认配方（recipe 写 null）、不改、种子 0；overrides 的键是 `onejev.<flag>`、`lora.<field>`。卡用 `RSI_TRAIN_GPUS` 指定，不设时取 `resources.gpu_ids` 里 nvidia-smi 显示空闲的卡。
-- 输出：候选目录本身就是一个 `candidate` 产物目录，id 为 null，用 `PYTHONPATH=<repo root> python3 -m rsi validate candidate <候选目录> --task <task.json>` 能通过。其中：
-  - 预测入口：候选目录里的一个可执行文件，相对路径写在 `model.predict`，调用方式固定为 `<候选目录>/<model.predict> --inputs <inputs.jsonl> --out <predictions.jsonl>`（读输入行，写预测行，成功退出码 0，见 [models.md](../../docs/interfaces/models.md)）。模型文件放在候选目录里。predictions_val 就用这个入口在验证集的 inputs.jsonl 上跑出来，这样交付才能复现它。
-  - 训练代码版本：`code_version.entry` 写训练命令的路径，`code_version.sha256` 写训练命令文件的 sha256。只有这一个文件被算 sha256，所以训练代码一改，这个文件必须跟着变：改了 `trsi/` 就一起改训练命令里的 `TRSI_VERSION` 和 `trsi/__init__.py` 的版本号（不一致时训练命令拒绝运行），ojh 或 OneJev 换版本时改训练命令里的 `OJH_COMMIT`、`ONEJEV_COMMIT`。
-  - 配置：manifest 的 config 写完整解析后的配置（ojh 的 `run.lock.yaml`），`config_request` 写所要求的配置，五个键都写。
-- 完成标记：`--marker` 给的文件，必须在候选目录之外（不进产物目录，也不出现在 manifest 的 files 里），最后写，第一行 ok 或 failed，failed 时第二行写原因。退出码 0 当且仅当写了 ok。收到 SIGTERM 或 SIGINT 时结束自己的 ojh 训练，写 failed。
-- `--producer` 只接受 train，别的值（包括以前数据模块用的 data）报错、退出码 2、不写标记。旧工作区里 producer 是 data 的候选照常能读，登记会拒绝新的。`--trainset-id` 写训练集的登记 id；手动单次训练用还没登记的训练集时写 unregistered，这样的候选登记会拒绝。
-- 进度：它把进度写进 `--out` 所在目录的 `progress.json`（`<dirname(--out)>/progress.json`，格式见 [progress.md](../../docs/interfaces/progress.md)），开始时、训练中每次检查、结束和失败时都重写。调用方想让进度页面显示它，就把候选目录直接放在自己的输出目录下（例如 `<outdir>/cand-1`）。
-- 不需要 agent 参与，可在后台无人值守运行；只读两个数据集目录和配置，不读评测集和封存 test。
+- Inputs: the task definition, the trainset directory, the valset directory, the config file; the other arguments go into the manifest. The config file is JSON: `{"base", "recipe", "overrides", "seed", "max_steps"}`, all optional, defaulting to joey-1, the base's single-GPU default recipe (recipe null), no changes and seed 0; the keys of overrides are `onejev.<flag>` and `lora.<field>`. GPUs are given with `RSI_TRAIN_GPUS`; when it is not set, the GPUs in `resources.gpu_ids` that nvidia-smi shows as free are taken.
+- Output: the candidate directory is itself a `candidate` artifact directory with null as its id, and passes `PYTHONPATH=<repo root> python3 -m rsi validate candidate <candidate_dir> --task <task.json>`. In it:
+  - Prediction entry: an executable file in the candidate directory, whose relative path is in `model.predict`; it is always called as `<candidate_dir>/<model.predict> --inputs <inputs.jsonl> --out <predictions.jsonl>` (reads input rows, writes prediction rows, exit code 0 on success, see [models.md](../../docs/interfaces/models.md)). The model files are in the candidate directory. predictions_val is produced with this entry on the valset's inputs.jsonl, so that delivery can reproduce it.
+  - Training code version: `code_version.entry` is the path of the train command, and `code_version.sha256` the sha256 of the train command file. Only this one file has its sha256 taken, so whenever the training code changes, this file must change with it: when `trsi/` changes, change `TRSI_VERSION` in the train command and the version in `trsi/__init__.py` together (the train command refuses to run when they differ); when ojh or OneJev changes version, change `OJH_COMMIT` and `ONEJEV_COMMIT` in the train command.
+  - Config: the manifest's config is the fully resolved config (ojh's `run.lock.yaml`), and `config_request` the requested config, with all five keys.
+- Completion marker: the file `--marker` gives. It must be outside the candidate directory (not in the artifact directory, not among the manifest's files), written last, with ok or failed on the first line and, when failed, the reason on the second. The exit code is 0 if and only if ok was written. On SIGTERM or SIGINT it ends its own ojh training and writes failed.
+- `--producer` accepts only train; any other value (data, which the data module used before, included) is an error with exit code 2 and no marker. Candidates in old workspaces whose producer is data still read as before, and registration refuses new ones. `--trainset-id` is the trainset's registered id; a manual single run on a trainset not registered yet writes unregistered, and registration refuses such a candidate.
+- Progress: it writes its progress into `progress.json` in the directory of `--out` (`<dirname(--out)>/progress.json`, format in [progress.md](../../docs/interfaces/progress.md)), rewritten at the start, at every check during training, at the end and on failure. A caller that wants the progress page to show it puts the candidate directory right under its own output directory (e.g. `<outdir>/cand-1`).
+- It needs no agent and can run unattended in the background; it reads only the two dataset directories and the config, never the evalset or the sealed testset.
 
-## 门
+## Gates
 
-- 训练门（每个候选）：验证集上主指标严格优于任务定义列出的每个对照组（方向按任务定义，相等不算），结果写进 `train_gate`（`passed`、`detail`）。`trsi collect` 打包时已经算好。
-- 指标和对照组一律用 `rsi score` 算，不自己实现（定义见 [task.md](../../docs/interfaces/task.md) 的「指标的定义」）：`PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <valset>/rows.jsonl --predictions <candidate>/predictions_val.jsonl --train <trainset>/rows.jsonl`，输出的 `metrics` 写进 `metrics_val`，`baselines` 写进 `baselines_val`，`passed` 按这些数判断。`trsi collect` 和训练命令都调用它。登记时代码按同样的定义重算，对不上就被拒。
-- 候选完整：预测覆盖整个验证集，`metrics_val` 含主指标；`model.predict` 是候选目录内的可执行文件；`code_version` 的 entry 是简报的训练命令、sha256 对得上；`config_request` 落在 `search_space` 里。`trsi collect` 打包后已经用 `rsi validate` 检查过；要再查一个就运行 `PYTHONPATH=<repo root> python3 -m rsi validate candidate <outdir>/cand-<试验> --task <task.json>`。
-- `search` 的门（第二段）：`best_candidate` 的验证集主指标（`metric_val`）不差于 `default_candidate`（起点）的；做不到就把起点的候选作为最佳交回，`gain_vs_default` 如实记录，不包装成提升。每个试验的 `metric_val` 是它的候选 `metrics_val` 里的主指标，原样抄过来（登记时核对，容差 1e-9），比较候选也只用这些数。一次搜索只用一版训练代码：所有 ok 试验的候选（起点的也在内）的 `code_version.sha256` 必须相同。试验花费之和不超过 `budget.compute_hours`。`trsi report` 按这些规则写，写完用 `PYTHONPATH=<repo root> python3 -m rsi validate search <outdir>/search --task <task.json>` 检查。
-- 门没过：能在本次搜索里修就修（换候选、补种子）；否则如实交回（`passed: false`），由引擎按决策点处理（默认回到本会话再搜一次，或派数据模块）。没过训练门的候选不会被送评。
+- Train gate (each candidate): the primary metric on the valset is strictly better than every baseline the task definition lists (direction as the task definition says; equal does not count), with the result in `train_gate` (`passed`, `detail`). `trsi collect` has computed it when packing.
+- Metrics and baselines are always computed with `rsi score`, never by your own implementation (definitions in "Metric definitions" of [task.md](../../docs/interfaces/task.md)): `PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <valset>/rows.jsonl --predictions <candidate>/predictions_val.jsonl --train <trainset>/rows.jsonl`; the `metrics` it prints go into `metrics_val`, the `baselines` into `baselines_val`, and `passed` is judged from these numbers. `trsi collect` and the train command both call it. At registration the code recomputes them by the same definitions and refuses a mismatch.
+- A complete candidate: the predictions cover the whole valset and `metrics_val` has the primary metric; `model.predict` is an executable file inside the candidate directory; `code_version`'s entry is the brief's train command and its sha256 matches; `config_request` lies in `search_space`. `trsi collect` has checked this with `rsi validate` after packing; to check one again, run `PYTHONPATH=<repo root> python3 -m rsi validate candidate <outdir>/cand-<trial> --task <task.json>`.
+- Gates of the `search` (second part): the valset primary metric (`metric_val`) of `best_candidate` is no worse than that of `default_candidate` (the start); when that cannot be met, hand back the start's candidate as the best and record `gain_vs_default` as it is, never dressed up as a gain. Each trial's `metric_val` is the primary metric in its candidate's `metrics_val`, copied as it is (checked at registration, tolerance 1e-9), and candidates are compared only by these numbers. One search uses one version of the training code: the `code_version.sha256` of every ok trial's candidate (the start's included) must be the same. The trials' costs sum to no more than `budget.compute_hours`. `trsi report` writes it by these rules; after writing, check it with `PYTHONPATH=<repo root> python3 -m rsi validate search <outdir>/search --task <task.json>`.
+- A gate not passed: fix it within this search when you can (other candidates, more seeds); otherwise hand back as it is (`passed: false`), and the engine handles it by decision point (by default back to this session to search once more, or a dispatch of the data module). A candidate that did not pass the train gate is never sent for evaluation.
 
-## 步骤和策略子 skill
+## Steps and strategy sub-skills
 
-### 命令和路径
+### Commands and paths
 
-- `<py>`：简报的 `resources.onejev.python`（ojh 的 `.venv/bin/python`，带 pyyaml）。`<模块目录>`：本 skill 所在的目录（`<repo root>/modules/train`）。`<outdir>`：简报的输出目录。
-- 下文的 `trsi <命令> ...` 都指 `PYTHONPATH=<模块目录> <py> -m trsi <命令> ...`，在哪个目录下运行都可以。`trsi --help` 列出全部命令，每个命令加 `--help` 看参数。`trsi` 自己找到框架的 `rsi`（打包时运行 `rsi score`、`rsi validate`）。
-- `<run.yaml>`：`trsi init --brief <outdir>/brief.json` 写的 `<outdir>/trsi/run.yaml`。`<记录目录>`：`<outdir>/trsi/<dispatch_id>`（`trsi init` 打印出来），trsi 的记录（`archive.jsonl`、`incumbent.yaml`）在这里，候选 YAML 写在它下面的 `proposals/`，`trsi report <run.yaml>` 写它下面的 `report.md`。每个试验的记录在 `<outdir>/trsi/trials/<试验>.json`：ojh 的运行目录（`run_dir`）、tmux 会话（`session`）和日志。
-- ojh：简报的 `resources.onejev.ojh_bin`；给了 `env_file` 时先在同一个 shell 里 `source` 它，机器配置用 `OJH_MACHINE=<machine>` 传，例如 `bash -c 'source <env_file> && OJH_MACHINE=<machine> <ojh_bin> doctor --no-network'`。`ojh status <run_dir>` 打印一个训练的简短进度。
+- `<py>`: the brief's `resources.onejev.python` (ojh's `.venv/bin/python`, with pyyaml). `<module_dir>`: the directory of this skill (`<repo root>/modules/train`). `<outdir>`: the brief's output directory.
+- Below, `trsi <command> ...` always means `PYTHONPATH=<module_dir> <py> -m trsi <command> ...`, run from any directory. `trsi --help` lists all commands; add `--help` to a command for its arguments. `trsi` finds the framework's `rsi` itself (packing runs `rsi score` and `rsi validate`).
+- `<run.yaml>`: `<outdir>/trsi/run.yaml`, written by `trsi init --brief <outdir>/brief.json`. `<trsi_dir>`: `<outdir>/trsi/<dispatch_id>` (`trsi init` prints it); trsi's records (`archive.jsonl`, `incumbent.yaml`) are here, candidate YAMLs go into its `proposals/`, and `trsi report <run.yaml>` writes its `report.md`. Each trial's record is `<outdir>/trsi/trials/<trial>.json`: ojh's run directory (`run_dir`), tmux session (`session`) and logs.
+- ojh: the brief's `resources.onejev.ojh_bin`; when `env_file` is given, `source` it first in the same shell, and pass the machine config as `OJH_MACHINE=<machine>`, e.g. `bash -c 'source <env_file> && OJH_MACHINE=<machine> <ojh_bin> doctor --no-network'`. `ojh status <run_dir>` prints a short progress report of one training.
 
-### 流程
+### Flow
 
-1. **读简报**：`brief.json` 的 `task_json`、`search_space`、`search`、`resources`、`checkin_minutes`、`inputs`、`budget_left`、`dispatch_id`、`outdir`。读计划里分给本模块的问题、本模块以前的 `record` 和已登记的 `search`（以前哪些配置试过、结论是什么），看训练集的数据事实（正例比例、输入长度和标签的关系、重复行）。只读 `inputs` 列出的路径；评测集、测试集的文件和任务 `data.sources` 写的原始数据一律不读。
-2. **检查环境**，选卡由你负责：
-   - `nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv`：只从 `resources.gpu_ids`（没写就是全部卡）里挑空闲的卡（占用不到 1 GiB）。一个试验占配方要求的卡数（单卡配方一张），不和别的试验或别人的进程共用一张卡。
-   - `df -h <outdir>`，以及 ojh 运行目录所在的盘（`ojh doctor` 列出的 runs (out_root)）：每个候选自带选中的 checkpoint（joey-1 全参约 4 GB），ojh 的运行目录里还有训练中的保存点。不够就先不启动，写进 `questions`。
-   - `ojh doctor --no-network`（调用方式见上）：有 fail 就停，原话写进 `questions`。
-3. **初始化**：`trsi init --brief <outdir>/brief.json`（写 `<outdir>/trsi/run.yaml` 和 `exp.yaml`，起点成为当前方案；已经初始化过就保留原样），然后 `trsi check <run.yaml> --ojh`（核对 run.yaml，对起点做一次 `ojh check`，不占卡）。种子是 `search.seeds`（没写就是 `search_space` 的 seed，再没有就是 0、1、2），第一个是探针种子。起点：
-   - 简报有 `best_candidate`：`trsi adopt <run.yaml> --candidate <best_candidate>`，把它当作起点训练时那个种子的结果接过来，不重训；起点其余的种子照常训练。
-   - 没有：每个种子一条 `trsi launch <run.yaml> --start --seed 0 --gpus <卡>`（`--seed 1`、`--seed 2` 同样，各用一张空闲卡）。
-   起点的种子都跑完、打包好之前，`trsi next` 不比较任何候选。
-4. **提候选**：按「诊断」「提候选」两节写好候选 YAML，每个先跑探针：`trsi launch <run.yaml> <记录目录>/proposals/<名字>.yaml --seed 0 --gpus <卡>`，立即返回。卡不够时先启动放得下的，其余等下一批。第一轮还什么都没训练、证据不够写出带证据的诊断时，可以先只跑起点，收集后再提候选（第 7 步回到这里）。
-5. **以长任务交回**：这一批都启动后，`trsi watch <run.yaml> --marker <outdir>/watch-1.done`（每次用新的路径：watch-2.done、watch-3.done……）。它自己转到后台，写好 `<marker>.pid`，等到目前启动的所有试验都结束后写 ok。看到它打印的 marker 和 pid 文件后写 `handback.json`：`status` 是 `long_job`，`marker` 是这个标记的绝对路径，`artifacts` 是 `[]`，`notes` 写启动了哪些试验、用哪些卡、预计多久。然后结束会话，不等待、不轮询。
-6. **收到「# 定时检查」**（每 `checkin_minutes` 分钟一次，不算退回）：
-   - 检查：这些试验的卡上有没有别人的进程（`nvidia-smi`，`nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv`）；日志在不在前进、有没有报错（ojh 运行目录里的 `train-s<种子>.log`、`runner.log`，`ojh status <run_dir>`；OOM、NaN、Traceback、长时间没有新的步数）；磁盘够不够；监视进程还在不在（`<marker>.pid` 第一行的进程号）。
-   - 一切正常：以 `long_job` 交回**同一个**标记（反馈里写着它的路径）。
-   - 某个试验明显坏了（损失 NaN、报错后不动、远超预计时间没有进展）：结束它。`trsi --help` 没有结束单个试验的命令；ojh 的训练在 tmux 会话里，`tmux kill-session -t <session>`（会话名在 `<outdir>/trsi/trials/<试验>.json`）结束它，ojh 在约 30 秒内写 `DONE`，下一次 `trsi collect` 把它记为 failed（会话不在了、又超过 2 分钟没有 `DONE` 也没有动静时也一样，原因是 ended without DONE），卡时照记。监视进程不用动，交回同一个标记。不要因为中途的验证分数不好看就结束试验：中途和短跑的排名不可信（见 `reference/protocol.md`）。
-   - 要换卡重跑（卡被别人占了、显存被挤爆、训练慢得反常）：按下面的顺序做。旧的监视进程留到新的监视起来之后再结束：这期间运行被停止时，引擎只知道旧的监视进程，它收到 SIGTERM 会结束本次运行所有在跑的训练（包括刚重跑的）。
-     1. `tmux kill-session -t <session>` 结束要换卡的试验，等它的运行目录里出现 `DONE`（ojh 在 kill-session 之后约 30 秒内写；等了约 2 分钟还没有，也照样往下做，collect 会记为 ended without DONE），再 `trsi collect <run.yaml>` 把它记为 failed。collect 先把已经跑完的试验打包（每个要几分钟），所以 Bash 的超时设成 600000 毫秒；等 collect 打印这个试验是 failed 后再 launch，还显示 running 就再 collect 一次。
-     2. 在 `resources.gpu_ids` 里另一张空闲卡上重跑：`trsi launch <run.yaml> <记录目录>/proposals/<名字>.yaml --seed 0 --gpus <新卡>`（起点用 `--start`，种子按原来的）。失败那次的卡时照记。
-     3. 开新的监视：`trsi watch <run.yaml> --marker <outdir>/watch-2.done`（新路径），它等所有还在跑的试验。
-     4. 用 SIGKILL 结束旧的监视进程：先确认 `<旧标记的 .pid 第一行的进程号>` 还是它：`ps -p <pid> -o args=` 打印的是 `... -m trsi watch ... --marker <旧标记>`；是才 `kill -9 <pid>`。什么都没打印（它已经自己退出了）或是别的进程（进程号被复用了）就不要 kill。不要用 SIGTERM（或不带参数的 `kill`）：`trsi watch` 收到 SIGTERM 会结束所有试验的训练。
-     5. 立刻以 `long_job` 交回**新的**标记：引擎只在交回时才知道标记换了，旧标记不再算数。
-   - 监视进程不在了（没有标记就退出了）：开新的监视，交回新的标记。监视进程自己出错时会写 failed 标记（第二行 the watcher stopped on an error，详情在 `<marker>.log`；读运行目录时的 OSError 要连续 3 次轮询才算出错，之前只记进日志），并像收到 SIGTERM 一样先结束本次运行所有在跑的训练（标记一写，就没有谁再看着它们）；派出记为失败，退回时看 `<marker>.log`，`trsi collect` 把被结束的试验记为 failed，再照常重跑（卡时照记）。
-7. **收到「# 长任务已结束」**：
-   - `trsi collect <run.yaml> --gpu <卡号>`（`--gpu` 是首选的打分卡，在 `resources.gpu_ids` 里；可以不给）。它把每个跑完的试验打包成 `<outdir>/cand-<试验>/` 并逐个打印状态：done（打包好）、failed（训练失败，或 ojh 的会话不在了、超过 2 分钟没有 `DONE`）、unpacked（打包失败，原因在同一行）、running。
-   - 打分卡由 collect 在打包每个试验前重新选，不用你选：在 `resources.gpu_ids` 里、卡上没有任何计算进程（谁的都算）、空闲显存不少于机器配置的 `min_free_mib` 和模型目录大小的 1.5 倍中较大的一个、ojh 的卡锁（机器配置的 `lock_dir`）没被别人占着（打分期间由它拿着）；`--gpu` 的卡合格就用它，不合格就打印原因，换空闲显存最多的合格卡；打分时显存不够（OOM），换一张合格的卡再打一次。用的卡记在试验结果的 `scoring_card` 里。
-   - 用不上的 checkpoint 由 collect 自动删，不问用户：试验打包好（候选通过了 `rsi validate`，模型在候选目录里，是硬链接或拷贝）后，它对这个试验的 ojh 运行做 `ojh cleanup --confirm`（删 ojh 的 `deletion_candidates.json` 列出的没选中的保存点和合并出的模型，ojh 留着选中的那个）；失败的试验（`DONE` 说失败）记为 failed 时，删掉它运行里所有的 checkpoint；重跑一个试验后，它被换下的旧运行在 `DONE` 出现后整个删掉 checkpoint（`trsi launch` 加 `--force` 重训 unpacked 的试验时，launch 成功后马上删）。unpacked 的试验（下一次 collect 还要打包它）、还在跑的、没有 `DONE` 的都不删。删了什么 collect 逐行打印，写进 `notes`；ojh 留下没删的（原因它会说）只报一次；没删成的下一次 collect 再删。
-   - 打包每个试验要几分钟（拷 checkpoint，在验证集上加载模型跑一遍 `model.predict`），而 Bash 工具一次最多 10 分钟。要打包的只有一两个时在前台运行，超时设成 600000 毫秒；更多时按长任务在后台运行它（写 `<marker>.pid`，结束时写标记），以 `long_job` 交回，等下一次「# 长任务已结束」再往下走。每次后台 collect 用新的标记（`<k>` 每次加一：collect-1.done、collect-2.done……），启动前 `rm -f <outdir>/collect-<k>.done <outdir>/collect-<k>.done.pid`：引擎只认修改时间不早于这次启动的标记。它要在自己的会话里运行（Python 的 `start_new_session=True`，各系统都能用）：这样 sh 的 `$$` 就是它的进程组号，运行被停止时引擎终止整个进程组，collect 不会留下来：
+1. **Read the brief**: `brief.json`'s `task_json`, `search_space`, `search`, `resources`, `checkin_minutes`, `inputs`, `budget_left`, `dispatch_id`, `outdir`. Read the issues the plan assigns to this module, this module's earlier `record`s and the registered `search`es (which configs were tried before and what was concluded), and look at the facts of the trainset (the share of positives, how input length relates to the label, duplicate rows). Read only the paths `inputs` lists; never read the files of the evalset or the testset, nor the raw data the task's `data.sources` names.
+2. **Check the environment**; choosing GPUs is your job:
+   - `nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv`: choose free GPUs (less than 1 GiB in use) only from `resources.gpu_ids` (all GPUs when not set). A trial takes as many GPUs as its recipe needs (one for a single-GPU recipe) and never shares a GPU with another trial or with someone else's process.
+   - `df -h <outdir>`, and the disk of ojh's run directories (the runs (out_root) that `ojh doctor` lists): every candidate carries its chosen checkpoint (about 4 GB for joey-1 full), and ojh's run directory also holds the checkpoints saved during training. When there is not enough, do not launch yet; write it into `questions`.
+   - `ojh doctor --no-network` (called as above): on any fail, stop and write its exact words into `questions`.
+3. **Initialize**: `trsi init --brief <outdir>/brief.json` (writes `<outdir>/trsi/run.yaml` and `exp.yaml`, and the start becomes the incumbent; when already initialized, it keeps them as they are), then `trsi check <run.yaml> --ojh` (checks run.yaml and runs one `ojh check` on the start, using no GPU). The seeds are `search.seeds` (when not set, the seed of `search_space`, else 0, 1, 2); the first is the probe seed. The start:
+   - The brief has `best_candidate`: `trsi adopt <run.yaml> --candidate <best_candidate>` takes it over as the result of the start's seed it was trained with, without retraining; the start's other seeds train as usual.
+   - It has none: one `trsi launch <run.yaml> --start --seed 0 --gpus <gpus>` per seed (`--seed 1`, `--seed 2` likewise, each on a free GPU).
+   Until all the start's seeds have finished and are packed, `trsi next` compares no candidate.
+4. **Propose candidates**: write the candidate YAMLs by "Diagnosis" and "Proposing candidates", and run each one's probe first: `trsi launch <run.yaml> <trsi_dir>/proposals/<name>.yaml --seed 0 --gpus <gpus>`, which returns at once. When there are not enough GPUs, launch what fits and leave the rest for the next batch. In the first round, when nothing has been trained yet and there is not enough evidence for a diagnosis with evidence, you may run only the start first and propose candidates after collecting it (step 7 comes back here).
+5. **Hand back as a long job**: once this batch is launched, `trsi watch <run.yaml> --marker <outdir>/watch-1.done` (a new path every time: watch-2.done, watch-3.done, …). It moves itself to the background, writes `<marker>.pid`, and writes ok once all trials launched so far have ended. Once you see the marker and the pid file it prints, write `handback.json`: `status` is `long_job`, `marker` is the absolute path of this marker, `artifacts` is `[]`, and `notes` say which trials were launched, on which GPUs, and how long they should take. Then end the session; do not wait or poll.
+6. **On `# Check-in`** (every `checkin_minutes` minutes, not a return):
+   - Check: whether the GPUs of these trials have someone else's processes (`nvidia-smi`, `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv`); whether the logs are moving and free of errors (`train-s<seed>.log` and `runner.log` in ojh's run directory, `ojh status <run_dir>`; OOM, NaN, Traceback, no new steps for a long time); whether there is enough disk; whether the watcher is still there (the pid on the first line of `<marker>.pid`).
+   - All well: hand back the **same** marker as `long_job` (the feedback gives its path).
+   - A trial is clearly broken (loss NaN, stuck after an error, far past its expected time without progress): end it. `trsi --help` has no command to end a single trial; ojh's training runs in a tmux session: `tmux kill-session -t <session>` (the session name is in `<outdir>/trsi/trials/<trial>.json`) ends it, ojh writes `DONE` within about 30 seconds, and the next `trsi collect` records it as failed (likewise when the session is gone and there has been no `DONE` and no activity for over 2 minutes; the reason is ended without DONE); its GPU hours still count. Leave the watcher alone and hand back the same marker. Do not end a trial because its mid-run validation scores look bad: mid-run and short-run rankings cannot be trusted (see `reference/protocol.md`).
+   - To rerun on another GPU (the GPU taken by someone else, GPU memory squeezed out, training abnormally slow): do it in the order below. Keep the old watcher until the new one is up: if the run is stopped in between, the engine knows only the old watcher, which on SIGTERM ends all running trainings of this run (the rerun one included).
+     1. `tmux kill-session -t <session>` ends the trial to move; wait until `DONE` appears in its run directory (ojh writes it within about 30 seconds of kill-session; when it has not appeared after about 2 minutes, go on anyway, and collect records ended without DONE), then `trsi collect <run.yaml>` records it as failed. collect first packs the trials that have finished (several minutes each), so set the Bash timeout to 600000 milliseconds; launch only after collect prints that this trial is failed, and when it still shows running, collect once more.
+     2. Rerun on another free GPU in `resources.gpu_ids`: `trsi launch <run.yaml> <trsi_dir>/proposals/<name>.yaml --seed 0 --gpus <new_gpu>` (`--start` for the start; the seed as before). The failed run's GPU hours still count.
+     3. Start a new watcher: `trsi watch <run.yaml> --marker <outdir>/watch-2.done` (a new path); it waits for all trials still running.
+     4. End the old watcher with SIGKILL: first make sure that `<the pid on the first line of the old marker's .pid>` is still it: `ps -p <pid> -o args=` prints `... -m trsi watch ... --marker <old_marker>`; only then `kill -9 <pid>`. When it prints nothing (it has exited by itself) or another process (the pid was reused), do not kill. Never use SIGTERM (or `kill` without a signal): on SIGTERM `trsi watch` ends the training of all trials.
+     5. At once hand back the **new** marker as `long_job`: the engine learns that the marker changed only from the hand-back, and the old marker no longer counts.
+   - The watcher is gone (it exited without a marker): start a new watcher and hand back the new marker. When the watcher itself hits an error, it writes a failed marker (second line: the watcher stopped on an error, details in `<marker>.log`; an OSError reading a run directory counts as an error only on 3 polls in a row, and before that only goes into the log), and, as on SIGTERM, first ends all running trainings of this run (once the marker is written, nothing watches them any more); the dispatch is recorded as failed. When sent back, look at `<marker>.log`; `trsi collect` records the ended trials as failed; then rerun as usual (GPU hours still count).
+7. **On `# Long job finished`**:
+   - `trsi collect <run.yaml> --gpu <gpu>` (`--gpu` is the preferred scoring GPU, in `resources.gpu_ids`; it may be left out). It packs every finished trial as `<outdir>/cand-<trial>/` and prints each one's state: done (packed), failed (training failed, or ojh's session is gone with no `DONE` for over 2 minutes), unpacked (packing failed, the reason on the same line), running.
+   - collect chooses the scoring GPU again before packing each trial; you need not choose it: in `resources.gpu_ids`, with no compute process on it (anyone's counts), free GPU memory no less than the larger of the machine config's `min_free_mib` and 1.5 times the model directory's size, and ojh's GPU lock (the machine config's `lock_dir`) not held by someone else (collect holds it while scoring); the `--gpu` GPU is used when it qualifies, otherwise collect prints why and takes the qualifying GPU with the most free memory; when scoring runs out of GPU memory (OOM), it scores once more on another qualifying GPU. The GPU used is recorded in the trial result's `scoring_card`.
+   - collect deletes checkpoints no longer needed by itself, without asking the user: once a trial is packed (the candidate passed `rsi validate`, and the model is in the candidate directory, as a hard link or a copy), it runs `ojh cleanup --confirm` on the trial's ojh run (deleting the unchosen checkpoints and merged models listed in ojh's `deletion_candidates.json`; ojh keeps the chosen one); when it records a failed trial (`DONE` says failed) as failed, it deletes all checkpoints of its run; after a trial is rerun, its replaced old run has all its checkpoints deleted once its `DONE` appears (when `trsi launch` with `--force` retrains an unpacked trial, right after the launch succeeds). Unpacked trials (the next collect still has to pack them), running ones and those without `DONE` are not touched. collect prints what it deleted, line by line; write it into `notes`; what ojh left undeleted (it says why) is reported once; what could not be deleted is deleted by the next collect.
+   - Packing each trial takes minutes (copying the checkpoint, loading the model on the valset and running `model.predict`), and the Bash tool allows at most 10 minutes per call. With only one or two to pack, run it in the foreground with a timeout of 600000 milliseconds; with more, run it in the background as a long job (write `<marker>.pid`, write the marker at the end), hand back `long_job`, and go on at the next `# Long job finished`. Use a new marker for every background collect (`<k>` one more each time: collect-1.done, collect-2.done, …), and run `rm -f <outdir>/collect-<k>.done <outdir>/collect-<k>.done.pid` before starting it: the engine only accepts a marker whose modification time is not earlier than this launch. It must run in its own session (Python's `start_new_session=True`, which works on every system): then sh's `$$` is its process group id, and when the run is stopped the engine terminates the whole process group, so no collect is left behind:
 
      ```
-     <py> -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' 'printf "%s\n%s\n" $$ "$(date +%s)" > <outdir>/collect-<k>.done.pid; PYTHONPATH=<模块目录> <py> -m trsi collect <run.yaml> --gpu <卡号> > <outdir>/collect-<k>.log 2>&1 && echo ok > <outdir>/collect-<k>.done || printf "failed\ntrsi collect 出错，见 collect-<k>.log\n" > <outdir>/collect-<k>.done'
+     <py> -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' 'printf "%s\n%s\n" $$ "$(date +%s)" > <outdir>/collect-<k>.done.pid; PYTHONPATH=<module_dir> <py> -m trsi collect <run.yaml> --gpu <gpu> > <outdir>/collect-<k>.log 2>&1 && echo ok > <outdir>/collect-<k>.done || printf "failed\ntrsi collect failed, see collect-<k>.log\n" > <outdir>/collect-<k>.done'
      ```
 
-     被打断的 `collect` 不要紧：没打包完的试验下一次 `collect` 重新打包。
-   - unpacked 的试验由下一次 `collect` 再打包，不重训（`trsi launch` 也不会重训它）；`trsi next` 也打印它的打包错误。原因修不好、一直打包不成时，同一条 `trsi launch` 命令加 `--force`：把它记为 failed（卡时照记）后重训。failed 的试验看运行目录的 `DONE`、`runner.log`、`train-s<种子>.log`，修好后用同一条 `trsi launch` 命令重跑（卡时照记）。
-   - 然后 `trsi next <run.yaml>`，照它的输出走：
-     - 起点的种子没跑完（incumbent seeds … not finished）：补起点的种子，或再 `collect`；
-     - 探针过了（probe passed … launch seeds …）：用同一个候选 YAML 补这些种子（`--seed 1`、`--seed 2`），回到第 5 步；
-     - 探针失败（failed -> relaunch it or drop the candidate）：重跑或放弃这个候选；
-     - rejected 或 ACCEPTED：判定已记下；接受时它更新当前方案，之后的候选和新的当前方案比；
-     - no open candidate：没有待判的候选，回到第 4 步提新候选（不超过 `search.max_configs`）；
-     - STOP：到第 8 步。
-     每次启动前都重新看一遍卡。
-8. **停**：这次派出（含退回后再搜）提的候选数到了 `search.max_configs`；预算不够再跑一个种子（`trsi launch` 说 budget）；`trsi next` 打印 STOP；或剩下的问题都是数据或评测的问题（写进 `record`，交给对应模块）。还在跑的试验等它们结束、收集完再停，不留占卡的训练。
-9. **第一段交回**：`trsi report <run.yaml>`（写 `<记录目录>/report.md`：每个试验、预测和结果、当前方案随花费的变化），照它写 `record`（见「实验记录」，放在 `<outdir>/record/`），用 `rsi validate` 检查。然后写 `handback.json`：`status` 是 `ok`，`artifacts` 是本次打包的所有 `cand-*` 子目录（已经登记过的不再列）加 `record`，`notes` 写每个候选的门、总花费和遇到的问题。
-10. **第二段交回**（收到「# 继续：交回的第二部分」）：`trsi report <run.yaml> --search <outdir>/search --ids <outdir>/registered-*.json`。输出目录里所有的 `registered-<n>.json` 都要给：退回后再搜一次时，前一次搜索的试验的登记 id 在较早的文件里，只给最新的一个会让它们成了 unregistered（第 1 轮时 `trsi report` 因此找不到起点的已登记试验而报错）；内容是 `[]` 的文件也没关系。它写 `search` 并用 `rsi validate` 检查；然后以 `ok` 交回 `search`。
+     An interrupted `collect` does no harm: the trials not finished packing are packed again by the next `collect`.
+   - Unpacked trials are packed by the next `collect`, never retrained (`trsi launch` does not retrain them either); `trsi next` also prints their packing errors. When the cause cannot be fixed and packing keeps failing, add `--force` to the same `trsi launch` command: it records the trial as failed (GPU hours still count) and retrains it. For failed trials, look at the run directory's `DONE`, `runner.log` and `train-s<seed>.log`; once fixed, rerun with the same `trsi launch` command (GPU hours still count).
+   - Then `trsi next <run.yaml>`, and follow its output:
+     - the start's seeds have not finished (incumbent seeds … not finished): add the start's seeds, or `collect` again;
+     - the probe passed (probe passed … launch seeds …): add these seeds with the same candidate YAML (`--seed 1`, `--seed 2`), back to step 5;
+     - the probe failed (failed -> relaunch it or drop the candidate): rerun this candidate or drop it;
+     - rejected or ACCEPTED: the decision is recorded; on acceptance it updates the incumbent, and later candidates are compared with the new incumbent;
+     - no open candidate: no candidate waits for a decision; back to step 4 to propose new candidates (no more than `search.max_configs`);
+     - STOP: go to step 8.
+     Look at the GPUs again before every launch.
+8. **Stop**: when the candidates this dispatch proposed (searches after a return included) reach `search.max_configs`; when the budget cannot pay for another seed (`trsi launch` says budget); when `trsi next` prints STOP; or when the remaining issues are all data or evaluation issues (write them into the `record`, for the matching module). Wait for the trials still running to end and collect them before stopping; leave no training holding a GPU.
+9. **First part of the hand-back**: `trsi report <run.yaml>` (writes `<trsi_dir>/report.md`: each trial, its prediction and result, the incumbent as the cost grows); write the `record` from it (see "Experiment records", in `<outdir>/record/`) and check it with `rsi validate`. Then write `handback.json`: `status` is `ok`, `artifacts` is every `cand-*` subdirectory packed this time (not those already registered) plus `record`, and `notes` give each candidate's gates, the total cost and the problems met.
+10. **Second part of the hand-back** (on `# Continue: the second part of the hand-back`): `trsi report <run.yaml> --search <outdir>/search --ids <outdir>/registered-*.json`. Give every `registered-<n>.json` in the output directory: after a return and another search, the registered ids of the earlier search's trials are in the earlier files, and giving only the latest one would leave them unregistered (in round 1, `trsi report` then fails because it cannot find the start's registered trials); files whose content is `[]` do no harm. It writes the `search` and checks it with `rsi validate`; then hand back `search` with `ok`.
 
-**退回后再搜一次**（训练门没过时，引擎默认让同一个会话再搜）：trsi 的 run 还是同一个（run 名是派出号），当前方案、跑过的试验和提过的候选都接着用；`search.max_configs` 按整个派出算，不按每次搜索重新计。`trsi next` 已经打印 STOP（候选数用完或预算不够）时，不再提新候选，只交回一份 `record`（用还没登记过的子目录名，例如 `record-2`），在 `record` 和 `notes` 里写明这次没有试新的配置、为什么；引擎照常按决策点往下走。还能提时照第 4–10 步做，只交回新打包的 `cand-*`，`record`、`search` 用 `record-2`、`search-2`。
+**Searching again after a return** (when the train gate is not passed, the engine by default has the same session search again): the trsi run is the same (the run name is the dispatch id); the incumbent, the trials run and the candidates proposed all carry over; `search.max_configs` counts over the whole dispatch, not per search. When `trsi next` has already printed STOP (candidates used up or not enough budget), propose no new candidates and hand back only a `record` (under a subdirectory name never registered before, e.g. `record-2`), saying in the `record` and in `notes` that no new config was tried this time and why; the engine goes on by decision point as usual. When more can be proposed, follow steps 4–10 and hand back only the newly packed `cand-*`, with `record-2` and `search-2` for the `record` and the `search`.
 
-### 诊断
+### Diagnosis
 
-用 3–5 句话写当前方案的问题，每条带证据（写进候选的 `note` 和最后的 `record`）：
+In 3–5 sentences, write the incumbent's problems, each with evidence (into the candidates' `note` and the final `record`):
 
-- 训练曲线：每个试验的 ojh 运行目录里的 `RESULT.md`（`report.md` 里有选中的步数）。最好的步很早、后面一路变差 → 学习率偏大或过拟合；到最后还在变好 → 训练不够。
-- 种子之间差多少：差得大时，小改进分不出来，先试大改动。
-- 数据事实：正例比例、输入长度和标签的关系、重复行。它们会让曲线出现和“训练好坏”无关的现象。
-- 计划分给本模块的问题、以前的 `record` 和 `search`。
-- 对照 `reference/lessons.md`（别的任务上已经学到的）。
+- Training curves: `RESULT.md` in each trial's ojh run directory (`report.md` has the chosen step). The best step very early and worse all the way after → learning rate too high or overfitting; still improving at the end → not trained enough.
+- How much the seeds differ: when they differ a lot, small improvements cannot be told apart; try big changes first.
+- Data facts: the share of positives, how input length relates to the label, duplicate rows. They make the curves show effects that have nothing to do with how good the training is.
+- The issues the plan assigns to this module, earlier `record`s and `search`es.
+- Compare with `reference/lessons.md` (what has been learned on other tasks).
 
-### 提候选
+### Proposing candidates
 
-- 在 `<记录目录>/proposals/` 下写 YAML，一个候选一个文件，一次只改一处想法。一次派出最多 `search.max_configs` 个候选（起点不算；退回后同一会话再搜时，前一次提的也算在内；超了 `trsi launch` 拒绝）。
-- YAML 里的数字带指数时写小数点和带符号的指数（`2.0e-5`、`1.0e+4`，不写 `2e-5`、`1.0e4`）：PyYAML 按 YAML 1.1 把后两种读成字符串，`trsi launch` 会说它不在 `search_space` 里。
-- 只在 `search_space` 里：底座取 `search_space` 的 base 列出的（没写就只能用起点的），配方取它的 recipe 列出的，override 的键是去掉 `overrides.` 前缀的配置路径（`search_space` 写 `overrides.onejev.lr`，候选写 `onejev.lr`），取值在允许的列表或范围里；步数是 `onejev.max_steps`；种子不写在候选里，由 `--seed` 给。超出范围 `trsi launch` 拒绝。能改什么、先验高低和代价见 `reference/search_space.md`。
-- `note`：针对哪条诊断、为什么可能有效。
-- `prediction`：主指标在探针种子上的预期值，以及被接受的概率 `p_accept`。复盘时和实际对照。
-- 先验高的先试：结构类（换底座、全参或 LoRA、训练哪些层）优先于拟合类微调；换大模型时连学习率一起调小；从别处借来的改法，先写下它在原处为什么有效、这里满不满足；证据差不多时选便宜的。
-- 死路（`search_space` 里标了 dead 的取值）默认拒绝；只有能说明前提已经变了才加 `--force`，原因写进 `note`。探针没过的候选不补种子。
+- Write YAML under `<trsi_dir>/proposals/`, one file per candidate, one idea changed at a time. One dispatch proposes at most `search.max_configs` candidates (the start not counted; after a return, the proposals of the same session's earlier search count too; beyond it `trsi launch` refuses).
+- Write numbers with exponents in YAML with a decimal point and a signed exponent (`2.0e-5`, `1.0e+4`, not `2e-5`, `1.0e4`): PyYAML reads the latter two as strings under YAML 1.1, and `trsi launch` says they are not in `search_space`.
+- Only inside `search_space`: the base is one that `search_space`'s base lists (only the start's when it lists none), the recipe one that its recipe lists; an override key is the config path without the `overrides.` prefix (`search_space` writes `overrides.onejev.lr`, a candidate `onejev.lr`), with a value in the allowed list or range; the step count is `onejev.max_steps`; the seed is not written in the candidate, `--seed` gives it. `trsi launch` refuses anything out of range. What can be changed, the priors and the costs are in `reference/search_space.md`.
+- `note`: which diagnosis it addresses and why it might work.
+- `prediction`: the expected value of the primary metric on the probe seed, and the probability of acceptance `p_accept`. Compared with the actual result in the review.
+- Higher priors first: structural changes (another base, full or LoRA, which layers to train) before fitting tweaks; when moving to a larger model, lower the learning rate with it; for a change borrowed from elsewhere, first write down why it worked there and whether that holds here; with similar evidence, choose the cheaper.
+- Dead ends (values marked dead in `search_space`) are refused by default; add `--force` only when you can show that the premise has changed, with the reason in `note`. A candidate whose probe failed gets no more seeds.
 
 ```yaml
 base: joey-1
-recipe: null          # null：底座的单卡默认配方；换配方写 search_space 的 recipe 里列出的名字
+recipe: null          # null: the base's single-GPU default recipe; for another recipe, a name listed in search_space's recipe
 overrides:
-  onejev.lr: {value: 5.0e-6, reason: "起点的验证分数在第 20 步见顶后一路下降：学习率偏大"}
-note: 针对诊断 1（曲线早早见顶）：学习率减半
-prediction: {auprc: 0.62, p_accept: 0.3}   # 键是任务的主指标；数值只是示意
+  onejev.lr: {value: 5.0e-6, reason: "the start's validation score peaked at step 20 and fell all the way after: learning rate too high"}
+note: "addresses diagnosis 1 (the curve peaks early): halve the learning rate"
+prediction: {auprc: 0.62, p_accept: 0.3}   # the key is the task's primary metric; the numbers are only an illustration
 ```
 
-### 判输赢
+### Deciding
 
-细节和依据见 `reference/protocol.md`。比较只用候选的数：`metrics_val`（打包时用 `model.predict` 在验证集上跑出、`rsi score` 算的），ECE 由 `predictions_val` 算（15 个等宽箱）。规则由 `trsi next` 执行，不要自己另算、另判。
+Details and reasons in `reference/protocol.md`. Comparisons use only the candidates' numbers: `metrics_val` (from the predictions `model.predict` produced on the valset when packing, computed by `rsi score`); ECE from `predictions_val` (15 equal-width bins). `trsi next` applies the rules; do not compute or judge separately yourself.
 
-- 探针：候选的探针种子比当前方案的同一种子高过 `search.probe_margin`（默认 0.035），才补其余种子；否则不接受。
-- 接受：所有种子平均比当前方案高过 `search.accept_margin`（默认 0.035），且护栏（`search.guards`，默认 ECE 0.02、Brier 0.005）的平均变差不超过阈值。
-- 为什么不用“一个种子 + 按行 bootstrap”：在 Elliptic 上，同一配方换种子的标准差是 0.0175 AUPRC，种子之间约九成的差来自训练本身，按行重抽看不到这部分。
-- 拿不准就不接受：留着当前方案没有成本；靠噪声赢的方案会让后面每一步都建立在错的起点上。
+- Probe: only when the candidate's probe seed beats the incumbent's same seed by more than `search.probe_margin` (default 0.035) are the other seeds added; otherwise it is not accepted.
+- Accept: the mean over all seeds beats the incumbent by more than `search.accept_margin` (default 0.035), and the mean worsening of the guards (`search.guards`, default ECE 0.02, Brier 0.005) is within their thresholds.
+- Why not "one seed + row bootstrap": on Elliptic the standard deviation of one recipe across seeds is 0.0175 AUPRC, and about nine tenths of the difference between seeds comes from the training itself, which resampling rows cannot see.
+- When in doubt, do not accept: keeping the incumbent costs nothing; a config that wins by noise puts every later step on a wrong start.
 
-## 规则
+## Rules
 
-- 只在 `search_space` 里搜。配置空间是任务定义的一部分，用户批准任务定义时已经批准；要扩大它就是改任务定义，写进 `questions`。
-- 搜索期间训练代码不变：不改 `trsi/`、训练命令、`recipes/`、onejev-harness 和 OneJev。发现要改的地方写进 `record` 和 `notes`，由负责人在两轮之间改。
-- 试验只经 `trsi launch` 训练：不直接 `ojh run`，不调用训练命令，否则记账、复用、比较和打包都会漏掉它。不手写、手改 `run.yaml`、`exp.yaml`（由 `trsi init --brief <outdir>/brief.json` 生成）、`archive.jsonl`、`incumbent.yaml`、`trials/`、`run.lock.yaml`。
-- 卡只用 `resources.gpu_ids` 里的空闲卡，由你选；不加 `--allow-shared`。ojh 说卡忙时换一张空闲卡；不可行、放不下或要用户选替代方案时，把 ojh 的原话写进 `questions`，不自己换配方。
-- 预算以简报为准：`trsi init` 把 `budget_left.compute_hours` 写进 run.yaml，`trsi launch` 在已花加下一个种子的预计超过它时拒绝；失败的试验照记。
-- 不读评测集、测试集的文件，也不读任务 `data.sources` 写的原始数据；不给 ojh 传 `--allow-test`、`--allow-report`。
-- 不删候选目录和 ojh 的运行目录。用不上的 checkpoint 由 `trsi collect` 自动删（第 7 步），不用问用户；不自己运行 `ojh cleanup`，不手工删。
-- 要问用户的事写进交回的 `questions`，不直接问用户。
-- 交回 `long_job` 后结束会话：不等待、不轮询日志。
+- Search only inside `search_space`. The search space is part of the task definition, approved when the user approved the task definition; widening it is changing the task definition: write it into `questions`.
+- The training code does not change during a search: do not change `trsi/`, the train command, `recipes/`, onejev-harness or OneJev. Write what needs changing into the `record` and `notes`; the owner changes it between rounds.
+- Trials train only through `trsi launch`: never `ojh run` directly, never call the train command, otherwise the books, reuse, comparison and packing all miss them. Never write or edit by hand `run.yaml`, `exp.yaml` (generated by `trsi init --brief <outdir>/brief.json`), `archive.jsonl`, `incumbent.yaml`, `trials/` or `run.lock.yaml`.
+- Use only free GPUs in `resources.gpu_ids`, chosen by you; never add `--allow-shared`. When ojh says a GPU is busy, switch to another free GPU; when it is infeasible, does not fit, or needs the user to choose an alternative, write ojh's exact words into `questions`; do not switch recipes yourself.
+- The brief's budget is authoritative: `trsi init` writes `budget_left.compute_hours` into run.yaml, and `trsi launch` refuses when the spent hours plus the next seed's estimate would exceed it; failed trials still count.
+- Never read the files of the evalset or the testset, nor the raw data the task's `data.sources` names; never pass `--allow-test` or `--allow-report` to ojh.
+- Never delete candidate directories or ojh's run directories. Checkpoints no longer needed are deleted by `trsi collect` by itself (step 7), without asking the user; never run `ojh cleanup` yourself and never delete them by hand.
+- Write what you need to ask the user into the hand-back's `questions`; never ask the user directly.
+- After handing back `long_job`, end the session: no waiting, no polling of logs.
 
-## 实验记录
+## Experiment records
 
-每次搜索交一份 `record`（字段见 [record.md](../../docs/interfaces/record.md)），按复盘的顺序写：诊断 → 改动 → 预测 → 结果，以及预测准不准。
+Every search hands in one `record` (fields in [record.md](../../docs/interfaces/record.md)), written in the order of the review: diagnosis → change → prediction → result, and whether the predictions were right.
 
-- `module` 写 `train`，`owner` 写 `rsi-train`，`automation` 写 `automated`。
-- `failure`：诊断（3–5 句，每条带证据）。
-- `hypothesis`：每个候选的 `note` 和 `prediction`。
-- `action`：每个候选相对当前方案改了什么，跑了哪些种子，`trsi next` 怎么判（探针没过、接受、不接受），候选的子目录名。
-- `result`：`metric` 写 `val <主指标>`；`before` 是搜索开始时当前方案各种子的平均，`after` 是搜索结束时当前方案各种子的平均（没有接受任何候选时等于 `before`）；`conclusion`：接受了候选写 `success`，都没接受写 `failure`，因预算或故障提前停、没比出结果写 `inconclusive`。
-- `knowledge`：逐条对照预测和实际，预测偏在哪；学到了什么；剩下的若是数据或评测的问题，写明该交给哪个模块；训练代码要改的地方。
-- `artifacts`：相关的已登记 id（例如 `best_candidate` 的 id）；本次的候选还没登记，写在 `action` 里。
+- `module` is `train`, `owner` is `rsi-train`, `automation` is `automated`.
+- `failure`: the diagnosis (3–5 sentences, each with evidence).
+- `hypothesis`: each candidate's `note` and `prediction`.
+- `action`: what each candidate changed from the incumbent, which seeds ran, how `trsi next` judged (probe failed, accepted, not accepted), the candidates' subdirectory names.
+- `result`: `metric` is `val <primary metric>`; `before` is the incumbent's mean over its seeds when the search started, `after` the incumbent's mean over its seeds when it ended (equal to `before` when no candidate was accepted); `conclusion`: `success` when a candidate was accepted, `failure` when none was, `inconclusive` when it stopped early for the budget or a fault without a comparison.
+- `knowledge`: prediction against actual, item by item, and where the predictions were off; what was learned; when what remains is a data or evaluation issue, which module it should go to; what the training code should change.
+- `artifacts`: the related registered ids (e.g. the id of `best_candidate`); this search's candidates are not registered yet and go into `action`.
 
-数以 `<记录目录>/report.md` 为准。
+The numbers follow `<trsi_dir>/report.md`.
 
-## 模块指标
+## Module metrics
 
-同样算力预算下，搜到的最佳方案相对起点的增益（`search` 的 `gain_vs_default`），以及预测的准确度（`prediction` 和实际的差）。测量方法见 `reference/protocol.md` 的「比较两个版本的 Skill」。
+The gain of the best config found over the start under the same compute budget (the `search`'s `gain_vs_default`), and the accuracy of the predictions (the difference between `prediction` and the actual result). How to measure them is in "Comparing two versions of the Skill" of `reference/protocol.md`.
 
-## 长任务
+## Long jobs
 
-训练是长任务：`trsi watch` 就是它（见流程第 5 步），自己写 `<marker>.pid`。在后台运行的 `trsi collect` 也是长任务（流程第 7 步）。
+Training is a long job: `trsi watch` is it (see step 5 of the flow), and it writes `<marker>.pid` itself. A `trsi collect` run in the background is a long job too (step 7 of the flow).
 
-长任务的交回：预计超过简报规定的时长时，在后台启动，立刻写 `handback.json`，`status` 写 `long_job`，`marker` 写完成标记的绝对路径，然后结束会话，不轮询、不等待。要交回 `long_job` 时完成标记已经在了（长任务在你交回之前就结束了，例如上一个会话启动的）：不要以 `long_job` 交回。引擎只认这次启动之后写的标记，更早的标记永远不算出现，运行会一直等；直接读结果，接着做完，再交回。任务结束时无论成败都写完成标记，第一行是 `ok` 或 `failed`。标记是 `ok` 时，引擎让同一个会话继续（`feedback-<k>.md` 开头是「# 长任务已结束」），由它读结果、写好产物、再交回；标记不是 `ok` 时这次派出记为失败。`trsi watch` 在试验都结束后写 ok（有试验失败也写 ok，由 `trsi collect` 报告）；它自己出错时写 failed，并先结束所有在跑的训练（见流程第 6 步）。每个长任务用新的标记路径（`watch-<k>.done`、`collect-<k>.done`、`install-<k>.done`，`<k>` 每次加一），自己启动的先 `rm -f <marker> <marker>.pid`：引擎只认修改时间不早于这次启动的标记，同一路径上以前的标记不算这个长任务结束。
+Hand-back of a long job: when it is expected to take longer than the brief allows, start it in the background, write `handback.json` at once with `long_job` as `status` and the absolute path of the completion marker as `marker`, then end the session; do not poll or wait. If the completion marker is already there when you would hand back `long_job` (the long job ended before your hand-back, e.g. one a previous session started): do not hand back `long_job`. The engine only accepts a marker written after this launch; an earlier marker never counts as present and the run would wait forever. Read the results, finish the work, then hand back. When the job ends, succeeded or failed, it must write the completion marker, whose first line is `ok` or `failed`. When the marker is `ok`, the engine has the same session go on (`feedback-<k>.md` starts with `# Long job finished`): it reads the results, writes the artifacts and hands back; when the marker is not `ok`, this dispatch is recorded as failed. `trsi watch` writes ok once all trials have ended (also when some failed; `trsi collect` reports them); when it hits an error itself, it writes failed after first ending all running trainings (see step 6 of the flow). Use a new marker path for every long job (`watch-<k>.done`, `collect-<k>.done`, `install-<k>.done`, `<k>` one more each time), and before one you start yourself, run `rm -f <marker> <marker>.pid`: the engine only accepts a marker whose modification time is not earlier than this launch; an earlier marker at the same path does not count as this long job's end.
 
-交回 `long_job` 之前，在完成标记旁写 `<marker>.pid`：第一行是长任务进程自己的进程号，第二行是它的启动时间（Unix 秒，`date +%s`）。`trsi watch` 自己写（它在自己的会话里运行）。自己在后台启动的任务（例如 `trsi collect`）要在自己的会话里运行，进程号由它自己写：照第 7 步的写法，Python 的 `subprocess.Popen(["sh", "-c", <脚本>], start_new_session=True, ...)` 起一个 sh，脚本先写 `$$` 和 `date +%s`，再运行命令、写标记（sh 的 `$$` 就是进程组号）；Python 里的任务一开始写 `os.getpid()` 和 `int(time.time())`。不要用 shell 给出的后台进程号代替，它可能是包装进程而不是长任务本身。`<marker>.pid` 写好后再写 `handback.json`。运行被停止时，引擎按这个文件确认进程是这个长任务后终止它（整个进程组）：`trsi watch` 收到 SIGTERM 时先结束所有试验的 ojh 训练，再把标记写成 failed。没有这个文件就终止不了，只能列为可能仍在运行、请用户手动结束。
+Before handing back `long_job`, write `<marker>.pid` next to the completion marker: the first line is the long job process's own pid, the second its start time (Unix seconds, `date +%s`). `trsi watch` writes it itself (it runs in its own session). A job you start in the background yourself (e.g. `trsi collect`) must run in its own session and write its pid itself: as in step 7, Python's `subprocess.Popen(["sh", "-c", <script>], start_new_session=True, ...)` starts an sh whose script first writes `$$` and `date +%s`, then runs the command and writes the marker (sh's `$$` is the process group id); a job in Python writes `os.getpid()` and `int(time.time())` as it starts. Never use the background pid the shell gives instead, which may be a wrapper process and not the long job itself. Write `handback.json` only after `<marker>.pid` is written. When the run is stopped, the engine checks by this file that the process is this long job, then terminates it (the whole process group): on SIGTERM `trsi watch` first ends the ojh training of all trials, then writes the marker as failed. Without this file it cannot terminate it and can only list it as possibly still running, for the user to end by hand.
 
-定时检查：任务设了 `flow.checkin_minutes` 时，长任务期间引擎每隔这么多分钟让同一个会话做一次定时检查（`feedback-<k>.md` 开头是「# 定时检查」，不算退回），做法见流程第 6 步：正常就交回同一个标记，换了监视进程就交回新的标记。到了 `flow.max_checkins` 次，引擎转去问用户。
+Check-ins: when the task sets `flow.checkin_minutes`, during a long job the engine has the same session do a check-in every that many minutes (`feedback-<k>.md` starts with `# Check-in`, not a return); how is in step 6 of the flow: when all is well, hand back the same marker; when the watcher was replaced, hand back the new marker. After `flow.max_checkins` check-ins, the engine turns to the user.
 
-## 单独运行
+## Running standalone
 
-负责人在自己的沙盒目录里运行，不需要顶层：
+The owner runs it in their own sandbox directory, without the orchestrator:
 
-1. 把 `trainset`、`valset`（要接过来的候选也一样）从已登记产物复制到沙盒，路径手工指定；任务定义用 `<task.json>`，要有 `resources.onejev`、`search_space` 和 `search`。不需要工作区，也不读登记表。
-2. 手写一份最小的 `brief.json` 放进沙盒的输出目录：`{"task_json", "outdir", "round", "inputs": {"trainset", "valset"}, "ids": {"trainset", "valset"}, "budget_left": {"compute_hours"}}`（接候选时 `inputs` 再加 `best_candidate`），然后按「步骤和策略子 skill」的流程走；没有引擎时，等完成标记和定时检查都由你自己做。
-3. 每个产物用 `PYTHONPATH=<repo root> python3 -m rsi validate <kind> <dir> --task <task.json>` 校验，通过才算交出。可以运行的 `rsi` 命令只有它和 `rsi score`（算报告里的指标、对照组和差值），不运行 `rsi register` 等其他命令。
-4. 训练命令同样可以在沙盒里直接调用，候选目录用 validate 检查，完成标记放在候选目录之外。
+1. Copy the `trainset` and `valset` (and the candidate to take over, if any) from registered artifacts into the sandbox, paths given by hand; the task definition is `<task.json>`, which must have `resources.onejev`, `search_space` and `search`. No workspace is needed, and the registry is not read.
+2. Write a minimal `brief.json` by hand into the sandbox's output directory: `{"task_json", "outdir", "round", "inputs": {"trainset", "valset"}, "ids": {"trainset", "valset"}, "budget_left": {"compute_hours"}}` (to take over a candidate, add `best_candidate` to `inputs`), then follow the flow in "Steps and strategy sub-skills"; with no engine, you wait for the completion markers and do the check-ins yourself.
+3. Validate every artifact with `PYTHONPATH=<repo root> python3 -m rsi validate <kind> <dir> --task <task.json>`; only an artifact that passes counts as handed in. The only `rsi` commands you may run are this one and `rsi score` (for the metrics, baselines and deltas in the report); do not run `rsi register` or any other command.
+4. The train command can also be called directly in the sandbox; check the candidate directory with validate, and keep the completion marker outside the candidate directory.
 
-## 负责人和版本
+## Owner and version
 
-- 负责人：待指定。本模块在框架仓库的 `modules/train/` 里独立维护（skill、`trsi/`、训练命令 `train`、`recipes/`、`reference/`、`tests/`，见 `README.md`）。
-- 版本：Skill 2.0，`trsi` 1.4.3（`trsi/__init__.py`；训练命令的 `TRSI_VERSION` 和它一致）。
-- 变更：`trsi` 1.4.3（2026-11-25）训练命令只接受 `--producer train`：数据模块不再自己训练验证新训练集，好坏交给本模块和评测（`trsi/` 的代码不变）。`trsi` 1.4.2（2026-11-25）`trsi watch` 读运行目录遇到 OSError 时下一次轮询再读，连续 3 次才算出错。`trsi` 1.4.1（2026-11-25）`trsi launch` 被 ojh 拒绝的重跑不再记卡时（launch 成功后才记重跑和失败）；`trsi watch` 出错时也先结束所有在跑的训练再写 failed；训练命令结束训练出错时仍写标记；后台 collect、install 每次用新的标记（`collect-<k>.done`），换监视进程前先用 `ps` 确认进程号；install_env.sh 由系统的 `python3` 在后台启动，GPU 测试用 `resources.gpu_ids` 里一张空闲卡（`CUDA_VISIBLE_DEVICES`）；训练命令的契约写明 `progress.json`。2026-11-25 `install_env.sh` 装环境并检查，训练缺库或库不兼容时不问用户直接运行（`trsi` 不变）。`trsi` 1.4.0（2026-11-24）collect 给每个试验重新选打分卡（没有别的进程、空闲显存够、ojh 的卡锁），OOM 换卡再打一次，结果记 `scoring_card`；会话不在又没有 `DONE` 的训练算失败；`search.max_configs` 的文字写明按派出算；训练命令只接受 `--producer train`、`data`；`launch --force` 重训一直打包不成的试验；collect 打包好或记为失败后自动删用不上的 checkpoint（不问用户），候选的模型改为硬链接；换监视进程时先起新的再 `kill -9` 旧的。`trsi` 1.3.0（2026-11-24）launch、watch、collect 和训练命令写进度文件 `progress.json`。2.0（2026-11-24）改造成框架的训练调优模块：配置空间来自任务定义，不再单独批准；run.yaml 由 `trsi init` 按简报生成；起点接当前最佳版本的候选；每个试验打包成候选；训练期间以长任务交回、定时检查；两段式交回 `search`；GPU 由 agent 从 `resources.gpu_ids` 里选。1.0（2026-11-23）是独立使用的 Training RSI skill（`trsi` 1.0.0）。
-- 已知限制：`trsi` 没有结束单个试验的命令（用 `tmux kill-session`）；`trsi collect` 一次打包所有跑完的试验，不能只打包一个；默认门槛 0.035 只在 Elliptic 上量过（见 `reference/protocol.md`）。
+- Owner: to be named. This module is maintained on its own in the framework repository's `modules/train/` (the skill, `trsi/`, the train command `train`, `recipes/`, `reference/`, `tests/`; see `README.md`).
+- Version: Skill 2.0, `trsi` 1.5.0 (`trsi/__init__.py`; the train command's `TRSI_VERSION` matches it).
+- Changes: `trsi` 1.5.0 (2026-11-26): with the task's `policy` section, packing fits the decision policy (policy.json, policy_apply.py, predictions_val_raw.jsonl) and model.predict applies it. 2026-11-26 `install_env.sh` also installs and checks numpy, scikit-learn and xgboost for the compare module and data generation, through `modules/common/install_deps.sh` as its step 3; they are not required, so a failure there only warns and never blocks training (`trsi` unchanged). `trsi` 1.4.3 (2026-11-25) the train command accepts only `--producer train`: the data module no longer trains to test a new trainset itself, and whether it is better is left to this module and the judge (the code of `trsi/` is unchanged). `trsi` 1.4.2 (2026-11-25) when `trsi watch` meets an OSError reading a run directory, it reads again at the next poll, and only 3 in a row count as an error. `trsi` 1.4.1 (2026-11-25) a rerun that ojh refuses in `trsi launch` no longer counts GPU hours (the rerun and the failure are recorded only once the launch succeeds); `trsi watch` also first ends all running trainings on an error before writing failed; the train command still writes the marker when ending the training fails; background collect and install use a new marker each time (`collect-<k>.done`), and before the watcher is replaced, `ps` confirms its pid; install_env.sh is started in the background by the system `python3`, and its GPU test uses one free GPU from `resources.gpu_ids` (`CUDA_VISIBLE_DEVICES`); the train command's contract names `progress.json`. 2026-11-25 `install_env.sh` installs and checks the environment, and is run without asking the user when training lacks a library or has an incompatible one (`trsi` unchanged). `trsi` 1.4.0 (2026-11-24) collect chooses the scoring GPU again for each trial (no other process, enough free memory, ojh's GPU lock), scores once more on another GPU after an OOM, and records it in `scoring_card`; a training whose session is gone without `DONE` counts as failed; the text of `search.max_configs` says it counts per dispatch; the train command accepts only `--producer train` and `data`; `launch --force` retrains a trial that keeps failing to pack; collect deletes unneeded checkpoints by itself once a trial is packed or recorded as failed (without asking the user), and candidates' models become hard links; when the watcher is replaced, the new one starts first, then the old one gets `kill -9`. `trsi` 1.3.0 (2026-11-24) launch, watch, collect and the train command write the progress file `progress.json`. 2.0 (2026-11-24) made into the framework's train module: the search space comes from the task definition and is no longer approved separately; run.yaml is generated by `trsi init` from the brief; the start takes over the current best version's candidate; every trial is packed as a candidate; during training, the module hands back as a long job and does check-ins; two-part hand-back with `search`; the agent chooses GPUs from `resources.gpu_ids`. 1.0 (2026-11-23) was the standalone Training RSI skill (`trsi` 1.0.0).
+- Known limitations: `trsi` has no command to end a single trial (use `tmux kill-session`); `trsi collect` packs all finished trials at once and cannot pack just one; the default margin 0.035 was measured only on Elliptic (see `reference/protocol.md`).
 
-## 常见错误
+## Common mistakes
 
-| 现象或错误 | 处理 |
+| Symptom or mistake | What to do |
 |---|---|
-| `trsi launch` 说 outside the task's search_space | 候选超出任务的配置空间。换候选；要扩大配置空间是改任务定义，写进 `questions` |
-| `trsi launch` 说 uses a dead end | 先看死路的原因；前提没变就换候选 |
-| `trsi launch` 说 budget | 简报给的预算不够再跑一个种子：停，复盘后交回 |
-| `trsi launch` 说 no cost estimate | 任务的 `resources.onejev.estimate` 没有这个底座：不跑它，写进 `questions` |
-| `trsi launch` 说 comes after the probe | 先 `trsi collect`、`trsi next`，探针过了才补种子 |
-| `trsi launch` 说 this dispatch (returns included) has tried search.max_configs | 这次派出提的候选数到了上限（退回后再搜也算在内）：不再提新候选，跑完已提的就停 |
-| `trsi launch` 说 not in the task's resources.gpu_ids，或 recipe trains on N card(s) | 换 `resources.gpu_ids` 里的空闲卡，卡数和配方一致 |
-| `trsi launch` 说 already part of this run 或 reused | 同一配置同一种子已经训练过（或还在跑），不会重训，这是预期。但刚结束的试验显示 (running)，说明 collect 还没把它记成 failed：再 `trsi collect`，看到 failed 再 launch |
-| `ojh run` 非零退出（卡忙、放不下、不可行、没有默认配方） | 卡忙就换另一张空闲卡；其余把 ojh 的原话和它列的替代方案写进 `questions`，由用户选 |
-| `trsi collect` 显示 failed | 看运行目录的 `DONE`、`runner.log`、`train-s<种子>.log`，按 onejev-harness 的故障表处理。卡时照记。修好后用同一条 `trsi launch` 命令重跑 |
-| `trsi collect` 显示 unpacked | 打包（`model.predict`、`rsi score`、`rsi validate`）出错，原因在同一行（`trsi next` 也打印）：不重训，下一次 `trsi collect` 再打包；一直不成就用同一条 `trsi launch` 加 `--force` 重训（卡时照记），或在 `record` 和 `notes` 里写明，这个试验不交回 |
-| `trsi collect` 说 no card … can score this candidate now | 逐卡写了原因（别人的进程、空闲显存不够、卡锁被占）：等卡空出来再 `collect`；一直没有就写进 `questions` |
-| 训练因为缺库或库不兼容失败：`ImportError`、`ModuleNotFoundError`；H100、H200 上第 1 步反向就失败，日志是 `Triton >= 3.4.0 and < 3.7.1 on Hopper GPUs produces incorrect results ... install tilelang`（`DONE` 的 stage 是 train）；或日志警告 `causal_conv1d_fn is falling back to its reference PyTorch implementation`（能训练，但慢） | 用户已经授权自动安装，不用问。`<ojh 仓库>` 是 `resources.onejev.python` 去掉末尾的 `/.venv/bin/python`，`<machine>`、`<env_file>` 是 `resources.onejev.machine`、`resources.onejev.env_file`（没有 env_file 就不写 `--env-file`）。先在前台只读检查：`bash <模块目录>/install_env.sh --ojh <ojh 仓库> --machine <machine> --env-file <env_file> --check`（不到一分钟，看缺什么、会做什么，写进 `notes`）。然后一律按表下的写法在后台运行完整的脚本，以 `long_job` 交回：即使 `--check` 说什么都不用做，GPU 测试在内核缓存是空的时候也可能超过 Bash 的 10 分钟（setup.sh、从源码编译更慢）。收到「# 长任务已结束」后读标记第二行的 `exit=<退出码>` 和 `install-<k>.log` 末尾的 summary。退出码 0：把 summary（装了什么、改了机器配置的哪些键、备份和日志的路径）写进 `notes` 和 `record`，再用同一条 `trsi launch` 命令重跑（卡时照记）。退出码非 0：把 failed 行原话写进 `questions`，不重跑。用法见 `README.md`「装环境」 |
-| 训练完成，收尾被 signal 15 杀掉（`DONE` 的 stage 是 finalize） | 机器上的显卡看门狗杀了占着卡空等的进程（见 `reference/lessons.md`）。写进 `questions`；collect 记为 failed 时已删了它的 checkpoint，只能重跑 |
-| `trsi next` 说 incumbent seeds … not finished | 起点的种子还没跑完、没接过来或没打包好：补 `trsi launch <run.yaml> --start --seed 1 --gpus <卡>` 这样的种子，或再 `trsi collect` |
-| `trsi watch` 说 marker exists | 每次 watch 用新的标记路径 |
-| `trsi adopt` 拒绝（不是起点的配置、种子不在 seeds 里、训练集或验证集不同、训练代码不同） | 改为训练起点的种子：`trsi launch <run.yaml> --start --seed 0 --gpus <卡>` |
-| `trsi init` 说任务没有 `resources.onejev.default_config`，或 `best_candidate` 没有 `config_request` | 任务定义或候选缺字段：以 `failed` 交回，`notes` 写原因 |
-| 用 SIGTERM 结束监视进程 | 它会结束所有试验的训练。换卡重跑时用 SIGKILL（`kill -9`） |
-| 定时检查里换了监视进程，却交回旧标记 | 旧标记永远不会写出，引擎一直等。交回新的标记 |
-| 交回 `long_job` 后还在等、反复看日志 | 浪费额度：交回后结束会话，引擎到时会让你检查 |
-| 直接 `ojh run`、用训练命令跑试验，或手改 run.yaml、exp.yaml、`archive.jsonl`、`incumbent.yaml`、`trials/` | 记账、复用、比较和打包都会漏掉它：试验只经 `trsi launch` |
-| 自己运行 `ojh cleanup`，或手工删 checkpoint、候选目录 | 用不上的 checkpoint 由 `trsi collect` 自动删（第 7 步）；候选目录和 ojh 运行目录不删 |
-| `trsi collect` 说 checkpoints not deleted | 下一次 collect 再删；磁盘因此不够时写进 `questions` |
-| 读评测集、测试集或任务 `data.sources` 写的原始数据；用评测集挑配置或 checkpoint | 违反隔离：只用简报给的训练集和验证集 |
+| `trsi launch` says outside the task's search_space | The candidate is outside the task's search space. Change the candidate; widening the search space is changing the task definition: write it into `questions` |
+| `trsi launch` says uses a dead end | First read why it is a dead end; when the premise has not changed, change the candidate |
+| `trsi launch` says budget | The budget the brief gives cannot pay for another seed: stop, review, then hand back |
+| `trsi launch` says no cost estimate | The task's `resources.onejev.estimate` lacks this base: do not run it; write it into `questions` |
+| `trsi launch` says comes after the probe | First `trsi collect` and `trsi next`; add seeds only once the probe has passed |
+| `trsi launch` says this dispatch (returns included) has tried search.max_configs | The candidates this dispatch proposed have reached the cap (searches after a return count too): propose no new candidates, and stop once those proposed have run |
+| `trsi launch` says not in the task's resources.gpu_ids, or recipe trains on N card(s) | Switch to free GPUs in `resources.gpu_ids`, as many as the recipe needs |
+| `trsi launch` says already part of this run or reused | The same config with the same seed has trained already (or is still running) and is not retrained; this is expected. But when a trial that just ended shows (running), collect has not recorded it as failed yet: `trsi collect` again, and launch once it shows failed |
+| `ojh run` exits non-zero (GPU busy, does not fit, infeasible, no default recipe) | GPU busy: switch to another free GPU; otherwise write ojh's exact words and the alternatives it lists into `questions`, for the user to choose |
+| `trsi collect` shows failed | Look at the run directory's `DONE`, `runner.log` and `train-s<seed>.log`, and handle it by onejev-harness's troubleshooting table. GPU hours still count. Once fixed, rerun with the same `trsi launch` command |
+| `trsi collect` shows unpacked | Packing (`model.predict`, `rsi score`, `rsi validate`) failed, the reason on the same line (`trsi next` prints it too): do not retrain; the next `trsi collect` packs it again; when it never succeeds, retrain with the same `trsi launch` plus `--force` (GPU hours still count), or state in the `record` and `notes` that this trial is not handed back |
+| `trsi collect` says no card … can score this candidate now | It gives a reason per GPU (someone else's process, too little free memory, GPU lock held): `collect` again once a GPU is free; when none ever is, write it into `questions` |
+| Training fails for a missing or incompatible library: `ImportError`, `ModuleNotFoundError`; on H100 or H200 the first backward step fails with the log `Triton >= 3.4.0 and < 3.7.1 on Hopper GPUs produces incorrect results ... install tilelang` (`DONE`'s stage is train); or the log warns `causal_conv1d_fn is falling back to its reference PyTorch implementation` (it trains, but slowly) | The user has already authorised automatic installs; no need to ask. `<ojh_repo>` is `resources.onejev.python` without the trailing `/.venv/bin/python`; `<machine>` and `<env_file>` are `resources.onejev.machine` and `resources.onejev.env_file` (without env_file, leave out `--env-file`). First a read-only check in the foreground: `bash <module_dir>/install_env.sh --ojh <ojh_repo> --machine <machine> --env-file <env_file> --check` (under a minute; see what is missing and what it would do, and write it into `notes`). Then always run the full script in the background as shown below the table, and hand back `long_job`: even when `--check` says nothing needs doing, the GPU test can take longer than Bash's 10 minutes when the kernel cache is empty (setup.sh and builds from source are slower still). On `# Long job finished`, read `exit=<exit code>` on the marker's second line and the summary at the end of `install-<k>.log`. Exit code 0: write the summary (what was installed, which keys of the machine config changed, the paths of the backups and logs) into `notes` and the `record`, then rerun with the same `trsi launch` command (GPU hours still count). Non-zero exit code: write the failed lines word for word into `questions`, and do not rerun. Usage in "Installing the environment" of `README.md` |
+| The training finished, and its wrap-up was killed by signal 15 (`DONE`'s stage is finalize) | The machine's GPU watchdog killed a process that held a GPU idle (see `reference/lessons.md`). Write it into `questions`; collect has already deleted its checkpoints when recording it as failed, so it can only be rerun |
+| `trsi next` says incumbent seeds … not finished | The start's seeds have not finished, been taken over or been packed yet: add seeds such as `trsi launch <run.yaml> --start --seed 1 --gpus <gpus>`, or `trsi collect` again |
+| `trsi watch` says marker exists | Use a new marker path for every watch |
+| `trsi adopt` refuses (not the start's config, a seed not in seeds, a different trainset or valset, different training code) | Train the start's seed instead: `trsi launch <run.yaml> --start --seed 0 --gpus <gpus>` |
+| `trsi init` says the task has no `resources.onejev.default_config`, or `best_candidate` has no `config_request` | The task definition or the candidate lacks a field: hand back with `failed`, the reason in `notes` |
+| Ending the watcher with SIGTERM | It ends the training of all trials. When rerunning on another GPU, use SIGKILL (`kill -9`) |
+| Replacing the watcher during a check-in but handing back the old marker | The old marker is never written, and the engine waits forever. Hand back the new marker |
+| Still waiting after handing back `long_job`, reading the logs again and again | Wastes quota: end the session after the hand-back; the engine will have you check in time |
+| `ojh run` directly, running trials with the train command, or editing run.yaml, exp.yaml, `archive.jsonl`, `incumbent.yaml` or `trials/` by hand | The books, reuse, comparison and packing all miss it: trials go only through `trsi launch` |
+| Running `ojh cleanup` yourself, or deleting checkpoints or candidate directories by hand | Checkpoints no longer needed are deleted by `trsi collect` by itself (step 7); candidate directories and ojh run directories are never deleted |
+| `trsi collect` says checkpoints not deleted | The next collect deletes them; when the disk runs short because of it, write it into `questions` |
+| Reading the evalset, the testset or the raw data the task's `data.sources` names; choosing configs or checkpoints with the evalset | Breaks the isolation: use only the trainset and valset the brief gives |
 
-后台运行 install_env.sh（`<k>` 每次加一，启动前 `rm -f <outdir>/install-<k>.done <outdir>/install-<k>.done.pid`；照第 7 步后台 collect 的写法，标记旁的 `<marker>.pid` 由 sh 自己写；标记第一行总是 ok，这样它失败时派出不会被记为失败；第二行是 `exit=<install_env.sh 的退出码>`）。起后台的是系统的 `python3`，不是 `<py>`：要装的正是这个 venv，它可能缺东西或坏了，那样的话 `<py>` 起不来，什么都不会运行，也不会写标记。GPU 测试只用 `resources.gpu_ids` 里的一张空闲卡：用 `nvidia-smi --query-gpu=index,uuid,memory.used --format=csv` 和 `nvidia-smi --query-compute-apps=gpu_uuid --format=csv` 挑一张 `resources.gpu_ids`（没写就是全部卡）里没有计算进程的卡，把它的 UUID 作为 `CUDA_VISIBLE_DEVICES` 传给脚本（不传时脚本会在所有卡里挑，可能用到别人的卡）：
+Running install_env.sh in the background (`<k>` one more each time; before starting, `rm -f <outdir>/install-<k>.done <outdir>/install-<k>.done.pid`; as with the background collect of step 7, sh writes the `<marker>.pid` next to the marker itself; the marker's first line is always ok, so that a failure of the script does not record the dispatch as failed; the second line is `exit=<install_env.sh's exit code>`). The background job is started by the system `python3`, not `<py>`: the venv being installed is that very one, which may lack things or be broken, and then `<py>` would not start, nothing would run and no marker would be written. The GPU test uses only one free GPU in `resources.gpu_ids`: with `nvidia-smi --query-gpu=index,uuid,memory.used --format=csv` and `nvidia-smi --query-compute-apps=gpu_uuid --format=csv`, pick a GPU in `resources.gpu_ids` (all GPUs when not set) with no compute process, and pass its UUID to the script as `CUDA_VISIBLE_DEVICES` (without it the script picks among all GPUs and may use someone else's):
 
 ```
-python3 -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' 'printf "%s\n%s\n" $$ "$(date +%s)" > <outdir>/install-<k>.done.pid; CUDA_VISIBLE_DEVICES=<卡的 UUID> bash <模块目录>/install_env.sh --ojh <ojh 仓库> --machine <machine> --env-file <env_file> > <outdir>/install-<k>.log 2>&1; printf "ok\nexit=%s\n" $? > <outdir>/install-<k>.done'
+python3 -c 'import subprocess, sys; subprocess.Popen(["sh", "-c", sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' 'printf "%s\n%s\n" $$ "$(date +%s)" > <outdir>/install-<k>.done.pid; CUDA_VISIBLE_DEVICES=<gpu_uuid> bash <module_dir>/install_env.sh --ojh <ojh_repo> --machine <machine> --env-file <env_file> > <outdir>/install-<k>.log 2>&1; printf "ok\nexit=%s\n" $? > <outdir>/install-<k>.done'
 ```
 
-然后写 `handback.json`：`status` 是 `long_job`，`marker` 是 `<outdir>/install-<k>.done` 的绝对路径，`artifacts` 是 `[]`。
+Then write `handback.json`: `status` is `long_job`, `marker` is the absolute path of `<outdir>/install-<k>.done`, `artifacts` is `[]`.

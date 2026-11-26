@@ -1,63 +1,91 @@
-# 任务说明：elliptic-addr-txhist
+# Task: elliptic-addr-txhist
 
-本文件是 `task.json`（版本 1，模板 `task.template.json`）的人读版本，章节与字段一一对应。占位符（尖括号里的大写名字；卡号列表和 GPU 小时估计这两个连两边的引号一起换）在两个文件里相同，填的时候用同一条命令一起改（见 `examples/elliptic_onejev/README.md`）。改动后必须同步 `task.json`，并升 `version`。
+This file is the version of `task.json` (version 1, template `task.template.json`) for people; its sections match the fields one to one. The placeholders (upper-case names in angle brackets; the GPU list, the GPU-hour estimates and the two dollar budgets are replaced together with the quotes around them) are the same in both files; fill them in with one command for both (see `examples/elliptic_onejev/README.md`). After any change, update `task.json` to match and raise `version`.
 
-## 决策（`decision`）
+## Decision (`decision`)
 
-- 类型（`type`）：binary
-- 决策说明（`instructions`）：Is this Bitcoin address involved in illicit activity?
-- 标签（`labels`）与含义（`label_meanings`）：
-  - `yes`：illicit: the address is involved in illicit activity
-  - `no`：licit: the address is not involved in illicit activity
-- 正类（`positive`）：`yes`
+- Type (`type`): binary
+- Decision instructions (`instructions`): Is this Bitcoin address involved in illicit activity?
+- Labels (`labels`) and their meanings (`label_meanings`):
+  - `yes`: illicit: the address is involved in illicit activity
+  - `no`: licit: the address is not involved in illicit activity
+- Positive class (`positive`): `yes`
 
-## 输入（`input`）
+## Input (`input`)
 
-- 格式（`format`）：object
-- 说明（`description`）：The transaction history of one Elliptic++ bitcoin address up to its time step: the OneJev txhist state as 01_build_data.sh builds it, kept as built. An object with three top-level keys: entity (what the object describes), summary (an overview of the history) and transactions (the address's transactions).
+- Format (`format`): object
+- Description (`description`): The transaction history of one Elliptic++ bitcoin address up to its time step: the OneJev txhist state as 01_build_data.sh builds it, kept as built. An object with three top-level keys: entity (what the object describes), summary (an overview of the history) and transactions (the address's transactions).
+- Verbatim paths (`verbatim`): none (`[]`): the state holds no request text; data generation and prompt variants may change any transaction field
 
-## 数据（`data`）
+## Features (`features`)
 
-- 原始数据来源（`sources`）：`<ROWS_DIR>`：01_build_data.sh 写的 Elliptic++ 地址级 OneJev txhist 行：train.jsonl（时间步 1–29）、val.jsonl（30–34）、test.jsonl（35–49）；val_sub4000.jsonl 不用
-- 允许的标签来源（`label_sources`）：human
-- 行说明（`rows`）：一行一个（地址，时间步）：train、val、test.jsonl 的每一行写成一行，id 沿用上游的（addr_<时间步>_<地址>）；state 原样（OneJev txhist：entity、summary、transactions）；question 用任务的问题；target 原样（yes 是 illicit），上游 meta.y 只用来核对它；meta.state_id 是地址；时间步写进 meta.extra.step（上游 meta.step，没有时从 id 取）；上游 meta 的 y、post43、seen_in_train 不写出；label_source 是 human，n_obs 是 1
-  - 预期（`expect`）：291419 行，其中 `yes` 14720 行、`no` 276699 行
-- 切分规则（`split`）：只定了各集合的行数（`sizes`）：trainset 1000、valset 500、evalset 500、testset 1000（调试规模）。其余（by、key、ranges 或 fractions、stratify、unit、seed）由数据模块在第一轮按数据补全，记成任务定义的新版本（本文件末尾会多一节「切分规则」）
+How a state becomes numbers for ③ Compare's CPU baselines and for data generation.
 
-## 数据质量检查（`quality_checks`）
+- Adapter (`adapter`): `examples/elliptic_onejev/features_adapter.py`: the generic model view plus per-role counts and sums of the transactions; only the transaction fields are editable; `repair` recomputes the summary from the transactions and `check` holds the history's consistency rules
+- Constraints (`constraints`), run before the adapter's own repair and check:
+  - every transaction number is 0 or more (`nonneg`): `steps_ago`, `tx_total_btc`, `tx_fee_btc`, `tx_num_input_addresses`, `tx_num_output_addresses`, `tx_smallest_output_btc`, `tx_largest_output_btc` of each `transactions[]`;
+  - whole numbers (`integer`): `steps_ago`, `tx_num_input_addresses`, `tx_num_output_addresses`;
+  - in order (`order`): `tx_smallest_output_btc` <= `tx_largest_output_btc` <= `tx_total_btc`
 
-- 最少行数（`min_rows`）：1000
-- 最少正例行数（`min_positive_rows`）：20
+```json
+{
+  "adapter": "examples/elliptic_onejev/features_adapter.py",
+  "constraints": [
+    {"nonneg": ["transactions[].steps_ago", "transactions[].tx_total_btc", "transactions[].tx_fee_btc",
+                "transactions[].tx_num_input_addresses", "transactions[].tx_num_output_addresses",
+                "transactions[].tx_smallest_output_btc", "transactions[].tx_largest_output_btc"]},
+    {"integer": ["transactions[].steps_ago", "transactions[].tx_num_input_addresses",
+                 "transactions[].tx_num_output_addresses"]},
+    {"order": ["transactions[].tx_smallest_output_btc", "transactions[].tx_largest_output_btc",
+               "transactions[].tx_total_btc"]}
+  ]
+}
+```
 
-## 指标（`metrics`）
+## Data (`data`)
 
-- 主指标（`primary`）：auprc，越高越好（`higher_is_better`: true）
-- 其他指标（`others`）：brier、log_loss、auc、accuracy、macro_f1
-- 必须对比的基线（`baselines`）：majority
-- 差值置信区间（`ci`）：抽样次数 `resamples` 1000、随机种子 `seed` 0、置信水平 `level` 0.95
+- Raw data sources (`sources`): `<ROWS_DIR>`: the Elliptic++ address-level OneJev txhist rows 01_build_data.sh writes: train.jsonl (time steps 1–29), val.jsonl (30–34), test.jsonl (35–49); val_sub4000.jsonl is not used
+- Allowed label sources (`label_sources`): human
+- Row description (`rows`): one row per (address, time step): each row of train, val and test.jsonl becomes one row, keeping the upstream id (addr_<time step>_<address>); state as it is (OneJev txhist: entity, summary, transactions); question is the task's question; target as it is (yes is illicit), the upstream meta.y used only to check it; meta.state_id is the address; the time step goes into meta.extra.step (the upstream meta.step, or taken from the id when missing); the upstream meta's y, post43, seen_in_train are not written out; label_source is human, n_obs is 1
+  - Expected (`expect`): 291419 rows, of which 14720 `yes` and 276699 `no`
+- Split rule (`split`): only each set's row count is set (`sizes`): trainset 1000, valset 500, evalset 500, testset 1000 (debug scale). The rest (by, key, ranges or fractions, stratify, unit, seed) the data module fills in from the data in round 1, recorded as a new version of the task definition (a section "Split rule" is added at the end of this file)
 
-## 晋升规则（`promotion_rule`）
+## Data quality checks (`quality_checks`)
 
-- 最小提升（`min_delta`）：0.01
-- 置信区间下界要求（`ci_lower_min`）：null（不要求）
-- 护栏（`guards`）：brier 越低越好，最多退步 0.005；log_loss 越低越好，最多退步 0.02
+- Minimum rows (`min_rows`): 1000
+- Minimum positive rows (`min_positive_rows`): 20
+- Largest share of generated rows (`max_synthetic_share`): 0.3 (rows the data module generates with dgen, `meta.source` starting with `dgen:`)
 
-## 停止条件（`stop`）
+## Metrics (`metrics`)
 
-- 目标值（`target`）：null（不设）
-- 最大轮数（`max_rounds`）：1
-- 连续无晋升轮数（`patience`）：不写，为 3
-- 每轮最多尝试次数（`max_attempts_per_round`）：不写，为 3
+- Primary metric (`primary`): auprc, higher is better (`higher_is_better`: true)
+- Other metrics (`others`): brier, log_loss, auc, accuracy, macro_f1
+- Baselines that must be compared (`baselines`): majority
+- Confidence interval of the delta (`ci`): resamples `resamples` 1000, random seed `seed` 0, confidence level `level` 0.95
 
-## 预算（`budget`）
+## Promotion rule (`promotion_rule`)
 
-- 算力小时（`compute_hours`）：8
-- 标注条数（`annotation_items`）：null
-- API 费用（`api_cost`）：null
+- Minimum gain (`min_delta`): 0.01
+- Required lower bound of the confidence interval (`ci_lower_min`): null (not required)
+- Guards (`guards`): brier, lower is better, regression at most 0.005; log_loss, lower is better, regression at most 0.02
 
-## 资源（`resources`）
+## Stop conditions (`stop`)
 
-训练命令 `train_command` 是 `<REPO_ROOT>/modules/train/train`；onejev-harness 的 python、ojh、机器配置和环境文件，没有最佳版本时的起点配置（joey-1 单卡默认配方），joey-1 一次训练的 GPU 小时估计；允许使用的卡号：
+- Target (`target`): null (not set)
+- Maximum rounds (`max_rounds`): 3
+- Rounds in a row without promotion (`patience`): not written, 3
+- Maximum attempts per round (`max_attempts_per_round`): not written, 3
+
+## Budget (`budget`)
+
+- Compute hours (`compute_hours`): 8 (training, ③ Compare's GPU baselines and the data module's pool scoring over three rounds)
+- Annotation items (`annotation_items`): null
+- Data LLM cost in dollars (`api_cost`: the LLM calls that generate or review data and paraphrase prompts): "<API_USD_BUDGET>"
+- Agent cost in dollars (`agent_cost`: the module and decision agents' sessions): "<AGENT_USD_BUDGET>"
+
+## Resources (`resources`)
+
+The train command `train_command` is `<REPO_ROOT>/modules/train/train`; onejev-harness's python, ojh, machine config and environment file, the starting config when there is no best version (joey-1's single-GPU default recipe), and the GPU hours one joey-1 training and one elephant-1 training (③ Compare's team recipe) are estimated to take; the GPU numbers allowed:
 
 ```json
 {
@@ -68,39 +96,59 @@
     "machine": "<OJH_MACHINE>",
     "env_file": "<OJH_ENV_FILE>",
     "default_config": {"base": "joey-1", "recipe": null, "overrides": {}, "seed": 0, "max_steps": null},
-    "estimate": {"joey-1": "<JOEY1_GPU_HOURS>"}
+    "estimate": {"joey-1": "<JOEY1_GPU_HOURS>", "elephant-1": "<ELEPHANT1_GPU_HOURS>"}
   },
   "gpu_ids": "<GPU_IDS>"
 }
 ```
 
-## 配置空间（`search_space`）和搜索设置（`search`）
+## Config space (`search_space`) and search settings (`search`)
 
-- 学习率（`overrides.onejev.lr`）：5e-06、1e-05、2e-05
-- 预热比例（`overrides.onejev.warmup_frac`）：0.03、0.1
-- 种子（`seed`）：0、1、2
-- 搜索设置：最多 3 个候选（`max_configs`），探针门槛 `probe_margin` 0.01，接受门槛 `accept_margin` 0.01
+- Learning rate (`overrides.onejev.lr`): 5e-06, 1e-05, 2e-05
+- Warmup fraction (`overrides.onejev.warmup_frac`): 0.03, 0.1
+- Seed (`seed`): 0, 1, 2
+- Search settings: at most 3 candidates (`max_configs`), probe margin `probe_margin` 0.01, accept margin `accept_margin` 0.01
 
-## 评测集使用上限（`eval_use_limit`）
+## Decision policy (`policy`)
+
+Every candidate and every ③ Compare baseline fits a calibration and a decision threshold on its valset predictions, chosen by F1 (`objective`: f1); the other settings take their defaults (`policy_settings`: calibrations none, platt, temperature, isotonic; the rule max_f1; the valset split by time when the data split is by time, else by address).
+
+```json
+{"objective": "f1"}
+```
+
+## ③ Compare (`compare`)
+
+③ Compare runs between ② Train & tune and ④ Deliver and is a report only, never a gate. Its baselines (`baselines`): logistic regression (`lr`), gradient-boosted trees (`gbdt`) and an MLP (`mlp`) on the features above, on the CPU; joey-1 scored with no training (`zero_shot`) and with 4 labelled trainset examples in the prompt (`few_shot`); and the team's existing recipe (`team_recipe`): elephant-1 with the LoRA recipe `recipes/elephant_lora_1g.yaml` (1 GPU), no changes, seed 0, no step limit, trained once per trainset by the train command. The module skips a GPU baseline when `budget_left.compute_hours` is less than its estimate (`resources.onejev.estimate.elephant-1` for the team recipe). The other settings take their defaults (`compare_settings`):
+
+```json
+{
+  "baselines": ["lr", "gbdt", "mlp", "zero_shot", "few_shot", "team_recipe"],
+  "team_recipe": {"base": "elephant-1", "recipe": "recipes/elephant_lora_1g.yaml", "overrides": {}, "seed": 0,
+                  "max_steps": null}
+}
+```
+
+## Evalset use limit (`eval_use_limit`)
 
 3
 
-## 交付（`delivery`）
+## Delivery (`delivery`)
 
-- 复现容差（`reproduction_tolerance`）：0.0001
-- 允许的决策翻转比例（`max_decision_mismatch_rate`）：0.001
+- Reproduction tolerance (`reproduction_tolerance`): 0.0001
+- Allowed share of flipped decisions (`max_decision_mismatch_rate`): 0.001
 
-## 流程（`flow`）
+## Flow (`flow`)
 
-- 定时检查间隔（`checkin_minutes`）：30 分钟
-- 长任务结束后自动接着收集结果的次数上限（`max_continues`）：30
+- Check-in interval (`checkin_minutes`): 30 minutes
+- Most automatic continuations to collect results after a long job ends (`max_continues`): 30
 
-## 模块 agent 的调用（`runner`）
+## Calling module agents (`runner`)
 
 ```json
 {"claude": {"command": ["<CLAUDE_BIN>", "-p", "--dangerously-skip-permissions", "--output-format", "json"]}}
 ```
 
-## 需要审批的事项（`approvals`）
+## Items needing approval (`approvals`)
 
-task_change、over_budget、use_testset、refresh_sets、plan、delete。`task_change`、`refresh_sets`、`use_testset` 无论是否列出都要审批（第一轮补全切分规则的新版本除外）。
+task_change, over_budget, use_testset, refresh_sets, plan, delete. `task_change`, `refresh_sets` and `use_testset` always need approval whether listed or not (except the new version that fills in the split rule in round 1).

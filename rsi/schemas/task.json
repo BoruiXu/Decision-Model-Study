@@ -26,7 +26,31 @@
       "properties": {
         "format": {"type": "string", "enum": ["messages", "fields", "object"]},
         "description": {"type": "string"},
-        "fields": {"type": "array", "items": {"type": "string"}}
+        "fields": {"type": "array", "items": {"type": "string"}},
+        "verbatim": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {"type": "string", "minLength": 1},
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "nonneg": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "integer": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "sum": {"type": "string", "minLength": 1},
+              "of": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+              "order": {"type": "array", "minItems": 2, "items": {"type": "string", "minLength": 1}},
+              "zero_if_zero": {"type": "string", "minLength": 1},
+              "then": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        }
       }
     },
     "data": {
@@ -124,6 +148,10 @@
             "seed": {"type": "integer"},
             "level": {"type": "number"}
           }
+        },
+        "costs": {
+          "type": "object",
+          "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}}
         }
       }
     },
@@ -167,7 +195,8 @@
       "properties": {
         "compute_hours": {"type": ["number", "null"]},
         "annotation_items": {"type": ["number", "null"]},
-        "api_cost": {"type": ["number", "null"]}
+        "api_cost": {"type": ["number", "null"]},
+        "agent_cost": {"type": ["number", "null"]}
       }
     },
     "resources": {
@@ -188,6 +217,83 @@
         "probe_margin": {"type": "number", "minimum": 0},
         "accept_margin": {"type": "number", "minimum": 0},
         "guards": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}}
+      }
+    },
+    "compare": {
+      "type": "object",
+      "required": ["baselines"],
+      "additionalProperties": false,
+      "properties": {
+        "baselines": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}},
+        "seed": {"type": "integer"},
+        "python": {"type": ["string", "null"], "minLength": 1},
+        "max_train_rows": {"type": ["integer", "null"], "minimum": 1},
+        "grids": {"type": "object", "additionalProperties": {"type": "object"}},
+        "zero_shot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {"base": {"type": ["string", "null"], "minLength": 1}}
+        },
+        "few_shot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "base": {"type": ["string", "null"], "minLength": 1},
+            "k": {"type": "integer", "minimum": 1},
+            "max_example_chars": {"type": "integer", "minimum": 1}
+          }
+        },
+        "team_recipe": {
+          "type": "object",
+          "required": ["base", "recipe", "overrides", "seed", "max_steps"],
+          "additionalProperties": false,
+          "properties": {
+            "base": {"type": ["string", "null"], "minLength": 1},
+            "recipe": {"type": ["string", "null"], "minLength": 1},
+            "overrides": {"type": "object"},
+            "seed": {"type": ["integer", "null"]},
+            "max_steps": {"type": ["integer", "null"], "minimum": 1}
+          }
+        },
+        "gpu_hours": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objective": {"type": "string", "minLength": 1},
+        "calibrations": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "string", "enum": ["none", "platt", "temperature", "isotonic"]}
+        },
+        "rules": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["rule"],
+            "additionalProperties": false,
+            "properties": {
+              "rule": {"type": "string",
+                       "enum": ["max_f1", "cost", "precision_at", "recall_at", "top_frac", "fixed", "argmax"]},
+              "target": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+              "frac": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+              "value": {"type": "number"},
+              "cost_fp": {"type": "number", "minimum": 0},
+              "cost_fn": {"type": "number", "minimum": 0}
+            }
+          }
+        },
+        "split": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "by": {"type": "string", "enum": ["time", "group"]},
+            "key": {"type": "string", "pattern": "[^.]+(\\.[^.]+)*"},
+            "select_fraction": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "min_lo": {"type": "number"}
       }
     },
     "eval_use_limit": {"type": "integer", "minimum": 1},
@@ -236,6 +342,20 @@
             "timeout_s": {"type": "number", "minimum": 1},
             "setting_sources": {"type": "array", "minItems": 1,
                                 "items": {"type": "string", "enum": ["user", "project", "local"]}}
+          }
+        },
+        "code": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeout_s": {"type": "number", "minimum": 1},
+            "commands": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "compare": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+              }
+            }
           }
         }
       }

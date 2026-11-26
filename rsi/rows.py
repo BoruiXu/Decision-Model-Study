@@ -1,12 +1,13 @@
 """Task definition and decision-row checks (task-agnostic, stdlib only).
 
-Dataset rows are OneJev rows (docs/interfaces/README.md, 决策样本行): `id`, `state`, `question`, `target`,
+Dataset rows are OneJev rows (docs/interfaces/README.md, Decision rows): `id`, `state`, `question`, `target`,
 `meta` (with `state_id`) and `split`. Rows of workspaces from before that format carry `input` and `meta.group`
 instead of `state` and `meta.state_id`: state_of and group_of read both, so old rows are still read.
 """
 import hashlib
 import json
 import math
+import os
 
 from .schema import load_schema, validate
 
@@ -43,6 +44,29 @@ def input_row_of(row):
 def state_of(row):
     """The state (model input) of a row: its `state`, or its `input` in a row of an old workspace."""
     return row["state"] if "state" in row else row.get("input")
+
+
+GENERATED_PREFIX = "dgen:"  # the meta.source prefix of a row the data module generated (modules/data/dgen)
+
+
+def _extra(row):
+    meta = row.get("meta") if isinstance(row, dict) else None
+    extra = meta.get("extra") if isinstance(meta, dict) else None
+    return extra if isinstance(extra, dict) else None
+
+
+def is_variant(row):
+    """Whether a row is a prompt variant (meta.extra.variant; rsi.variants): a rewrite of its seed's prompt, held only
+    by a trainset."""
+    extra = _extra(row)
+    return extra is not None and "variant" in extra
+
+
+def is_generated(row):
+    """Whether the data module generated the row (meta.source starting with "dgen:")."""
+    meta = row.get("meta") if isinstance(row, dict) else None
+    source = meta.get("source") if isinstance(meta, dict) else None
+    return isinstance(source, str) and source.startswith(GENERATED_PREFIX)
 
 
 def group_of(row):
@@ -134,10 +158,13 @@ def check_task(task):
         named += [("$.metrics.others[%d]" % i, n) for i, n in enumerate(m["others"])]
         named += [("$.promotion_rule.guards[%d].metric" % i, g["metric"])
                   for i, g in enumerate(task["promotion_rule"]["guards"])]
+        if (task.get("policy") or {}).get("objective") is not None:
+            named.append(("$.policy.objective", task["policy"]["objective"]))
         for where, name in named:
             if name in BINARY_ONLY:
                 errors.append("%s: %s is defined for binary tasks only (this task's decision type is %s)"
                               % (where, name, d["type"]))
+    errors += _cost_errors(task) + _policy_errors(task)
     tol = task.get("delivery", {}).get("reproduction_tolerance")
     if tol is not None and not tol > 0:
         errors.append("$.delivery.reproduction_tolerance: must be greater than 0 (got %s)" % tol)
@@ -156,16 +183,84 @@ def check_task(task):
             errors.append("%s: %s is %s-is-better as rsi computes it, so this must be %s"
                           % (where, name, "higher" if HIGHER_IS_BETTER[name] else "lower",
                              "true" if HIGHER_IS_BETTER[name] else "false"))
-    # The training-tuning module searches only the search space the user approved (rsi.space).
+    # The train module searches only the search space the user approved (rsi.space).
     if "search_space" in task:
         from .space import check_space  # rsi.space imports rsi.rules only; kept local like the metrics import
         errors += check_space(task["search_space"])
     seeds = task.get("search", {}).get("seeds")
     if seeds is not None and len(set(seeds)) != len(seeds):
         errors.append("$.search.seeds: the seeds must be distinct (got %s)" % seeds)
+    # ③ Compare trains each named baseline once: a name listed twice would be two baselines of one name.
+    names = task.get("compare", {}).get("baselines", [])
+    if len(set(names)) != len(names):
+        errors.append("$.compare.baselines: each baseline is named once (got %s)" % ", ".join(names))
     # data.sources paths, data.rows and the split rule data.split (docs/interfaces/task.md, data).
     from .datasplit import check_data  # kept local like the space import
     errors += check_data(task)
+    # features.adapter: a file that exists (docs/interfaces/task.md, features).
+    from .rules import adapter_path  # kept local like the space import
+    path = adapter_path(task)
+    if path is not None and not os.path.isfile(path):
+        errors.append("$.features.adapter: %s is not a file (a relative path is taken from the repository root)"
+                      % path)
+    return errors
+
+
+def _cost_errors(task):
+    """metrics.costs: true label -> decision -> cost, both levels keyed by exactly the task's labels; expected_cost,
+    wherever the task names it, needs it."""
+    m, labels = task["metrics"], task["decision"]["labels"]
+    costs = m.get("costs")
+    errors = []
+    if costs is not None and (set(costs) != set(labels) or any(set(row) != set(labels) for row in costs.values())):
+        errors.append("$.metrics.costs: the keys must be the task's labels at both levels (true label -> decision -> "
+                      "cost; labels %s)" % ", ".join(labels))
+    if not costs:
+        named = [("$.metrics.primary", m["primary"])]
+        named += [("$.metrics.others[%d]" % i, n) for i, n in enumerate(m["others"])]
+        named += [("$.promotion_rule.guards[%d].metric" % i, g["metric"])
+                  for i, g in enumerate(task["promotion_rule"]["guards"])]
+        named.append(("$.policy.objective", (task.get("policy") or {}).get("objective")))
+        errors += ["%s: expected_cost needs metrics.costs (true label -> decision -> cost)" % where
+                   for where, name in named if name == "expected_cost"]
+    return errors
+
+
+def _policy_errors(task):
+    """The task's policy section (docs/interfaces/task.md, policy): an objective rsi computes, calibrations and
+    threshold rules a non-binary task can use, each rule's parameters, and its split."""
+    from .metrics import KNOWN_METRICS  # rsi.metrics imports this module (group_of)
+    from .rules import BINARY_CALIBRATIONS, THRESHOLD_RULES
+    p = task.get("policy")
+    if p is None:
+        return []
+    errors = []
+    kind = task["decision"]["type"]
+    objective = p.get("objective")
+    if objective is not None and objective not in KNOWN_METRICS:
+        errors.append("$.policy.objective: %r is not a metric rsi computes (%s)"
+                      % (objective, ", ".join(KNOWN_METRICS)))
+    if kind != "binary":
+        errors += ["$.policy.calibrations[%d]: %s is for binary tasks only (this task's decision type is %s; use none "
+                   "or temperature)" % (i, c, kind) for i, c in enumerate(p.get("calibrations", []))
+                   if c in BINARY_CALIBRATIONS]
+    needs = {"precision_at": "target", "recall_at": "target", "top_frac": "frac", "fixed": "value"}
+    for i, r in enumerate(p.get("rules", [])):
+        where, name = "$.policy.rules[%d]" % i, r["rule"]
+        if name in THRESHOLD_RULES and kind != "binary":
+            errors.append("%s: %s is a threshold rule, for binary tasks only (this task's decision type is %s; use "
+                          "argmax)" % (where, name, kind))
+        if name in needs and needs[name] not in r:
+            errors.append("%s: %s needs %s" % (where, name, needs[name]))
+        if name == "cost" and not ("cost_fp" in r and "cost_fn" in r) and not task["metrics"].get("costs"):
+            errors.append("%s: cost needs cost_fp and cost_fn, or metrics.costs" % where)
+    split = p.get("split") or {}
+    f = split.get("select_fraction")
+    if f is not None and not 0 < f < 1:
+        errors.append("$.policy.split.select_fraction: must be strictly between 0 and 1 (got %s)" % f)
+    data_by = ((task.get("data") or {}).get("split") or {}).get("by")
+    if split.get("by") == "time" and "key" not in split and data_by != "time":
+        errors.append("$.policy.split.key: a time split needs a key (the task's data.split is not by time)")
     return errors
 
 
@@ -209,23 +304,31 @@ def check_target(target, task, tol=TARGET_TOL):
     return errors
 
 
-def check_question(question, task):
-    """A row's question must be question_of(task): errors name the parts that differ."""
-    want = question_of(task)
+def check_question(question, task, variant=None):
+    """A row's question must be question_of(task), or with `variant` (a prompt-variant spec; a variant row of a
+    trainset) the spec's question (rsi.variants.question): errors name the parts that differ."""
+    if variant is None:
+        want = question_of(task)
+        instructions, meanings = "the task's decision.instructions", "the task's label_meanings"
+    else:
+        from .variants import question as variant_question  # rsi.variants imports this module
+        want = variant_question(variant, task)
+        instructions = "the instructions of prompt variant %s (the task's when it has none)" % variant.get("id")
+        meanings = "the criteria of prompt variant %s (the task's label_meanings when it has none)" % variant.get("id")
     if question == want:
         return []
     if not isinstance(question, dict):
         return ["question: expected the task's question, an object {type, instructions, criteria} "
-                "(docs/interfaces/README.md, 决策样本行)"]
+                "(docs/interfaces/README.md, Decision rows)"]
     errors = []
     if question.get("type") != want["type"]:
         errors.append("question.type: expected %r for this task's decision (got %r)" % (want["type"],
                                                                                        question.get("type")))
     if question.get("instructions") != want["instructions"]:
-        errors.append("question.instructions: must equal the task's decision.instructions")
+        errors.append("question.instructions: must equal %s" % instructions)
     if question.get("criteria") != want["criteria"]:
-        errors.append("question.criteria: expected %s (the task's label_meanings)"
-                      % json.dumps(want["criteria"], ensure_ascii=False))
+        errors.append("question.criteria: expected %s (%s)" % (json.dumps(want["criteria"], ensure_ascii=False),
+                                                               meanings))
     extra = sorted(set(question) - set(want))
     if extra:
         errors.append("question: unexpected key(s) %s" % ", ".join(extra))
@@ -302,15 +405,22 @@ def _check_rows(rows, check_one):
     return errors
 
 
-def _onejev_errors(r, task, full):
+def _onejev_errors(r, task, full, variants=None):
     """A OneJev row apart from its target: state, question, meta and split. A full row's meta also has
     label_source and may have more keys, as the row may; an input row has only the INPUT_KEYS (the old `input`
-    only without `state`) and its meta exactly the INPUT_META keys."""
+    only without `state`) and its meta exactly the INPUT_META keys. A prompt-variant row (is_variant) is refused unless
+    `variants` is given (a trainset's rows: its question is then the spec's, which rsi.variants.check_variant_rows
+    checks)."""
     if "state" not in r and "input" in r:
         errs = ["state: missing (rows are OneJev rows now: write the input as `state`)"]
     else:
         errs = check_state(r.get("state"), task)
-    errs += check_question(r.get("question"), task)
+    if not is_variant(r):
+        errs += check_question(r.get("question"), task)
+    elif variants is None:
+        errs += ["meta.extra.variant: a prompt-variant row belongs only in a trainset, whose manifest lists its spec "
+                 "in prompt_variants (docs/interfaces/datasets.md, Prompt-variant rows)"]
+        errs += check_question(r.get("question"), task)
     errs += _meta_errors(r, ["source", "state_id", "cluster"], full, True)
     if not full and isinstance(r.get("meta"), dict):
         errs += ["meta.%s: not allowed in an input row, whose meta holds only %s since another meta field "
@@ -325,9 +435,11 @@ def _onejev_errors(r, task, full):
     return errs
 
 
-def check_full_rows(rows, task):
-    """Full rows (a trainset or valset `rows.jsonl`): OneJev rows with a target."""
-    return _check_rows(rows, lambda r: _onejev_errors(r, task, True) + check_target(r.get("target"), task))
+def check_full_rows(rows, task, variants=None):
+    """Full rows (a trainset or valset `rows.jsonl`): OneJev rows with a target. A row with meta.extra.variant is
+    refused unless `variants` (a trainset's prompt_variants, [] when it lists none) is given; its question is then left
+    to rsi.variants.check_variant_rows, which checks it against its spec and its seed."""
+    return _check_rows(rows, lambda r: _onejev_errors(r, task, True, variants) + check_target(r.get("target"), task))
 
 
 def check_input_rows(rows, task):
@@ -427,6 +539,25 @@ def input_fingerprint(inp):
     """Fingerprint of a row's input (its state, state_of): case and whitespace do not count."""
     s = json.dumps(_norm(inp), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _coarse(v):
+    if isinstance(v, dict):
+        return dict((k, _coarse(x)) for k, x in v.items())
+    if isinstance(v, list):
+        return [_coarse(x) for x in v]
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            return float("%.4g" % v) + 0.0  # + 0.0: -0.0 is 0.0
+        except OverflowError:  # an int too large for a float
+            return v
+    return v
+
+
+def coarse_fingerprint(state):
+    """input_fingerprint of the state with every number rounded to 4 significant digits (and written as a float, so 5
+    and 5.0 are one): the held-out check of generated rows (Workspace._generated_heldout_matches)."""
+    return input_fingerprint(_coarse(state))
 
 
 def overlap(rows_a, rows_b):

@@ -18,10 +18,10 @@ from .rows import group_of
 LOG_LOSS_CLIP = 1e-12
 # Direction of each known metric; a task's higher_is_better must agree (rsi.rows.check_task).
 HIGHER_IS_BETTER = {"accuracy": True, "log_loss": False, "macro_f1": True, "auc": True, "auprc": True,
-                    "brier": False}
-KNOWN_METRICS = ("accuracy", "log_loss", "macro_f1", "auc", "auprc", "brier")
+                    "brier": False, "f1": True, "expected_cost": False}
+KNOWN_METRICS = ("accuracy", "log_loss", "macro_f1", "auc", "auprc", "brier", "f1", "expected_cost")
 # Metrics of the positive label: defined for binary tasks only (rsi.rows.check_task refuses them elsewhere).
-BINARY_ONLY = ("auc", "auprc", "brier")
+BINARY_ONLY = ("auc", "auprc", "brier", "f1")
 KNOWN_BASELINES = ("majority", "group_prior")
 # Optional task["metrics"]["ci"] fields and their defaults; ci_settings applies them.
 CI_DEFAULTS = {"resamples": 1000, "seed": 0, "level": 0.95}
@@ -82,7 +82,20 @@ def _row_brier(p, y, task):
     return (p["probs"][positive] - (1.0 if y == positive else 0.0)) ** 2
 
 
-_ROW_VALUES = {"accuracy": _row_accuracy, "log_loss": _row_log_loss, "brier": _row_brier}
+def _costs(task):
+    """task.metrics.costs (true label -> decision -> cost); ValueError without it."""
+    costs = task["metrics"].get("costs")
+    if not costs:
+        raise ValueError("expected_cost needs metrics.costs (true label -> decision -> cost) in the task")
+    return costs
+
+
+def _row_expected_cost(p, y, task):
+    return float(_costs(task)[y][p["decision"]])
+
+
+_ROW_VALUES = {"accuracy": _row_accuracy, "log_loss": _row_log_loss, "brier": _row_brier,
+               "expected_cost": _row_expected_cost}
 
 
 def _positive(metric, task):
@@ -101,6 +114,15 @@ def _macro_f1(pairs, task):
         fn = sum(1 for p, y in pairs if p["decision"] != label and y == label)
         scores.append(2.0 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0)
     return _mean(scores)
+
+
+def _f1(pairs, task):
+    """The F1 of decision.positive: 2tp / (2tp + fp + fn), 0.0 when the denominator is 0."""
+    positive = _positive("f1", task)
+    tp = sum(1 for p, y in pairs if p["decision"] == positive and y == positive)
+    fp = sum(1 for p, y in pairs if p["decision"] == positive and y != positive)
+    fn = sum(1 for p, y in pairs if p["decision"] != positive and y == positive)
+    return 2.0 * tp / (2 * tp + fp + fn) if tp + fp + fn else 0.0
 
 
 def _auc(pairs, task):
@@ -148,11 +170,15 @@ def _auprc(pairs, task):
 def _on_pairs(metric, pairs, task):
     if metric in BINARY_ONLY:
         _positive(metric, task)
+    if metric == "expected_cost":
+        _costs(task)
     if metric in _ROW_VALUES:
         fn = _ROW_VALUES[metric]
         return _mean([fn(p, y, task) for p, y in pairs])
     if metric == "macro_f1":
         return _macro_f1(pairs, task)
+    if metric == "f1":
+        return _f1(pairs, task)
     if metric == "auc":
         return _auc(pairs, task)
     if metric == "auprc":
@@ -192,8 +218,19 @@ def brier(pred_rows, label_rows, task):
     return _on_pairs("brier", _pairs(pred_rows, label_rows, task), task)
 
 
+def f1(pred_rows, label_rows, task):
+    """Binary only: the F1 of decision.positive (decision vs hard label), 2tp / (2tp + fp + fn), 0.0 when the
+    denominator is 0."""
+    return _on_pairs("f1", _pairs(pred_rows, label_rows, task), task)
+
+
+def expected_cost(pred_rows, label_rows, task):
+    """The mean over rows of task.metrics.costs[hard label][decision]; ValueError without metrics.costs."""
+    return _on_pairs("expected_cost", _pairs(pred_rows, label_rows, task), task)
+
+
 METRICS = {"accuracy": accuracy, "log_loss": log_loss, "macro_f1": macro_f1, "auc": auc, "auprc": auprc,
-           "brier": brier}
+           "brier": brier, "f1": f1, "expected_cost": expected_cost}
 
 
 def score(metric, pred_rows, label_rows, task):
@@ -343,3 +380,25 @@ def paired_delta(metric, pred_a, pred_b, label_rows, task, clusters, resamples, 
     draws.sort()
     alpha = (1 - level) / 2
     return {"delta": delta, "ci_low": _quantile(draws, alpha), "ci_high": _quantile(draws, 1 - alpha)}
+
+
+# ---- ③ Compare: candidate minus a baseline ------------------------------------------
+
+def baseline_delta(task, pred_rows, baseline_rows, label_rows, clusters):
+    """The delta ③ Compare reports for a baseline (a comparison's deltas_val, an evaluation's baselines_eval and
+    baselines_test): paired_delta of the task's primary metric, pred_rows minus baseline_rows, the task's interval
+    settings, with "metric" the primary metric."""
+    primary = task["metrics"]["primary"]
+    return dict(paired_delta(primary, pred_rows, baseline_rows, label_rows, task, clusters, **ci_settings(task)),
+                metric=primary)
+
+
+def baselines_scored(task, label_rows, pred_rows, clusters, baselines, names):
+    """An evaluation's baselines_eval (or baselines_test) as registration recomputes it: {id: {"name", "metrics",
+    "delta"}} for `baselines` [(id, name, prediction rows)]: the metrics `names` of each baseline's rows against
+    label_rows and its baseline_delta (pred_rows minus it, clusters id -> cluster). ValueError when a metric or a
+    delta cannot be computed."""
+    return dict((bid, {"name": name, "metrics": dict((n, score(n, rows, label_rows, task)) for n in names),
+                       "delta": baseline_delta(task, pred_rows, rows, label_rows, clusters)})
+                for bid, name, rows in baselines)
+

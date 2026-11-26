@@ -98,25 +98,6 @@ def _read_text(path):
         return ""
 
 
-def _read_pid(path):
-    """The pid in a pid file; waits up to a second for a file the shell is still writing; None if absent."""
-    end = time.time() + 1.0
-    while True:
-        try:
-            with open(path) as f:
-                text = f.read().strip()
-        except OSError:
-            return None
-        if text:
-            try:
-                return int(text)
-            except ValueError:
-                return None
-        if time.time() >= end:
-            return None
-        time.sleep(0.05)
-
-
 class ClaudeCodeRunner(base.Runner):
     name = "claude"
     enforces_deny = True  # the engine refuses to launch when a denied path cannot be written as a safe rule
@@ -214,7 +195,7 @@ class ClaudeCodeRunner(base.Runner):
         while that process lives and is ours (time limit counted from launched_at), else a finished, lost one."""
         _out, log, pidfile, _prompt = self._files(ws, dispatch)
         resume = dispatch.get("session") if dispatch.get("launch_mode") in base.SESSION_MODES else None
-        pid = dispatch.get("pid") or _read_pid(pidfile)
+        pid = dispatch.get("pid") or base.read_pid(pidfile)
         launched = base.launched_epoch(dispatch)
         if pid and self.ours(pid, launched):
             return {"runner": self, "waits": True, "proc": None, "pid": int(pid), "log": log, "started": launched,

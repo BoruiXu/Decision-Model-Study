@@ -7,21 +7,20 @@ when no dispatch is open, rsi.live.now_line). What the run waits for, the questi
 the run asks and the next step of the workflow diagram all come from rsi.flow.next_action, the
 function the engine follows, so a page never says something else than the engine does. Rendering
 reads only STATE.json, registry.jsonl, registered manifests (task.json for a task), <ws>/REPORT.md,
-the `## 待用户回答` section of <ws>/work/notes.md, the engine's log <ws>/work/run.jsonl (events page), the pid in
-<ws>/work/run.lock (whether an `rsi run` works on the workspace now: run_active), the directory listing of the current
-round's
-work/round-<n>/ and the manifest.json of each unregistered hand-back there (for its kind), and for the overview's live
-panels the progress.json in each open dispatch's output directory (rsi.progress), the directory listing of every
-dispatch's output directory with the handback.json and handback-<n>.json in it (rsi.live.handback_notes) and
-<ws>/work/gpus.json (rsi.gpus.read_snapshot); it opens no data row file, runs no command (nvidia-smi only runs in the
-engine's refresh) and writes nothing. write_dashboard writes each page like Workspace.save_state
-(temp file in the page's directory, then os.replace), so a browser never reads half a page. The
+the `## Questions for the user` section of <ws>/work/notes.md, the engine's log <ws>/work/run.jsonl (events page),
+the pid in <ws>/work/run.lock (whether an `rsi run` works on the workspace now: run_active), the directory listing
+of the current round's work/round-<n>/ and the manifest.json of each unregistered hand-back there (for its kind),
+and for the overview's live panels the progress.json in each open dispatch's output directory (rsi.progress), the
+directory listing of every dispatch's output directory with the handback.json and handback-<n>.json in it
+(rsi.live.handback_notes) and <ws>/work/gpus.json (rsi.gpus.read_snapshot); it opens no data row file, runs no command
+(nvidia-smi only runs in the engine's refresh) and writes nothing. write_dashboard writes each page like
+Workspace.save_state (temp file in the page's directory, then os.replace), so a browser never reads half a page. The
 pages reload themselves every REFRESH_SECONDS seconds.
 
 Module activity (module_progress) has two sources. Once the engine has recorded a dispatch (STATE
 dispatches) the records are the truth: a module runs while one of its dispatches in the round is
 running (or is a long job whose marker is not there yet), is pending while its dispatch record is written
-but its agent not launched yet (待启动), and waits to be registered while one is handed back; directories
+but its agent not launched yet, and waits to be registered while one is handed back; directories
 without a record are not looked at. A workspace without any dispatch
 record is run by hand (the manual flow): the orchestrator gives each module the output directory
 <ws>/work/round-<n>/<module>/, with a suffix when the module is dispatched again in the round
@@ -33,11 +32,13 @@ behind once registration has moved it away). In the manual flow a module running
 registered comes first in what the run waits for, before next_action's step (next_action reads no
 directory).
 
-The stages are ① 数据 → ② 训练调优 → ③ 交付 → ④ 评测与决策 (MODULES, STEP_NAMES). An old workspace's tune
-dispatches, artifacts and records (merged into the training-tuning module train) are read as they are and shown
-under ②: stage_of (rsi.flow's, re-exported here) is the one place the pages map a dispatch's module or an
-artifact's producer to its stage (rsi.report.RECORD_SECTIONS groups the report's records the same way; a test ties
-the two together). A dispatch keeps its own module name where it is shown (rsi-tune in its line).
+The stages are ① Data → ② Train & tune → ③ Compare → ④ Deliver → ⑤ Judge & decide (MODULES, STEP_NAMES). ③ is on
+only when the task has a compare section (rsi.flow.compare_enabled); otherwise the pages draw it as ③ Compare (off)
+(stage_title) and the flow goes from ② to ④. An old workspace's tune
+dispatches, artifacts and records (merged into the train module) are read as they are and shown under ②: stage_of
+(rsi.flow's, re-exported here) is the one place the pages map a dispatch's module or an artifact's producer to its stage
+(rsi.report.RECORD_SECTIONS groups the report's records the same way; a test ties the two together). A dispatch keeps
+its own module name where it is shown (rsi-tune in its line).
 """
 import datetime
 import itertools
@@ -47,9 +48,10 @@ import tempfile
 
 from rsi import flow as F
 from rsi.flow import next_action, stage_of
-from rsi.report import _num  # noqa: F401  (the pages and their tests format numbers with D._num)
+from rsi.report import _clause, _num  # noqa: F401  (the pages and their tests format numbers with D._num)
 from rsi.report import long_job_text
 from rsi.runners.base import pid_alive
+from rsi.timing import plural
 from rsi.workspace import DATASETS, RsiError, parse_utc as _utc
 
 # The pages, relative to the workspace root (forward slashes): the overview first.
@@ -62,15 +64,17 @@ NOTES_FILE = os.path.join("work", "notes.md")
 RUN_LOG = os.path.join("work", "run.jsonl")
 RUN_LOCK = os.path.join("work", "run.lock")  # rsi.engine.RUN_LOCK: held by `rsi run` for its whole life
 RUN_LOG_TAIL = 2 * 1024 * 1024
-NOTES_SECTION = "## 待用户回答"
+NOTES_SECTION = "## Questions for the user"
 
 # The pages' nodes: the stages of the main flow, which are the flow's modules.
 MODULES = F.MODULES
 STEP_INDEX = dict(F.STEP_INDEX)
-STEP_NAMES = {"data": "① 数据", "train": "② 训练调优", "deliver": "③ 交付", "judge": "④ 评测与决策"}
+STEP_NAMES = {"data": "① Data", "train": "② Train & tune", "compare": "③ Compare", "deliver": "④ Deliver",
+              "judge": "⑤ Judge & decide"}
+OFF = " (off)"  # after ③'s name while the task has no compare section (stage_title)
 # Where the run is for each main-flow step key.
 STEP_WHERE = dict(STEP_NAMES, refresh=STEP_NAMES["data"])
-AFTER_STEPS = max(STEP_INDEX.values()) + 1  # the position of a round past ④ (waiting for 顶层核对)
+AFTER_STEPS = max(STEP_INDEX.values()) + 1  # the position of a round past ⑤ (waiting for the top-level check)
 BUSY = ("running", "pending", "unregistered")  # module_progress states of a module whose output is not in yet
 
 
@@ -86,6 +90,12 @@ def _stages(names):
 
 def _skill(module):
     return "rsi-" + module
+
+
+def stage_title(ws, stage):
+    """A stage's name on the pages: STEP_NAMES, with OFF after ③ while the task has no compare section."""
+    off = stage == "compare" and not F.compare_enabled(ws.task())
+    return STEP_NAMES[stage] + (OFF if off else "")
 
 
 # ---- module activity -----------------------------------------------------------------------------
@@ -134,7 +144,7 @@ def _iso(mtime):
 def module_progress(ws):
     """Each stage's activity in the current round: stage (MODULES) -> {"state", "since", "pending", "superseded"}.
 
-    state is "running", "pending" (a dispatch record written, its agent not launched yet: 待启动; only with
+    state is "running", "pending" (a dispatch record written, its agent not launched yet; only with
     dispatch records), "unregistered" (handed back, waiting to be registered), "done" (it has a
     dispatch or an output directory and nothing outstanding) or "idle"; since is when the earliest
     running dispatch or directory started (local ISO) while running, else None; pending lists the
@@ -207,14 +217,14 @@ def waiting_long_jobs(ws):
 
 
 def pending_agents(ws):
-    """Like running_agents, for the dispatch records whose agent is not launched yet (status pending: 待启动)."""
+    """Like running_agents, for the dispatch records whose agent is not launched yet (status pending)."""
     return _agent_rows(ws, lambda d: d.get("status") == "pending")
 
 
 def run_active(ws):
     """True while an `rsi run` works on the workspace: <ws>/work/run.lock (rsi.engine holds it for the run's whole
     life and removes it at the end) names a live process. A run that was killed leaves the file behind with its
-    dead pid: no run. Only the top bar's "● 运行中" depends on it."""
+    dead pid: no run. Only the top bar's "● running" depends on it."""
     try:
         with open(os.path.join(ws.root, RUN_LOCK), encoding="utf-8", errors="replace") as f:
             pid = int(f.read().strip() or 0)
@@ -228,11 +238,11 @@ def idle_label(ws):
     marker, a manual hand-back) or, for anything else, the next `rsi run`."""
     a = next_action(ws)
     if a["type"] == "wait_long_job":
-        return "等长任务完成"
+        return "waiting for the long job"
     ds = _action_dispatches(ws, a) if a["type"] == "wait_agent" else []
     if ds and all(d.get("status") == "running" and d.get("runner") == "manual" for d in ds):
-        return "等手动交回"
-    return "等待 rsi run"
+        return "waiting for a manual hand-back"
+    return "waiting for rsi run"
 
 
 def stop_leftovers(ws):
@@ -248,8 +258,9 @@ def stop_leftovers(ws):
 
 
 def _leftover_words(agents, jobs):
-    """"1 个 agent 和 2 个长任务", "" for none."""
-    return " 和 ".join((["%d 个 agent" % len(agents)] if agents else []) + (["%d 个长任务" % len(jobs)] if jobs else []))
+    """"1 agent and 2 long jobs", "" for none."""
+    return " and ".join(([plural(len(agents), "agent")] if agents else [])
+                        + ([plural(len(jobs), "long job")] if jobs else []))
 
 
 def stopped_texts(ws, a):
@@ -258,22 +269,23 @@ def stopped_texts(ws, a):
     and writes the report (the one that holds run.lock is doing it already); without REPORT.md: that `rsi run`
     writes it; once done: the long jobs the stop terminated, those an earlier close terminated, and those neither could
     (rsi.report.long_job_text)."""
-    reason = (ws.state["stopped"] or {}).get("reason")
+    reason = _clause((ws.state["stopped"] or {}).get("reason"))
     active = run_active(ws)
     agents, jobs = stop_leftovers(ws)
     words = _leftover_words(agents, jobs)
     if words:
-        lead = "已停止，还有 %s%s在运行" % (words, " " if words[-1].isascii() else "")
-        them = "它" if len(agents) + len(jobs) == 1 else "它们"
-        todo = ("rsi run 正在终止%s并写报告，等它退出。" if active else "运行 rsi run 终止%s并写报告。") % them
-        detail = "%s停止原因：%s。" % (todo, reason)
-        return lead, detail, "%s：%s" % (lead, detail)
-    lead = "已停止：%s" % reason
+        lead = "Stopped, %s still running" % words
+        them = "it" if len(agents) + len(jobs) == 1 else "them"
+        todo = ("rsi run is terminating %s and writing the report; wait for it to exit." if active
+                else "Run rsi run to terminate %s and write the report.") % them
+        detail = "%s Stop reason: %s." % (todo, reason)
+        return lead, detail, "%s: %s" % (lead, detail)
+    lead = "Stopped: %s" % reason
     if a["type"] != "done":
-        todo = "rsi run 正在写运行报告。" if active else "运行 rsi run 写运行报告。"
-        return lead, todo, "%s。%s" % (lead, todo)
+        todo = "rsi run is writing the run report." if active else "Run rsi run to write the run report."
+        return lead, todo, "%s. %s" % (lead, todo)
     jobs_text = long_job_text(ws)
-    return lead, jobs_text, "%s。运行报告见 REPORT.md。%s" % (lead, jobs_text)
+    return lead, jobs_text, "%s. The run report is in REPORT.md.%s" % (lead, " " + jobs_text if jobs_text else "")
 
 
 def _agent_rows(ws, keep):
@@ -392,7 +404,7 @@ def _local(ts):
     """A UTC time from STATE or the registry (2026-11-22T01:02:03Z) as local time."""
     dt = _utc(ts)
     if dt is None:
-        return "无" if not ts else str(ts)
+        return "none" if not ts else str(ts)
     return _show(dt)
 
 
@@ -401,8 +413,9 @@ def _since(iso):
 
 
 def _close_round_text(ws):
-    return ("第 %d 轮的 %d 次尝试已用完，没有候选通过训练门：rsi run 关闭本轮（rsi close-round 的效果），"
-            "再派 rsi-judge 依据本轮的候选和记录写计划。" % (ws.state["round"], ws.attempt_limit()))
+    return ("Round %d has used up its %s and no candidate passed the train gate: rsi run closes the round (as "
+            "rsi close-round does), then dispatches rsi-judge to write the plan from the round's candidates and "
+            "records." % (ws.state["round"], plural(ws.attempt_limit(), "attempt")))
 
 
 PASSED_SHOWN = 3  # candidate ids named in the deliver step's sentence (the rounds page lists them all)
@@ -415,22 +428,24 @@ def _passed_text(ws):
     if not passed:
         return ""
     if len(passed) == 1:
-        return "（本轮通过训练门的候选：%s）" % passed[0]
-    return "（本轮通过训练门的候选 %d 个：%s%s；按验证集主指标选最好的送评）" % (
-        len(passed), "、".join(passed[:PASSED_SHOWN]), " 等" if len(passed) > PASSED_SHOWN else "")
+        return " (the round's candidate that passed the train gate: %s)" % passed[0]
+    return " (%d candidates of the round passed the train gate: %s%s; the best by the valset primary metric goes to " \
+           "evaluation)" % (len(passed), ", ".join(passed[:PASSED_SHOWN]), " and others" if len(passed) > PASSED_SHOWN
+                            else "")
 
 
 def _redeliver_sentence(ws, own):
-    """The ③ sentence when the best version must be re-delivered on the refreshed evalset first."""
-    return ("%s评测集已刷新，先把当前最佳版本 %s 在新评测集上重新交付（它在新评测集上还没有 delivery）。"
-            % ("本轮候选的交付已登记，" if own else "", ws.state["best"]))
+    """The ④ sentence when the best version must be re-delivered on the refreshed evalset first."""
+    return ("%s evalset was refreshed: first re-deliver the current best version %s on the new evalset (it has no "
+            "delivery there yet)." % ("The delivery of the round's candidate is registered; the" if own else "The",
+                                       ws.state["best"]))
 
 
 def _key(a):
     """The page's name for the case an action stands for: stopped, running, handed, plan, question (a
     question from STATE waiting that is no approval the flow knows), promote, close, decided (next, the
     milestone question, the judge writing the plan), milestone (the release under way), or the step key
-    data, refresh, train, deliver, judge."""
+    data, refresh, train, compare, deliver, judge."""
     t, step = a["type"], a.get("step")
     if t in ("report", "done"):
         return "stopped"
@@ -461,9 +476,8 @@ def _step_key(step):
 
 
 def _decide_tail(a):
-    return "%s（决策点 %s：可选 %s，代码默认 %s）。" % (a.get("reason"), a.get("point"), "、".join(a.get("options") or []),
-                                                a.get("default"))
-
+    return "%s (decision point %s: options %s; code default %s)." % (
+        _clause(a.get("reason")), a.get("point"), ", ".join(a.get("options") or []), a.get("default"))
 
 def _dispatch_or_none(ws, did):
     try:
@@ -492,7 +506,7 @@ def _skills_of(ds):
     for d in ds:
         if d.get("module") not in mods:
             mods.append(d.get("module"))
-    return "、".join(_skill(str(m)) for m in mods)
+    return ", ".join(_skill(str(m)) for m in mods)
 
 
 def answer_resume(a):
@@ -524,85 +538,110 @@ def _agents_text(ws, a):
     ds = _action_dispatches(ws, a)
     mods = action_modules(ws, a)
     where = " / ".join([STEP_NAMES[s] for s in _stages(mods)] + [str(m) for m in mods if stage_of(m) is None]) \
-        or "模块"
-    skills = "、".join(_skill(str(m)) for m in mods) or "、".join(str(i) for i in ids)
+        or "module"
+    skills = ", ".join(_skill(str(m)) for m in mods) or ", ".join(str(i) for i in ids)
     if answer_going_back(ws, a):
         if ds and ds[0].get("status") == "long_job":
-            return where, ("长任务已结束，把你的回答送回 %s 的同一个会话（%s）：它按回答写好或改好产物后重新交回，那时才登记。"
-                           % (skills, ids[0]))
-        return where, "把你的回答送回 %s 的同一个会话（%s）：它按回答修改或确认后重新交回，那时才登记。" % (skills, ids[0])
+            return where, ("The long job has ended; sending the user's answer back to the same session of %s (%s): "
+                           "it writes or fixes its artifacts by the answer and hands back again; only then are they "
+                           "registered." % (skills, ids[0]))
+        return where, ("Sending the user's answer back to the same session of %s (%s): it changes or confirms its "
+                       "hand-back by the answer and hands back again; only then is it registered." % (skills, ids[0]))
     if a["type"] == "process_handback":
-        return where, "%s 已交回（%s）：等校验、登记交回的产物。" % (skills, ids[0])
+        return where, "%s has handed back (%s): waiting for the handed-back artifacts to be checked and registered." % (
+            skills, ids[0])
     if a["type"] == "wait_long_job":
-        return where, "等 %s 的长任务完成（完成标记 %s 还没有出现）。" % (skills, a.get("marker") or "未给出")
+        return where, "Waiting for the long job of %s to finish (completion marker %s has not appeared yet)." % (
+            skills, a.get("marker") or "not given")
     run = [d for d in ds if d.get("status") != "pending"]
     queued = [d for d in ds if d.get("status") == "pending"]
     parts = []
     if run or not queued:
         first = min((datetime.datetime.fromisoformat(_started(ws, d)) for d in run), default=None)
-        parts.append("等 %s 交回（自 %s 起运行）" % (_skills_of(run) or skills, _show(first) if first else "未知"))
+        parts.append("Waiting for %s to hand back (running since %s)" % (_skills_of(run) or skills,
+                                                                          _show(first) if first else "unknown"))
     if queued:
-        parts.append("%s 待启动（rsi run 启动它）" % _skills_of(queued))
-    return where, "；".join(parts) + "。"
+        parts.append("%s not launched yet (rsi run launches %s)" % (_skills_of(queued),
+                                                                    "it" if len(queued) == 1 else "them"))
+    return where, "; ".join(parts) + "."
 
 
 def _step_text(ws, a, key):
-    """The sentence of a main-flow step (data, refresh, train, deliver, judge)."""
+    """The sentence of a main-flow step (data, refresh, train, compare, deliver, judge)."""
     where, t = STEP_WHERE[key], a["type"]
-    if t == "ask" and a.get("what") == "refresh_sets":  # the new evalset (① data) comes before ③ / ④
-        return ("下一步 %s：评测集已用到上限，先回答 refresh_sets——批准后派 rsi-data 刷新评测集（产出新的评测集），然后才"
-                "交付和评测；也可以关闭本轮或停止。" % STEP_WHERE["refresh"])
+    if t == "ask" and a.get("what") == "refresh_sets":  # the new evalset (① data) comes before ③ / ④ / ⑤
+        return ("Next %s: The evalset has reached its use limit. Answer refresh_sets first: once it is approved, "
+                "rsi-data is dispatched to refresh the evalset (it produces a new evalset), and only then come %s; the "
+                "round can also be closed or the run stopped." % (STEP_WHERE["refresh"], "the comparison, delivery "
+                                                                  "and evaluation" if a.get("step") == "compare"
+                                                                  else "delivery and evaluation"))
+    if t == "ask" and a.get("what") == "over_budget":  # before ① a trainset, ② or ③
+        return "Next %s: The user must approve going over budget (over_budget) before %s is dispatched." % (
+            where, F.OVER_BUDGET_WHAT.get(key, "more work"))
     if t == "decide":
         if a.get("point") == F.TRAIN_GATE_FAILED:
-            body = ("训练门没过，回到 rsi-train 再搜一次，或派 rsi-data 出新训练集（决策点 train_gate_failed，"
-                    "代码默认 %s；%s）。" % (a.get("default"), a.get("reason")))
+            body = ("The train gate failed: go back to rsi-train for another search, or dispatch rsi-data for a new "
+                    "trainset (decision point train_gate_failed, code default %s; %s)." % (a.get("default"),
+                                                                                         _clause(a.get("reason"))))
         elif a.get("point") == F.QUALITY_GATE_FAILED:
-            body = "%s：交回 rsi-data 重做，或问你（决策点 quality_gate_failed，代码默认 %s）。" % (
-                a.get("reason"), a.get("default"))
+            body = "%s: return it to rsi-data to redo, or ask the user (decision point quality_gate_failed, code " \
+                   "default %s)." % (_clause(a.get("reason")), a.get("default"))
         else:
             body = _decide_tail(a)
-        return "下一步 %s：%s" % (where, body)
+        return "Next %s: %s" % (where, body)
     if key == "data":
-        return "下一步 %s：派 rsi-data（%s）。" % (where, a.get("reason"))
+        return "Next %s: Dispatch rsi-data (%s)." % (where, _clause(a.get("reason")))
     if key == "refresh":
-        return "下一步 %s：派 rsi-data 产出新的评测集（%s）。" % (where, a.get("reason"))
+        return "Next %s: Dispatch rsi-data to produce a new evalset (%s)." % (where, _clause(a.get("reason")))
     if key == "train":
         if t == "resume":  # the second part of train's search
-            return "下一步 %s：等 rsi-train 写 search（%s），写好后再交付。" % (where, a.get("feedback"))
-        if t == "ask":
-            return "下一步 %s：继续派训练之前要你批准超预算（over_budget）。" % where
-        return "下一步 %s：派 %s（%s）。" % (where, _skill(a.get("module", "train")), a.get("reason"))
+            return "Next %s: Waiting for rsi-train to write the search (%s); delivery comes after it." % (
+                where, _clause(a.get("feedback")))
+        return "Next %s: Dispatch %s (%s)." % (where, _skill(a.get("module", "train")),
+                                               _clause(a.get("reason")))
+    if key == "compare":
+        if t == "resume":  # the second part of compare's hand-back
+            return "Next %s: Waiting for rsi-compare to write the comparison (%s); delivery comes after it." % (
+                where, _clause(a.get("feedback")))
+        return "Next %s: Dispatch rsi-compare (%s)." % (where, _clause(a.get("reason")))
     if key == "deliver":
         arts = [ws.entry(x) for x in _round(ws)["artifacts"]]
         own = F.own_delivery(ws, arts)
-        head = "派 rsi-deliver：" if own else "派 rsi-deliver 打包送评的候选%s。" % _passed_text(ws)
-        return "下一步 %s：%s%s%s" % (where, head, _redeliver_sentence(ws, own) if F.redeliver_pending(ws) else "",
-                                   _last_use(ws))
-    return "下一步 %s：派 rsi-judge 在评测集上评测本轮的交付。%s" % (where, _last_use(ws))
+        head = "Dispatch rsi-deliver:" if own else "Dispatch rsi-deliver to package the candidate for evaluation%s." \
+            % _passed_text(ws)
+        parts = [head] + ([_redeliver_sentence(ws, own)] if F.redeliver_pending(ws) else [])
+        return "Next %s: %s%s" % (where, " ".join(parts), _last_use(ws))
+    return "Next %s: Dispatch rsi-judge to evaluate the round's delivery on the evalset.%s" % (where, _last_use(ws))
 
 
 def _last_use(ws):
-    note = F.last_evalset_use(ws)
-    return "（%s。）" % note.lstrip("；") if note else ""
+    """F.last_evalset_use's note as a sentence in brackets after the step's sentence ("" without one)."""
+    note = F.last_evalset_use(ws).lstrip("; ")
+    return " (%s%s.)" % (note[:1].upper(), note[1:]) if note else ""
 
 
 def _decided_text(ws, a):
     """(where, what) for a decided round: the judge writing the plan, the stop condition met, or next."""
     rnd = _round(ws)
-    decision = F.decision_text(rnd["decision"]) if rnd["decision"] else "（未判定）"
+    decision = F.decision_text(rnd["decision"]) if rnd["decision"] else "(undecided)"
     if a.get("step") == "write_plan":
         if a["type"] == "decide":
-            return STEP_NAMES["judge"], "本轮已判定 %s：%s" % (decision, _decide_tail(a))
-        return STEP_NAMES["judge"], "本轮已判定 %s：等 rsi-judge 写本轮的计划，交回后由 rsi run 登记。" % decision
+            return STEP_NAMES["judge"], "Round decided as %s: %s" % (decision, _decide_tail(a))
+        return STEP_NAMES["judge"], ("Round decided as %s: waiting for rsi-judge to write the round's plan; rsi run "
+                                     "registers it once it is handed back." % decision)
     stop, why = ws.stop_check()
     if stop:
-        return ("停止检查", "本轮已判定，停止条件已满足（%s）：不再需要计划，rsi run 接着结束运行（rsi next 的效果）%s。"
-                % (why, "" if F.milestone_evaluations(ws) else "（有最佳版本时先问用户是否做里程碑发布）"))
+        return ("Stop check", "Round decided and a stop condition is met (%s): no plan is needed; rsi run ends the run "
+                "next (as rsi next does)%s." % (_clause(why), "" if F.milestone_evaluations(ws) else
+                                                 " (with a best version it first asks the user whether to make a "
+                                                 "milestone release)"))
     plan = rnd["plan_id"]
     if plan is None:
-        return "推进轮次", "rsi run 接着推进轮次（rsi next 的效果；%s）。" % a.get("reason")
-    return "推进轮次", "计划 %s %s：rsi run 接着进入第 %d 轮（从 %s 开始；rsi next 的效果）。" % (
-        plan, "已批准" if F.plan_approved(ws, plan) else "已登记", ws.state["round"] + 1, ws.manifest(plan)["entry_module"])
+        return "Next round", ("rsi run moves on to the next round (as rsi next does; %s)."
+                              % _clause(a.get("reason")))
+    return "Next round", "Plan %s %s: rsi run moves on to round %d (starting from %s; as rsi next does)." % (
+        plan, "approved" if F.plan_approved(ws, plan) else "registered", ws.state["round"] + 1,
+        ws.manifest(plan)["entry_module"])
 
 
 def _say(ws, a, key):
@@ -611,22 +650,30 @@ def _say(ws, a, key):
         return _agents_text(ws, a)
     if key == "plan":
         plan = a.get("ref") or _round(ws)["plan_id"]
-        return "审批计划", ("等用户批准计划 %s：把计划讲给用户，用下面的 rsi answer 命令记下用户的回答（approve 批准，"
-                            "revise 让 rsi-judge 按用户的话改计划）。" % plan)
+        return "Plan approval", ("Waiting for the user to approve plan %s: explain the plan to the user and record "
+                                 "the user's answer with the rsi answer command below (approve approves it; revise has "
+                                 "rsi-judge revise the plan by the user's words)." % plan)
     if key == "close":
-        return "关闭本轮", _close_round_text(ws)
+        return "Close round", _close_round_text(ws)
     if key == "promote":
-        return "顶层核对", "本轮评测已登记：rsi run 接着判定本轮（升级或保留，rsi promote 的效果；评测 %s）。" % a.get(
-            "evaluation_id")
+        return "Top-level check", ("The round's evaluation is registered: rsi run decides the round next (promote "
+                                   "or keep, as rsi promote does; evaluation %s)." % a.get("evaluation_id"))
     if key == "question":
-        return "等用户回答", "等用户回答：%s" % a.get("question")
+        return "Waiting for the user", "Waiting for the user: %s" % a.get("question")
     if key == "milestone":
         if a["type"] == "decide":
-            return "里程碑发布", "里程碑发布进行中：%s" % _decide_tail(a)
+            return "Milestone release", "Milestone release in progress: %s" % _decide_tail(a)
         if a.get("module") == "deliver":
-            return ("里程碑发布", "里程碑发布进行中：用户已同意用 test 验证最佳版本 %s，等 rsi-deliver 跑 test 预测并交回登记"
-                    "（这时不要结束运行）。" % ws.state["best"])
-        return "里程碑发布", "里程碑发布进行中：里程碑 delivery 已登记，等 rsi-judge 用 test 打分并交回登记（这时不要结束运行）。"
+            return ("Milestone release", "Milestone release in progress: the user agreed to verify the best version "
+                    "%s on the testset; waiting for rsi-deliver to run the testset predictions and hand them back for "
+                    "registration (do not end the run now)." % ws.state["best"])
+        if a.get("module") == "compare":
+            return ("Milestone release", "Milestone release in progress: the milestone delivery is registered; waiting "
+                    "for rsi-compare to score the baselines of the best version's comparison on the testset inputs "
+                    "(report only; do not end the run now).")
+        return "Milestone release", ("Milestone release in progress: the milestone delivery is registered; waiting "
+                                     "for rsi-judge to score it on the testset and hand it back for registration (do "
+                                     "not end the run now).")
     if key == "decided":
         return _decided_text(ws, a)
     return STEP_WHERE[key], _step_text(ws, a, key)
@@ -637,24 +684,25 @@ def _manual_activity(ws, progress):
     running = [m for m in MODULES if progress[m]["state"] == "running"]
     if running:
         first = min(datetime.datetime.fromisoformat(progress[m]["since"]) for m in running)
-        return ("running", " / ".join(STEP_NAMES[m] for m in running), "等 %s 交回（输出目录自 %s 起还没有交回产物）。"
-                % ("、".join(_skill(m) for m in running), _show(first)))
+        return ("running", " / ".join(STEP_NAMES[m] for m in running), "Waiting for %s to hand back (no artifact in "
+                "the output directory since %s)." % (", ".join(_skill(m) for m in running), _show(first)))
     handed = [m for m in MODULES if progress[m]["state"] == "unregistered"]
     if handed:
-        return ("handed", " / ".join(STEP_NAMES[m] for m in handed), "%s：等校验、抽查后登记（rsi register）。"
-                % "；".join("%s 交回了 %s" % (_skill(m), "、".join(progress[m]["pending"])) for m in handed))
+        return ("handed", " / ".join(STEP_NAMES[m] for m in handed), "%s: waiting for validation and spot checks, then "
+                "registration (rsi register)." % "; ".join("%s handed back %s" % (_skill(m), ", ".join(
+                    progress[m]["pending"])) for m in handed))
     return None
 
 
 def _view(ws, progress):
-    """(key, where, what, action): action is next_action(ws), where and what say it in Chinese, key names
+    """(key, where, what, action): action is next_action(ws), where and what say it in words, key names
     the case (see _key). In the manual flow (no dispatch record) a module running or waiting to be
     registered in its output directory comes first (key running or handed), as the orchestrator
     registers hand-backs before it goes on."""
     a = next_action(ws)
     key = _key(a)
     if key == "stopped":
-        return key, "已停止", stopped_texts(ws, a)[2], a
+        return key, "Stopped", stopped_texts(ws, a)[2], a
     if not ws.dispatches():
         manual = _manual_activity(ws, progress)
         if manual:
@@ -674,13 +722,24 @@ def _wait(ws, progress):
     key, where, what, a = _view(ws, progress)
     asked = _state_questions(ws, key, a)
     if asked and key != "plan":
-        where = "等用户回答"
-        what = "等用户回答：%s回答之前不派模块。" % "".join(q["text"].rstrip("。？?") + "。" for q in asked)
+        where = "Waiting for the user"
+        what = "Waiting for the user: %s No module is dispatched before the answer." % " ".join(
+            _sentence(q["text"]) for q in asked)
     return key, where, what
 
 
+# What ends a sentence, full-width forms included.
+SENTENCE_ENDS = (".", "?", "!", "\u3002", "\uff1f", "\uff01")
+
+
+def _sentence(text):
+    """`text` as a sentence: trimmed, with a full stop unless it already ends in a sentence end (SENTENCE_ENDS)."""
+    text = text.strip()
+    return text if text.endswith(SENTENCE_ENDS) else text + "."
+
+
 def waiting_for(ws, progress):
-    """What the run waits for now, one Chinese sentence (next_action's action, see _view)."""
+    """What the run waits for now, in one sentence (next_action's action, see _view)."""
     return _wait(ws, progress)[2]
 
 
@@ -713,7 +772,7 @@ def _milestone_running(ws):
 
 
 def _notes_questions(ws):
-    """The lines of the `## 待用户回答` section of <ws>/work/notes.md (a leading "- " or "* " dropped)."""
+    """The lines of the `## Questions for the user` section of <ws>/work/notes.md (a leading "- " or "* " dropped)."""
     path = os.path.join(ws.root, NOTES_FILE)
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -775,15 +834,17 @@ def pending_questions(ws, progress):
 
 def _step_artifacts(ws, module, arts):
     """This round's registered artifacts produced by stage `module` (stage_of their producer; records and task
-    versions aside: data's task fill shows under 任务接入)."""
+    versions aside: data's task fill shows under Task intake)."""
     return [e for e in arts if stage_of(e["producer"]) == module and e["kind"] not in ("record", "task")]
 
 
 def _registered_status(ws, module, arts):
     """A step's status from this round's registered artifacts: "done", "fail" (its only output
-    failed its gate), "partial" (registration under way: some data sets, or ②'s trial candidates whose
-    search is still owed), "closed" (④ in a round closed by `rsi close-round`) or "idle". ② is done once
-    one of its candidates (an old workspace's tune trials too) passed the train gate."""
+    failed its gate), "partial" (registration under way: some data sets, ②'s trial candidates whose
+    search is still owed, or ③'s baselines without their comparison), "skipped" (③ skipped by a decision),
+    "closed" (⑤ in a round closed by `rsi close-round`) or "idle". ② is done once one of its candidates (an old
+    workspace's tune trials too) passed the train gate; ③ once the round holds a comparison or the milestone's
+    baselines."""
     mine = _step_artifacts(ws, module, arts)
     kinds = [e["kind"] for e in mine]
     if module == "data":
@@ -807,6 +868,12 @@ def _registered_status(ws, module, arts):
         # The search over trials registered without it is still owed (rsi.flow.search_owed): under way. Trials
         # that owe none (registered by hand, attempts used up) are a failed gate, as the flow's train_gate_failed.
         return "partial" if F.search_owed(ws, arts) else "fail"
+    if module == "compare":
+        if any(e["kind"] == "comparison" for e in mine) or F.milestone_baselines(ws):
+            return "done"
+        if F.compare_skipped(ws):
+            return "skipped"
+        return "partial" if mine else "idle"
     if module == "deliver":
         done = F.own_delivery(ws, arts) and not (_round(ws)["decision"] is None and F.redeliver_pending(ws))
         return "done" if done else "idle"
@@ -818,8 +885,8 @@ def _registered_status(ws, module, arts):
 
 
 # The steps each next-step key sends the run to.
-NEXT_STEPS = {"data": ("data",), "refresh": ("data",), "train": ("train",), "deliver": ("deliver",),
-              "judge": ("judge",)}
+NEXT_STEPS = {"data": ("data",), "refresh": ("data",), "train": ("train",), "compare": ("compare",),
+              "deliver": ("deliver",), "judge": ("judge",)}
 
 
 def _node(state, text=""):
@@ -833,36 +900,44 @@ def _hm(dt):
 def _done_text(ws, module, mine, rnd):
     """The short status phrase of a step done in this round."""
     if module == "data":
-        return "✓ %d 个集合" % sum(1 for e in mine if e["kind"] in DATASETS and ws.current(e["kind"]) == e["id"])
+        sets = sum(1 for e in mine if e["kind"] in DATASETS and ws.current(e["kind"]) == e["id"])
+        return "✓ " + plural(sets, "set")
     if module == "train":
-        return "✓ 训练门通过 · %d 个试验" % sum(1 for e in mine if e["kind"] == "candidate")
+        return "✓ gate passed · " + plural(sum(1 for e in mine if e["kind"] == "candidate"), "trial")
+    if module == "compare":
+        tested = F.milestone_baselines(ws)
+        parts = [plural(sum(1 for e in mine if e["kind"] == "baseline" and e["id"] not in tested), "baseline")]
+        if tested:
+            parts.append("milestone")
+        return "✓ " + " · ".join(parts)
     if module == "deliver":
         ids = [e["id"] for e in mine if e["kind"] == "delivery"]
-        return "✓ " + ids[0] if len(ids) == 1 else "✓ %d 个交付包" % len(ids)
+        return "✓ " + ids[0] if len(ids) == 1 else "✓ " + plural(len(ids), "delivery package")
     parts = []
     d = rnd["decision"]
     if ws.evaluations():
         if d is None:
-            parts.append("已评测")
+            parts.append("evaluated")
         else:
-            parts.append("升级 %s" % d.get("version") if d.get("decision") == "promote" else "保留")
+            parts.append("promote %s" % d.get("version") if d.get("decision") == "promote" else "keep")
     if F.milestone_evaluations(ws):
-        parts.append("里程碑评测")
-    if rnd["plan_id"] is not None:
-        parts.append("计划")
+        parts.append("milestone")  # the round that releases a milestone: "plan" is left out, the node is full
+    elif rnd["plan_id"] is not None:
+        parts.append("plan")
     return "✓ " + " · ".join(parts)
 
 
 def flow_states(ws, progress):
-    """The workflow diagram's nodes: key -> {"state", "text"} for task, the four stages (data, train,
-    deliver, judge), check (顶层核对) and stop (停止与交付).
+    """The workflow diagram's nodes: key -> {"state", "text"} for task, the five stages (data, train, compare,
+    deliver, judge), check (Top-level check) and stop (Stop & deliver). ③ is skip ("off") while the task has no compare
+    section.
 
     state is done, current, wait (waits for the user), fail (the step's only output this round
     failed its gate), skip (not passed through this round) or todo; text is a short status phrase.
     A step is current while one of its modules runs or waits to be registered, or when next_action's
     step is it; done, fail and skip follow the round's registered artifacts; a step
     before the round's entry, or behind the step the round has reached with no output of its own,
-    is skipped (with the attempts used up, ④ is still to come: the judge writes the plan of the
+    is skipped (with the attempts used up, ⑤ is still to come: the judge writes the plan of the
     closed round). The step's node waits instead while next_action asks for an approval that step
     needs (over_budget, refresh_sets). check waits while the user is asked to approve the plan or the
     milestone release, is current while the round waits for promote, close_round or next and done
@@ -886,85 +961,90 @@ def flow_states(ws, progress):
         busy = [STEP_INDEX[m] for m in MODULES if progress[m]["state"] in BUSY]
         if busy:
             position = max(busy)
-        elif step == "refresh":
-            position = STEP_INDEX["deliver"]  # the new evalset comes before ③ (or ④)
+        elif step == "refresh":  # the new evalset comes before ③ (or ④, ⑤)
+            position = STEP_INDEX["deliver" if F.compare_done(ws, arts) else "compare"]
         elif step in NEXT_STEPS:
             position = STEP_INDEX[step]
         elif step == "close":
-            position = STEP_INDEX["judge"]  # ③ is not passed through; the judge still writes the plan
+            position = STEP_INDEX["judge"]  # ③ and ④ are not passed through; the judge still writes the plan
         else:
             position = AFTER_STEPS
         nxt = NEXT_STEPS.get(step, ())
         asked = bool(nxt) and key != "question" and bool(_state_questions(ws, key, action))
         writing_plan = action.get("step") == "write_plan"
-    out = {"task": _node("done", "✓ 完成")}
+    out = {"task": _node("done", "✓ done")}
     records = bool(ws.dispatches())
     answering = _stages(action_modules(ws, action)) if answer_going_back(ws, action) else []
+    compare_on = F.compare_enabled(ws.task())
     for m in MODULES:
         p = progress[m]
         mine = _step_artifacts(ws, m, arts)
         status = _registered_status(ws, m, arts)
         if m == "judge" and rnd["plan_id"] is not None:
             status = "done"  # the judge's plan is in (also for a round closed without evaluation)
-        if p["state"] == "running" and not stopped:
-            out[m] = _node("current", "● 运行中 · %s 起" % _hm(datetime.datetime.fromisoformat(p["since"])))
+        if m == "compare" and not compare_on and p["state"] == "idle":
+            out[m] = _node("skip", "no compare section")
+        elif p["state"] == "running" and not stopped:
+            out[m] = _node("current", "● running since %s" % _hm(datetime.datetime.fromisoformat(p["since"])))
         elif p["state"] == "running" and records:  # the stop has not reached its agent or long job yet
-            out[m] = _node("current", "● 停止后仍在运行")
+            out[m] = _node("current", "● still running after stop")
         elif p["state"] == "pending" and not stopped:
-            out[m] = _node("current", "● 待启动")
+            out[m] = _node("current", "● not launched yet")
         elif p["state"] == "unregistered" and not stopped:
-            out[m] = _node("current", "● 送回你的回答" if m in answering else "● 待登记")
+            out[m] = _node("current", "● sending answer back" if m in answering else "● waiting to register")
         elif m == "judge" and writing_plan:
-            out[m] = _node("current", "● 写计划")
+            out[m] = _node("current", "● writing plan")
         elif m == "data" and step == "refresh":
-            out[m] = _node("current", "● 刷新评测集")  # also when ① is done in this round
+            out[m] = _node("current", "● refreshing evalset")  # also when ① is done in this round
         elif status == "done":
             out[m] = _node("done", _done_text(ws, m, mine, rnd))
         elif status == "fail":
-            out[m] = _node("fail", "门没过 · 可重派" if m in nxt else "门没过")
+            out[m] = _node("fail", "gate failed · redispatch" if m in nxt else "gate failed")
+        elif status == "skipped":  # ③ is report only: a decision chose skip
+            out[m] = _node("skip", "skipped (report only)")
         elif p["state"] == "pending":
-            out[m] = _node("skip", "停止时未启动")
+            out[m] = _node("skip", "not launched at stop")
         elif p["state"] == "unregistered" and records:  # handed back, not registered, and the run has stopped
             held = held_handbacks(ws, m)
-            out[m] = _node("skip", ("停止时回答还没送回" if all(F.question_answered(ws, d) for d in held)
-                                    else "停止时还在等你回答") if held else "交回未登记")
+            out[m] = _node("skip", ("answer not sent at stop" if all(F.question_answered(ws, d) for d in held)
+                                    else "unanswered at stop") if held else "not registered")
         elif p["state"] in BUSY:
-            out[m] = _node("skip", "停止时未交回")
+            out[m] = _node("skip", "not handed back at stop")
         elif status == "closed":
-            out[m] = (_node("done", "✓ 本轮已关闭 · 里程碑评测") if F.milestone_evaluations(ws)
-                      else _node("skip", "本轮已关闭"))
+            out[m] = (_node("done", "✓ round closed · milestone") if F.milestone_evaluations(ws)
+                      else _node("skip", "round closed"))
         elif status == "partial":  # e.g. ② trials whose search is owed: under way until the round is decided
-            out[m] = (_node("todo", "停止时未完成") if stopped else _node("todo", "本轮已判定，未完成")
-                      if rnd["decision"] is not None else _node("current", "● 进行中"))
+            out[m] = (_node("todo", "unfinished at stop") if stopped else _node("todo", "decided, unfinished")
+                      if rnd["decision"] is not None else _node("current", "● in progress"))
         elif m in nxt:
             late = m == "deliver" and F.own_delivery(ws, arts) and F.redeliver_pending(ws)
-            out[m] = (_node("wait", "⏸ 等你批准") if asked
-                      else _node("current", "● 待重新交付最佳版本" if late else "● 下一步"))
+            out[m] = (_node("wait", "⏸ waiting for approval") if asked
+                      else _node("current", "● re-deliver best version" if late else "● next"))
         elif STEP_INDEX[m] < entry or STEP_INDEX[m] < position:
-            out[m] = _node("skip", "本轮不经过")
+            out[m] = _node("skip", "skipped this round")
         else:
             out[m] = _node("todo")
     if stopped:
-        out["check"] = _node("done", "✓ 已核对")
+        out["check"] = _node("done", "✓ checked")
     elif step == "plan":
-        out["check"] = _node("wait", "⏸ 等你批准计划")
+        out["check"] = _node("wait", "⏸ plan needs approval")
     elif _milestone_open(ws):
-        out["check"] = _node("wait", "⏸ 等你定里程碑")
+        out["check"] = _node("wait", "⏸ milestone question")
     elif step == "promote":
-        out["check"] = _node("current", "● 等 rsi promote")
+        out["check"] = _node("current", "● waiting for rsi promote")
     elif step == "close":
-        out["check"] = _node("current", "● 等关闭本轮")
+        out["check"] = _node("current", "● waiting for round close")
     elif step == "milestone" or _milestone_running(ws):
-        out["check"] = _node("current", "● 里程碑发布中")
+        out["check"] = _node("current", "● milestone release")
     elif step == "decided" and not writing_plan:
-        out["check"] = _node("current", "● 等 rsi next")
+        out["check"] = _node("current", "● waiting for rsi next")
     elif rnd["decision"] is not None:
-        out["check"] = _node("done", "✓ 已判定")
+        out["check"] = _node("done", "✓ decided")
     else:
         out["check"] = _node("todo")
     if stopped:
         at = _utc(stopped.get("at"))
-        out["stop"] = _node("current", "■ %s 停止" % _hm(at) if at else "■ 已停止")
+        out["stop"] = _node("current", "■ stopped %s" % _hm(at) if at else "■ stopped")
     else:
         out["stop"] = _node("todo")
         notes = bool(_notes_questions(ws))
@@ -973,23 +1053,26 @@ def flow_states(ws, progress):
             for k, node in out.items():
                 if node["state"] == "current" and (asker is None or k == asker):
                     running = k in progress and progress[k]["state"] == "running"
-                    out[k] = _node("wait", "⏸ 运行中 · 等你回答" if running else "⏸ 等你回答")
+                    out[k] = _node("wait", "⏸ running · awaiting user" if running else "⏸ waiting for the user")
             if asker is not None and out[asker]["state"] != "wait":
-                out[asker] = _node("wait", "⏸ 等你回答")
+                out[asker] = _node("wait", "⏸ waiting for the user")
     return out
 
 
 # ---- the overview's lead ----------------------------------------------------------------------
 
 # Short phrases for the orchestrator's own commands (_status keys); a next step leads with its name.
-LEADS = {"promote": "顶层核对：等 rsi promote 判定本轮", "close": "等关闭本轮（rsi close-round）",
-         "milestone": "里程碑发布进行中：等里程碑的交付和评测登记"}
+LEADS = {"promote": "Top-level check: waiting for rsi promote to decide the round",
+         "close": "Waiting for the round to be closed (rsi close-round)",
+         "milestone": "Milestone release in progress: waiting for the milestone delivery and evaluation to be "
+                      "registered"}
 # The same with the engine's records: rsi run carries these steps out itself.
-ENGINE_LEADS = dict(LEADS, promote="顶层核对：rsi run 判定本轮（升级或保留）", close="rsi run 关闭本轮（rsi close-round 的效果）")
+ENGINE_LEADS = dict(LEADS, promote="Top-level check: rsi run decides the round (promote or keep)",
+                    close="rsi run closes the round (as rsi close-round does)")
 
 
 def now_lead(ws, progress=None, questions=None, view=None):
-    """What the run waits for in a few words: the title of the overview's 「现在在等什么」 (its detail is
+    """What the run waits for in a few words: the title of the overview's "What the run waits for" (its detail is
     waiting_for's sentence) and the status line's text when no dispatch is open (rsi.live.now_line). `progress`
     (module_progress), `questions` (pending_questions) and `view` (_view's (key, where, what, action)) are computed
     when not given."""
@@ -1001,9 +1084,10 @@ def now_lead(ws, progress=None, questions=None, view=None):
     if s["stopped"]:
         return stopped_texts(ws, action)[0]
     if key == "plan":
-        return "等你批准计划 %s" % rnd["plan_id"]
+        return "Waiting for the user to approve plan %s" % rnd["plan_id"]
     if questions:
-        return "等你在 Claude 里回答上方的问题（%d 条）" % len(questions)
+        return ("Waiting for the user to answer the question above in Claude" if len(questions) == 1
+                else "Waiting for the user to answer the %d questions above in Claude" % len(questions))
     if key in ("running", "handed"):
         state = "running" if key == "running" else "unregistered"
         if ws.dispatches():  # the engine's records: the dispatches the action names, of any round
@@ -1012,25 +1096,28 @@ def now_lead(ws, progress=None, questions=None, view=None):
             mods = [m for m in MODULES if progress[m]["state"] == state]
         where = " / ".join(STEP_NAMES[m] for m in _stages(mods))
         if answer_going_back(ws, action):
-            return "%s：把你的回答送回 %s" % (where, "、".join(_skill(m) for m in mods))
+            return "%s: sending the user's answer back to %s" % (where, ", ".join(_skill(m) for m in mods))
         if key == "running" and ws.dispatches():  # an agent not launched yet is no running one
             ds = _action_dispatches(ws, action)
             run = [m for m in mods if any(d.get("module") == m and d.get("status") != "pending" for d in ds)]
             queued = [m for m in mods if m not in run]
-            parts = (["%s 运行中" % "、".join(_skill(m) for m in run)] if run else []) + (
-                ["%s 待启动" % "、".join(_skill(m) for m in queued)] if queued else [])
-            return "%s：%s" % (where, "，".join(parts))
-        return "%s：%s %s" % (where, "、".join(_skill(m) for m in mods), "运行中" if key == "running" else "已交回，待登记")
+            parts = (["%s running" % ", ".join(_skill(m) for m in run)] if run else []) + (
+                ["%s not launched yet" % ", ".join(_skill(m) for m in queued)] if queued else [])
+            return "%s: %s" % (where, "; ".join(parts))
+        return "%s: %s %s" % (where, ", ".join(_skill(m) for m in mods),
+                              "running" if key == "running" else "handed back, waiting to be registered")
     if key in NEXT_STEPS:
-        return "下一步：%s" % where
+        return "Next: %s" % where
     records = bool(ws.dispatches())  # the engine's run: rsi run does promote, close_round and next itself
     if key in LEADS:
         return (ENGINE_LEADS if records else LEADS)[key]
     if ws.stop_check()[0]:
-        return "停止条件已满足：rsi run 结束运行" if records else "停止条件已满足：等 rsi next 结束运行"
+        return ("A stop condition is met: rsi run ends the run" if records
+                else "A stop condition is met: waiting for rsi next to end the run")
     if rnd["plan_id"] is None:
-        return "%s：等 rsi-judge 写计划" % STEP_NAMES["judge"]
-    return ("rsi run 进入第 %d 轮" if records else "等进入第 %d 轮（rsi next）") % (s["round"] + 1)
+        return "%s: waiting for rsi-judge to write the plan" % STEP_NAMES["judge"]
+    return ("rsi run moves on to round %d" if records
+            else "Waiting to move on to round %d (rsi next)") % (s["round"] + 1)
 
 
 def _asking_module(ws, key, action):

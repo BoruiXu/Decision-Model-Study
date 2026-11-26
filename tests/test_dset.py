@@ -1,4 +1,4 @@
-"""dset, the data module's split tool (modules/data/dset): sets, grow, check and refresh, run in-process."""
+"""dset, the data module's split tool (modules/data/dset): sets, grow, check, refresh and repair, run in-process."""
 import contextlib
 import copy
 import filecmp
@@ -15,11 +15,14 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "modules", "data"))
 
+from dset import quality as Q  # noqa: E402
 from dset.cli import main  # noqa: E402
-from fixtures import TIME, corpus_rows, make_artifact, make_task_dir, time_task, write_jsonl  # noqa: E402
+from fixtures import (TIME, binary_task, corpus_rows, full_row, make_artifact, make_task_dir, time_task,  # noqa: E402
+                      write_jsonl)
 from rsi import datasplit as DS  # noqa: E402
 from rsi import rows as R  # noqa: E402
 from rsi.artifacts import validate_artifact  # noqa: E402
+from rsi.variants import apply_spec  # noqa: E402
 from rsi.workspace import RsiError, Workspace  # noqa: E402
 
 def load(path):
@@ -106,7 +109,7 @@ class TestDset(unittest.TestCase):
         rule = new["data"]["split"]
         self.assertEqual((new["version"], rule["sizes"]["trainset"], rule["unit"], rule["seed"]), (2, 6, "cluster", 0))
         self.assertEqual(DS.fill_errors(self.task, new), [])
-        self.assertIn("切分规则".encode("utf-8"), read(self.p("out/task/TASK.md")))
+        self.assertIn(b"## Split rule (`data.split`)", read(self.p("out/task/TASK.md")))
         self.assertEqual(read(self.p("out/task/TASK.md")), DS.fill_task_md(read(self.p("task/TASK.md")), rule))
         dirs = dict((k, self.p("out", k)) for k in ("testset", "evalset", "valset", "pool", "trainset"))
         dirs["corpus"] = self.p("corpus")
@@ -229,6 +232,83 @@ class TestDset(unittest.TestCase):
         merged = [r for r in R.read_jsonl(self.p("clean/rows.jsonl")) if r["id"] == rows[1]["id"]]
         self.assertEqual((len(merged), merged[0]["target"], merged[0]["meta"]["n_obs"]),
                          (1, {"yes": 0.5, "no": 0.5}, 2))
+
+    def test_grow_takes_several_with_files(self):
+        self.sets("out")
+        t2 = "out/task/task.json"
+        shas, n = ("a1b2c3d4e5f6", "0f9e8d7c6b5a"), 0
+        for sha in shas:                                    # two arms' verified rows, two rows each, new ids and inputs
+            os.makedirs(self.p("arms", sha))
+            rows = [full_row(100 + n + j, self.task) for j in range(2)]
+            for r in rows:
+                r["meta"]["extra"] = {"step": 3}
+            n += 2
+            write_jsonl(self.p("arms", sha, "verified.jsonl"), rows)
+        code, s, err = self.dset("grow", "--task", t2, "--pool", "out/pool", "--trainset", "out/trainset", "--parent",
+                                 "trainset-0001", "--with", "arms/%s/verified.jsonl" % shas[0], "--with",
+                                 "arms/%s/verified.jsonl" % shas[1], "--round", "2", "--out", "g")
+        self.assertEqual((code, s and s["with"]), (0, 4), err)
+        self.assertEqual(len(R.read_jsonl(self.p("g/rows.jsonl"))), 6 + 4)
+        changes = load(self.p("g/manifest.json"))["changes"]
+        for sha in shas:
+            self.assertIn("arms/%s" % sha, changes)
+
+    def test_prompt_variants_follow_their_seeds(self):
+        self.sets("out")
+        t2 = "out/task/task.json"
+        task = load(self.p(t2))
+        spec = {"id": "p1", "instructions": "Is this message unwanted bulk mail?", "criteria": None, "rename": None,
+                "tables": None}
+        self.write_json("p1.json", [spec])
+        rows = R.read_jsonl(self.p("out/trainset/rows.jsonl"))
+        rows.insert(1, apply_spec(rows[0], spec, task))                    # the same state as its seed
+        write_jsonl(self.p("v.jsonl"), rows)
+        code, s, err = self.dset("check", "--task", t2, "--rows", "v.jsonl")
+        self.assertEqual(code, 1)
+        self.assertIn("variant", err)                                       # without its spec
+        code, s, err = self.dset("check", "--task", t2, "--rows", "v.jsonl", "--variants", "p1.json", "--write", "ts",
+                                 "--mode", "drop", "--round", "2", "--parent", "trainset-0001")
+        self.assertEqual((code, s and s["duplicate_inputs"]), (0, 0), err)  # a variant is no duplicate of its seed
+        self.assertEqual([r["id"] for r in R.read_jsonl(self.p("ts/rows.jsonl"))][:2], [rows[0]["id"], rows[1]["id"]])
+        self.assertEqual(load(self.p("ts/manifest.json"))["prompt_variants"], [spec])
+        self.assertEqual(validate_artifact("trainset", self.p("ts"), task), [])
+        code, s, err = self.dset("grow", "--task", t2, "--pool", "out/pool", "--trainset", "ts", "--parent",
+                                 "trainset-0002", "--add", "2", "--round", "3", "--out", "g")
+        self.assertEqual(code, 0, err)                                      # the next round keeps them
+        self.assertEqual(load(self.p("g/manifest.json"))["prompt_variants"], [spec])
+        self.assertEqual(validate_artifact("trainset", self.p("g"), task), [])
+
+    def test_check_reports_sources_and_synthetic_share(self):
+        task = binary_task()
+        task["quality_checks"] = {"max_synthetic_share": 0.1}
+        self.write_json("st.json", task)
+        rows = [full_row(i, task) for i in range(10)]                     # yes on even i; source "synthetic", rule
+        for r in rows[0], rows[2]:
+            r["meta"].update(source="dgen:smote", label_source="human")
+        write_jsonl(self.p("ten.jsonl"), rows)
+        code, s, err = self.dset("check", "--task", "st.json", "--rows", "ten.jsonl", "--by-source")
+        self.assertEqual((code, s and s["synthetic_share"]), (0, 0.2), err)
+        self.assertEqual(s["by_source"], {"dgen|human|yes": 2, "synthetic|rule|no": 5, "synthetic|rule|yes": 3})
+        self.assertEqual(Q.quality_checks(rows, task),
+                         [{"name": "max_synthetic_share", "value": 0.2, "threshold": 0.1, "passed": False}])
+
+    def test_repair_applies_task_constraints(self):
+        task = binary_task()
+        task["input"]["format"] = "object"
+        task["features"] = {"constraints": [{"nonneg": ["t[].v"]}]}
+        self.write_json("ct.json", task)
+        rows = [full_row(i, task, state={"t": [{"v": v}]}) for i, v in enumerate((-1, 2))]
+        write_jsonl(self.p("r.jsonl"), rows)
+        code, s, err = self.dset("repair", "--task", "ct.json", "--rows", "r.jsonl", "--out", "fixed.jsonl")
+        self.assertEqual((code, s and s["repaired"], s and s["violations_left"]), (0, 1, 0), err)
+        self.assertEqual(s["by_rule"], {"nonneg t[].v": {"broken": 1, "left": 0}})
+        self.assertEqual([r["state"]["t"][0]["v"] for r in R.read_jsonl(self.p("fixed.jsonl"))], [0, 2])
+        rows[1]["state"] = {"t": [{"w": 2}]}                               # a leaf repair cannot make: exit 1
+        write_jsonl(self.p("r2.jsonl"), rows)
+        code, s, err = self.dset("repair", "--task", "ct.json", "--rows", "r2.jsonl", "--out", "left.jsonl")
+        self.assertEqual((code, s["violations_left"], [x["id"] for x in s["left"]]), (1, 1, [rows[1]["id"]]))
+        self.assertIn("still break", err)
+        self.assertEqual(len(R.read_jsonl(self.p("left.jsonl"))), 2)      # written all the same, for the record
 
     def test_refresh_draws_unused_eval_rows(self):
         self.sets("out")

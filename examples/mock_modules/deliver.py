@@ -92,7 +92,7 @@ def main():
     if c.rehand_if_answered():
         return
     st = c.state()
-    refused = re.findall(r"子目录 (\S+?)（delivery）登记被拒", c.feedback)
+    refused = re.findall(r"subdirectory (\S+?) \(delivery\) refused by registration", c.feedback)
     redo = [st["made"][x] for x in refused if x in st.get("made", {})] if c.handed_back_before() else []
     malformed = bool(c.knob("malformed")) and c.first
     made, dirs, gates = dict(st.get("made") or {}), [], []
@@ -104,16 +104,18 @@ def main():
         dirs.append(d)
         gates.append(g)
     if not dirs:
-        c.fail("简报里没有要交付的候选")
+        c.fail("the brief gives no candidate to deliver")
     st["made"] = made
     c.save_state(st)
-    note = "；".join("%s：能加载，复现验证集 %s，延迟 p50 %s ms、p95 %s ms" % (
-        g["candidate"], "是" if g["reproduces_val"] else "否", g["p50"], g["p95"]) for g in gates)
+    note = "; ".join("%s: loads, reproduces the valset %s, latency p50 %s ms, p95 %s ms" % (
+        g["candidate"], "yes" if g["reproduces_val"] else "no", g["p50"], g["p95"]) for g in gates)
     if redo:
-        return c.handback(dirs, notes="按登记的错误重新打包 %s。%s" % ("、".join(refused), note))
-    r = M.write_record(c, "record", "候选要一个能调用的交付包", "包着候选自己的预测入口就能复现它",
-                       "打包 %s" % "、".join(g["candidate"] for g in gates), "eval latency_ms_p95", None,
-                       gates[0]["p95"], "success", "交付包 = 预测入口 + model.json；cost_per_1k 是每千次的 CPU 秒",
+        return c.handback(dirs, notes="packaged %s again by the registration's errors. %s" % (", ".join(refused), note))
+    r = M.write_record(c, "record", "the candidate needs a callable delivery package",
+                       "wrapping the candidate's own prediction entry reproduces it",
+                       "packaged %s" % ", ".join(g["candidate"] for g in gates), "eval latency_ms_p95", None,
+                       gates[0]["p95"], "success",
+                       "delivery package = prediction entry + model.json; cost_per_1k is CPU seconds per 1000 calls",
                        artifacts=[g["candidate"] for g in gates])
     c.handback(dirs + [r], notes=note)
 

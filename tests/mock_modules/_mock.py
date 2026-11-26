@@ -19,10 +19,11 @@ RSI_MOCK_BEHAVIOR names a JSON file {module: {knob: value}}; the knobs (first ca
   cost          train, any call: the cost.compute_hours of each candidate it writes (default the fixture's 1.5)
   record        train: the first call also hands back an experiment record (subdirectory "record")
   questions     the hand-back's questions
+  spend         lines (each without "at") the module appends to its brief's spend_file
   questions_only
                 the first call hands back its questions and no artifact
   long_job      train: hand back status long_job, marker <outdir>/job.marker (the test writes it); a check-in
-                (feedback 「# 定时检查」, any call) hands back long_job with the same marker
+                (feedback `# Check-in`, any call) hands back long_job with the same marker
   checkin       train, any check-in: {"wait": file} waits for the file first (at most WAIT_S seconds), {"fail": notes}
                 hands back status failed with these notes
   refuse_trial  train: the first call's last trial names an unregistered valset, so registration refuses it; a return
@@ -44,7 +45,7 @@ A call whose feedback carries the user's answers to the last hand-back's questio
 nothing until they are answered) hands back the same subdirectories again, data with a new trainset whose notes
 quote the answer; after a hand-back of questions only, it does the whole job.
 
-train runs one search per dispatch, in two parts: a call whose feedback's reason line (原因：…) names registered
+train runs one search per dispatch, in two parts: a call whose feedback's reason line (Reason: …) names registered
 candidates writes the search over them (search-<call>, producer train; the default is the first, the best the one
 with the best validation primary metric); any other call writes a new search's trial candidates.
 
@@ -110,6 +111,9 @@ class Call(object):
             f.write(json.dumps({"session": self.session, "feedback_file": self.feedback_file,
                                 "feedback": self.feedback, "purpose": self.purpose, "pid": os.getpid()},
                                ensure_ascii=False) + "\n")
+        for line in self.knob("spend") or []:
+            with open(self.brief["spend_file"], "a", encoding="utf-8") as f:
+                f.write(json.dumps(dict(line, at="2026-11-26T00:00:00Z")) + "\n")
         if self.knob("started"):
             with open(self.knob("started"), "w") as f:
                 f.write("%d\n" % os.getpid())
@@ -223,7 +227,7 @@ def _search(c, ids):
 
 
 def _train(c):
-    if (c.feedback or "").startswith("# 定时检查"):
+    if (c.feedback or "").startswith("# Check-in"):
         how = c.behavior.get("checkin") or {}
         if how.get("wait"):
             c.wait(lambda: os.path.exists(how["wait"]))
@@ -237,7 +241,7 @@ def _train(c):
                           notes="phase %d started" % c.n)
     if c.knob("fail"):
         return c.handback([], status="failed", notes=c.knob("fail"))
-    reason = re.search(r"^原因：(.*)$", c.feedback or "", re.M)
+    reason = re.search(r"^Reason: (.*)$", c.feedback or "", re.M)
     ids = re.findall(r"candidate-\d{4}", reason.group(1)) if reason else []
     if ids:
         flag = os.path.join(c.outdir, ".skipped-searches")
@@ -247,7 +251,7 @@ def _train(c):
                 f.write("x")
             return c.handback([], notes="no search this time (call %d)" % c.n)
         return _search(c, ids)
-    refused = re.findall(r"子目录 (\S+)（candidate）登记被拒", c.feedback or "")
+    refused = re.findall(r"subdirectory (\S+) \(candidate\) refused by registration", c.feedback or "")
     if refused:  # fix what registration refused, hand back only that
         fixed = []
         for name in refused:
@@ -294,7 +298,7 @@ def _judge(c):
 
 
 WORK = {"data": _data, "train": _train, "deliver": _deliver, "judge": _judge}
-ANSWER = re.compile(r"用户（[^）]*）的回答：(.*)")
+ANSWER = re.compile(r"The user's answer \([^)]*\): (.*)")
 
 
 def _answered(c, quote):
@@ -309,9 +313,9 @@ def _answered(c, quote):
         return WORK[c.module](c)
     if c.module == "data" and "trainset" in names:
         new = "trainset-%d" % c.n
-        c.make("trainset", new, ids=TRAIN_IDS, notes="按用户的回答修改：%s" % quote)
+        c.make("trainset", new, ids=TRAIN_IDS, notes="changed by the user's answer: %s" % quote)
         names = [new if n == "trainset" else n for n in names]
-    return c.handback(names, notes="按用户的回答重新交回")
+    return c.handback(names, notes="handed back again by the user's answer")
 
 
 def main(module):

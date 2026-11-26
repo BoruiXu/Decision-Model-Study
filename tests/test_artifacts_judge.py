@@ -1,12 +1,17 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 
-from fixtures import binary_task, choice_task, make_artifact
+from fixtures import add_predictions, binary_task, choice_task, make_artifact, update_manifest
 from rsi import artifacts, rules
+from rsi.workspace import RsiError
+from test_workspace import EVAL, TEST, VAL, WsCase
 
 KINDS = ("evaluation", "plan", "record")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _manifest(d):
@@ -111,6 +116,90 @@ class TestJudgeArtifacts(unittest.TestCase):
                 errs = self.edit(kind, change)
                 self.assertTrue(errs)
                 self.assertTrue(any(all(w in e for w in words) for e in errs), errs)
+
+
+LR = {"baseline-0001": ("lr", (10, 20))}  # the round's lr baseline: one valset and one evalset row wrong
+
+
+class TestBaselinesScored(WsCase):
+    """The judge reports the baselines of the round's comparison on the evalset (baselines_eval) and, at the milestone,
+    the round's test baselines on the testset (baselines_test); registration recomputes every number."""
+
+    def ws_with_comparison_and_delivery(self):
+        self.sets()
+        self.candidate()
+        self.ws.register("baseline", make_artifact("baseline", self.src("bl-lr"), self.task, ids=VAL, eval_ids=EVAL,
+                                                   wrong=(10, 20)))
+        self.ws.register("comparison", self.mk("comparison", ids=VAL, baselines={"lr": ("baseline-0001", (10, 20))}))
+        self.delivery()
+        return self.ws
+
+    def ws_milestone_with_test_baseline(self):
+        ws = self.ws_with_comparison_and_delivery()
+        ws.register("evaluation", self.eval_src(baselines=LR))
+        ws.promote("evaluation-0001")
+        self.approve("use_testset")
+        ws.register("delivery", add_predictions(self.mk("delivery", ids=EVAL, candidate_id="candidate-0001"),
+                                                self.task, "predictions_test", TEST, testset_id="testset-0001"))
+        self.approve("use_testset")
+        src = make_artifact("baseline", self.src("bl-lr-test"), self.task, ids=VAL, eval_ids=EVAL, wrong=(10, 20),
+                            reused_from="baseline-0001")
+        ws.register("baseline", add_predictions(src, self.task, "predictions_test", TEST, wrong=(30,),
+                                                testset_id="testset-0001"))
+        self.approve("use_testset")
+        return ws
+
+    def milestone_src(self, **fields):
+        return self.eval_src(uses_testset=True, best_before={"version": "V1", "evaluation_id": "evaluation-0001"},
+                             recommendation={"decision": "keep", "reason": "milestone release"}, test_ids=TEST,
+                             delivery_id="delivery-0002", **fields)
+
+    def rsi_score_baselines(self, ws, delivery, *baselines):
+        """What the judge runs (its skill): `rsi score --baselines-on evalset --baseline <dir>...` on the registered
+        files, parsed."""
+        def f(aid, logical):
+            return os.path.join(ws.path(aid), ws.manifest(aid)["files"][logical]["path"])
+        eid = ws.current("evalset")
+        argv = [sys.executable, "-m", "rsi", "score", "--task", os.path.join(ws.path("task-0001"), "task.json"),
+                "--labels", f(eid, "labels"), "--predictions", f(delivery, "predictions_eval"),
+                "--clusters", f(eid, "inputs"), "--baselines-on", "evalset"]
+        for b in baselines:
+            argv += ["--baseline", ws.path(b)]
+        p = subprocess.run(argv, env=dict(os.environ, PYTHONPATH=REPO), stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)
+
+    def test_evaluation_must_cover_the_round_baselines(self):
+        ws = self.ws_with_comparison_and_delivery()          # comparison lists baseline-0001
+        with self.assertRaises(RsiError) as e:
+            ws.register("evaluation", self.eval_src())
+        self.assertIn("baselines_eval: missing baseline-0001 (lr)", str(e.exception))
+        self.assertIn("--baselines-on evalset --baseline <baseline-0001>", str(e.exception))
+        # the object the fixed command prints registers as it is
+        printed = self.rsi_score_baselines(ws, "delivery-0001", "baseline-0001")["baselines_eval"]
+        good = update_manifest(self.eval_src(), baselines_eval=printed)
+        self.assertEqual(_manifest(good)["baselines_eval"], _manifest(self.eval_src(baselines=LR))["baselines_eval"])
+        shifted = json.loads(json.dumps(_manifest(good)["baselines_eval"]))
+        shifted["baseline-0001"]["delta"]["delta"] += 0.01
+        with self.assertRaises(RsiError) as e:
+            ws.register("evaluation", update_manifest(self.eval_src(baselines=LR), baselines_eval=shifted))
+        self.assertIn("baselines_eval.baseline-0001.delta", str(e.exception))
+        self.assertIn("--baselines-on evalset --baseline <baseline-0001>`", str(e.exception))
+        self.refused("evaluation", self.eval_src(baselines=dict(LR, **{"baseline-0009": ("gbdt", ())})),
+                     "baselines_eval.baseline-0009")
+        self.assertEqual(ws.register("evaluation", good), "evaluation-0001")
+
+    def test_milestone_evaluation_must_cover_the_test_baselines(self):
+        ws = self.ws_milestone_with_test_baseline()          # baseline-0002 has predictions_test
+        with self.assertRaises(RsiError) as e:
+            ws.register("evaluation", self.milestone_src())
+        self.assertIn("baselines_test: missing baseline-0002 (lr)", str(e.exception))
+        self.assertTrue(ws.register("evaluation", self.milestone_src(baselines={"baseline-0002": ("lr", (30,))})))
+        # baselines_test belongs to a milestone evaluation, baselines_eval to the others
+        for field, src in (("baselines_test", self.eval_src()), ("baselines_eval", self.milestone_src())):
+            errors = artifacts.validate_artifact("evaluation", update_manifest(src, **{field: {}}), self.task)
+            self.assertTrue(any(e.startswith(field) for e in errors), errors)
 
 
 class TestRules(unittest.TestCase):

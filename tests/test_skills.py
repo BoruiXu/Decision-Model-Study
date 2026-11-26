@@ -4,6 +4,7 @@ skill_sections(path) returns the second-level headings of a skill file and
 skill_section(path, title) the text under one of them; the module-skill
 tests reuse both.
 """
+import argparse
 import contextlib
 import importlib
 import io
@@ -16,6 +17,7 @@ import unittest
 from unittest import mock
 
 from rsi import briefs, cli, engine
+from rsi.flow import CODE_MODULES
 from rsi.rules import APPROVAL_ITEMS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,15 +30,16 @@ MODULES = os.path.join(ROOT, "modules")
 MODULE_SKILLS = ("data", "train", "deliver", "judge")
 TEMPLATE_NAME = "_template"
 TRAIN_COMMAND = "<repo root>/modules/train/train"
-ORCH_SECTIONS = ("概述", "入口", "任务接入", "运行", "回答问题", "进度", "审批点", "异常处理", "常见错误")
+ORCH_SECTIONS = ("Overview", "Entry points", "Task intake", "Running", "Answering questions", "Progress",
+                 "Approval points", "Handling problems", "Common mistakes")
 # The old step-by-step skill had these sections; the engine does that work now.
-OLD_ORCH_SECTIONS = ("主流程", "派 subagent", "交回之后", "闭环", "长任务")
+OLD_ORCH_SECTIONS = ("Main flow", "Dispatching subagents", "After the hand-back", "Closed loop", "Long jobs")
 CLI_COMMANDS = tuple(name for name, _help in cli.COMMANDS)
 # The engine runs these; the operator skill never tells anyone to (rsi.engine / rsi.decisions do).
 ENGINE_COMMANDS = ("promote", "next", "close-round")
 # Vocabulary of the brief and handback.json that module skills spell out in backticks.
 PROTOCOL_TOKENS = set(briefs.HANDBACK_KEYS) | set(briefs.HANDBACK_STATUSES) - {"long_job"} | {
-    "module", "purpose", "round", "ids", "inputs", "outdir", "goal", "sources", "dset"}
+    "module", "purpose", "round", "ids", "inputs", "outdir", "goal", "sources", "dset", "dgen", "features"}
 # `rsi <subcommand>`; the lookbehind keeps skill names such as rsi-orchestrator out (ruling R5).
 COMMAND_RE = re.compile(r"(?<![\w-])rsi\s+([a-z][a-z-]*)")
 CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
@@ -45,9 +48,9 @@ CHOICE_PLACEHOLDERS = {"<kind>": "trainset", "<item>": "plan"}
 MODULE_CALL = "python3 -m rsi "
 BRIEF = os.path.join(ORCH_DIR, "templates", "brief.md")
 KINDS = ("task", "trainset", "valset", "evalset", "testset", "corpus", "pool", "candidate", "search",
-         "delivery", "feedback", "evaluation", "plan", "record")
-MODULE_SECTIONS = ("输入", "输出", "门", "单独运行", "步骤和策略子 skill", "模块指标",
-                   "实验记录", "长任务", "负责人和版本", "常见错误")
+         "baseline", "comparison", "delivery", "feedback", "evaluation", "plan", "record")
+MODULE_SECTIONS = ("Inputs", "Outputs", "Gates", "Running standalone", "Steps and strategy sub-skills",
+                   "Module metrics", "Experiment records", "Long jobs", "Owner and version", "Common mistakes")
 MODULES_DOC = os.path.join(ROOT, "docs", "interfaces", "modules.md")
 DATASETS_DOC = os.path.join(ROOT, "docs", "interfaces", "datasets.md")
 INTERFACES_README = os.path.join(ROOT, "docs", "interfaces", "README.md")
@@ -249,32 +252,40 @@ def trsi_parse_error(words):
 
 
 DATA_DIR = os.path.join(ROOT, "modules", "data")
-# dset options that take a number: a placeholder after one of them gets 1 before parsing.
-DSET_INT_OPTIONS = ("--round", "--add")
-_DSET = []
+# dset and dgen options that take a number: a placeholder after one of them gets 1 before parsing.
+DSET_INT_OPTIONS = ("--round", "--add", "--n", "--share", "--seed", "--max-rows", "--card-wait", "--eps-ratio")
+_TOOLS = {}
+
+
+def tool_cli(tool):
+    """The command line module of the data module's tool `tool` (dset or dgen: modules/data/<tool>/cli.py), imported
+    without running anything (dgen's needs modules/common and the repository root too)."""
+    if tool not in _TOOLS:
+        paths = [DATA_DIR, os.path.join(MODULES, "common"), ROOT]
+        sys.path[:0] = paths
+        try:
+            _TOOLS[tool] = importlib.import_module(tool + ".cli")
+        finally:
+            for p in paths:
+                sys.path.remove(p)
+    return _TOOLS[tool]
 
 
 def dset_cli():
-    """dset's command line module (modules/data/dset/cli.py), imported without running anything."""
-    if not _DSET:
-        sys.path.insert(0, DATA_DIR)
-        try:
-            _DSET.append(importlib.import_module("dset.cli"))
-        finally:
-            sys.path.remove(DATA_DIR)
-    return _DSET[0]
+    """dset's command line module (modules/data/dset/cli.py)."""
+    return tool_cli("dset")
 
 
-def dset_lines(text):
-    """The words after `dset` of every dset command (tool_lines). The form `dset <命令> …` (a placeholder or an
-    option where the command goes) names no command and is left out."""
-    return [w for w in tool_lines(text, "dset") if w and not w[0].startswith(("<", "-"))]
+def dset_lines(text, tool="dset"):
+    """The words after `dset` (or `tool`) of every such command (tool_lines). The form `dset <command> …` (a
+    placeholder or an option where the command goes) names no command and is left out."""
+    return [w for w in tool_lines(text, tool) if w and not w[0].startswith(("<", "-"))]
 
 
-def dset_parse_error(parser, words):
-    """None when `dset <words>` parses with dset's own parser (parse_args only: no command runs), else its message.
-    dset's parser raises DsetError where argparse would exit. A bare `dset <command>` names the command, it is no
-    call: it only has to be one of dset's commands (its --help exits 0)."""
+def dset_parse_error(parser, words, tool="dset"):
+    """None when `dset <words>` (or `<tool> <words>`) parses with the tool's own parser (parse_args only: no command
+    runs), else its message. The parser raises DsetError (DgenError) where argparse would exit. A bare `dset
+    <command>` names the command, it is no call: it only has to be one of the tool's commands (its --help exits 0)."""
     try:
         words = shlex.split(" ".join(words))
     except ValueError as e:
@@ -282,12 +293,13 @@ def dset_parse_error(parser, words):
     bare = len(words) == 1
     words = ["1" if i and words[i - 1] in DSET_INT_OPTIONS and w.startswith("<") else w for i, w in enumerate(words)]
     err = io.StringIO()
+    error = getattr(tool_cli(tool), "DsetError" if tool == "dset" else "DgenError")
     try:
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
             parser.parse_args(words + ["--help"] if bare else words)
     except SystemExit as e:
         return None if bare and e.code == 0 else (err.getvalue().strip() or "argument error")
-    except dset_cli().DsetError as e:
+    except error as e:
         return str(e)
     return None
 
@@ -310,18 +322,18 @@ class TestOrchestratorSkill(unittest.TestCase):
         text = read(ORCH)
         for title in OLD_ORCH_SECTIONS:
             self.assertNotIn(title, sections, "the operator skill still has '## %s'" % title)
-        for old in ("| 步骤 |", "① 数据", "templates/brief.md", "rows.jsonl", "labels.jsonl", "原目录"):
+        for old in ("| Step |", "① Data", "templates/brief.md", "rows.jsonl", "labels.jsonl", "original directory"):
             self.assertNotIn(old, text)
         self.assertLess(len(text.splitlines()), 130)
-        self.assertIn("不决定流程", text)
+        self.assertIn("You do not decide the flow", text)
 
     def test_orchestrator_uses_dashboard(self):
         text = read(ORCH)
         self.assertIn("<ws>/dashboard.html", text)
         self.assertIn("rsi dashboard <ws> --no-open", text)
-        self.assertIn("rsi dashboard <ws>", skill_section(ORCH, "入口"))
-        self.assertIn("现在在等什么", skill_section(ORCH, "进度"))
-        self.assertIn("● 运行中", skill_section(ORCH, "进度"))
+        self.assertIn("rsi dashboard <ws>", skill_section(ORCH, "Entry points"))
+        self.assertIn("What the run waits for", skill_section(ORCH, "Progress"))
+        self.assertIn("● running", skill_section(ORCH, "Progress"))
 
     def test_orchestrator_commands_exist(self):
         used = set()
@@ -354,7 +366,7 @@ class TestOrchestratorSkill(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_exit_codes_match_the_engine(self):
-        section = skill_section(ORCH, "运行")
+        section = skill_section(ORCH, "Running")
         rows = {}
         for line in section.splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
@@ -366,7 +378,7 @@ class TestOrchestratorSkill(unittest.TestCase):
         self.assertIn("rsi run", section)
 
     def test_background_run_recipe_and_notes(self):
-        text = skill_section(ORCH, "运行")
+        text = skill_section(ORCH, "Running")
         self.assertIn("PYTHONPATH=<repo root> python3 -m rsi run <ws> --json", text)
         # P11 (sim2): one output file per run and its exit code beside it, so a run the lock refuses never
         # overwrites the output of the run before it.
@@ -381,29 +393,31 @@ class TestOrchestratorSkill(unittest.TestCase):
         self.assertLess(line.index('echo "$out"'), line.index("python3 -m rsi run"))
         self.assertIn('--json > "$out.json" 2> "$out.err"', line)  # the status lines go to <name>.err
         self.assertTrue(line.startswith("out=<ws>/work/run-out-"), line)
-        for sec in ("运行", "进度"):
-            self.assertIn("tail -n 3 <文件名>.err", skill_section(ORCH, sec), sec)
-        for words in ("先打印", "文件名", "不要猜"):
+        for sec in ("Running", "Progress"):
+            self.assertIn("tail -n 3 <file name>.err", skill_section(ORCH, sec), sec)
+        for words in ("first prints", "file name", "do not guess"):
             self.assertIn(words, text)
-        self.assertIn("运行锁", read(ORCH))  # a stop during a run: wait for the run, then run once more
-        self.assertIn("## 待用户回答", skill_section(ORCH, "进度"))
+        self.assertIn("run lock", read(ORCH))  # a stop during a run: wait for the run, then run once more
+        self.assertIn("## Questions for the user", skill_section(ORCH, "Progress"))
 
     def test_plan_and_code_defaults_are_told_right(self):
         # P12 (sim2): a plan has no cost estimate; the registered plan's place; approvals, the milestone and a
         # module's question have no code default.
         text = read(ORCH)
-        self.assertNotIn("预计花费", text)
-        answer = skill_section(ORCH, "回答问题")
+        self.assertNotIn("estimated cost", text)
+        answer = skill_section(ORCH, "Answering questions")
         self.assertIn("<ws>/artifacts/<plan_id>/manifest.json", answer)
-        self.assertIn("没有代码默认", answer)
-        for kind in ("批准类", "里程碑", "模块交回时的提问"):
+        self.assertIn("no code default", answer)
+        for kind in ("approval questions", "milestone", "questions a module asks in its hand-back"):
             self.assertIn(kind, answer)
 
     def test_no_old_wording_of_the_top_level_doing_the_engines_work(self):
         # P3 (sim2): the engine (`rsi run`) registers, decides the round, writes the report; nothing says the
-        # orchestrator ("顶层") does.
+        # orchestrator does.
         from rsi import briefs as B, dashboard, dashboard_pages
-        old = ("由顶层", "等顶层", "顶层登记", "顶层按此顺序登记", "登记只由顶层做", "等顶层告诉你", "主流程表为准")
+        old = ("by the orchestrator", "wait for the orchestrator", "the orchestrator registers",
+               "the orchestrator registers in this order", "only the orchestrator registers",
+               "wait for the orchestrator to tell you", "the main flow table rules")
         paths = [module_path(n) for n in MODULE_SKILLS + (TEMPLATE_NAME,)] + orchestrator_files() + [
             B.__file__, dashboard.__file__, dashboard_pages.__file__, os.path.join(ROOT, "rsi", "report.py"),
             ENGINE_DOC, os.path.join(ROOT, "docs", "interfaces", "task.md"), os.path.join(ROOT, "README.md")]
@@ -413,43 +427,47 @@ class TestOrchestratorSkill(unittest.TestCase):
                 self.assertNotIn(phrase, text, "%s still says %s" % (os.path.relpath(p, ROOT), phrase))
 
     def test_answer_section_matches_the_cli(self):
-        section = skill_section(ORCH, "回答问题")
+        section = skill_section(ORCH, "Answering questions")
         self.assertIn("rsi answer <ws> <option> --by <name> --quote", section)
         for option in ("approve", "revise", "stop", "resume", "new_session", "close_round", "train", "data",
-                       "yes", "no", "已回答"):
+                       "yes", "no", "answered"):
             self.assertIn("`%s`" % option, section, option)
-        self.assertIn("没有 `resume`", section)  # R11: the train gate question has no resume option
+        self.assertIn("no `resume`", section)  # R11: the train gate question has no resume option
         self.assertIn("rsi approve", section)
 
     def test_over_budget_is_answered_with_commands_that_parse(self):
         # B1 / S1 (third simulation): the over_budget question (before a training, or a hand-back held over the budget)
         # is relayed as it is and answered approve (rsi answer, or rsi approve <ws> over_budget) or stop; approved, the
         # round runs to its decision, the held hand-back is registered without retraining, and the budget stops the run.
-        forms = ('rsi answer <ws> approve --ref <qid> --by <name> --quote "<用户原话>"',
-                 'rsi approve <ws> over_budget --by <name> --quote "<用户原话>"',
-                 'rsi answer <ws> stop --ref <qid> --by <name> --quote "<用户原话>"')
-        answer = skill_section(ORCH, "回答问题")
+        forms = ('rsi answer <ws> approve --ref <qid> --by <name> --quote "<user\'s words>"',
+                 'rsi approve <ws> over_budget --by <name> --quote "<user\'s words>"',
+                 'rsi answer <ws> stop --ref <qid> --by <name> --quote "<user\'s words>"')
+        answer = skill_section(ORCH, "Answering questions")
         item = [line for line in answer.splitlines() if "`over_budget`" in line]
         self.assertEqual(len(item), 1, item)
         found = command_lines(item[0])
         for form in forms:
             self.assertIn(form, found)
             self.assertIsNone(parse_error(form), form)
-        for words in ("原文", "交回先不登记", "不重新训练", "判定后运行因算力达到预算停止", "候选不登记"):
+        for words in ("word for word", "hand-back is not registered for now", "without training again",
+                      "after the decision the run stops because compute has reached the budget",
+                      "the candidates of that hand-back are not registered"):
             self.assertIn(words, item[0])
-        row = [line for line in skill_section(ORCH, "审批点").splitlines() if line.startswith("| `over_budget` |")]
+        row = [line for line in skill_section(ORCH, "Approval points").splitlines()
+               if line.startswith("| `over_budget` |")]
         self.assertEqual(len(row), 1, row)
         for form in forms[:2]:
             form = form.replace(" --ref <qid>", "")
             self.assertIn(form, command_lines(row[0]))
             self.assertIsNone(parse_error(form), form)
-        self.assertNotIn("派活前预计超出", row[0])  # the old wording: the question also comes after a hand-back
-        self.assertIn("运行因预算停止", row[0])
+        # the old wording: the question also comes after a hand-back
+        self.assertNotIn("expected to exceed before dispatching", row[0])
+        self.assertIn("the run stops on the budget", row[0])
 
     def test_orchestrator_lists_all_approval_items(self):
-        section = skill_section(ORCH, "审批点")
+        section = skill_section(ORCH, "Approval points")
         for item in APPROVAL_ITEMS:
-            self.assertIn("`%s`" % item, section, "审批点 does not list %s" % item)
+            self.assertIn("`%s`" % item, section, "Approval points does not list %s" % item)
 
     def test_brief_gives_modules_no_workspace(self):
         # R21: modules get input paths and an output directory, never the workspace root,
@@ -494,7 +512,7 @@ class TestModuleSkills(unittest.TestCase):
 
     def test_module_io_kinds_exist(self):
         for name in MODULE_SKILLS:
-            for title in ("输入", "输出"):
+            for title in ("Inputs", "Outputs"):
                 tokens = lower_tokens(skill_section(module_path(name), title))
                 self.assertTrue(tokens, "%s: ## %s names no artifact kind" % (name, title))
                 for token in tokens:
@@ -506,16 +524,16 @@ class TestModuleSkills(unittest.TestCase):
         for name in MODULE_SKILLS + (TEMPLATE_NAME,):
             path = module_path(name)
             text = read(path)
-            self.assertIn("brief.md", skill_section(path, "输入"), name)
-            self.assertIn("brief.json", skill_section(path, "输入"), name)
-            self.assertIn("feedback-<k>.md", skill_section(path, "输入"), name)
-            out = skill_section(path, "输出")
+            self.assertIn("brief.md", skill_section(path, "Inputs"), name)
+            self.assertIn("brief.json", skill_section(path, "Inputs"), name)
+            self.assertIn("feedback-<k>.md", skill_section(path, "Inputs"), name)
+            out = skill_section(path, "Outputs")
             self.assertIn("handback.json", out, name)
             for key in briefs.HANDBACK_KEYS:
                 self.assertIn("`%s`" % key, out, "%s: handback key %s" % (name, key))
             for status in briefs.HANDBACK_STATUSES:
                 self.assertIn("`%s`" % status, out, "%s: handback status %s" % (name, status))
-            long_job = skill_section(path, "长任务")
+            long_job = skill_section(path, "Long jobs")
             self.assertIn("long_job", long_job, name)
             self.assertIn("marker", long_job, name)
             self.assertIn("handback.json", long_job, name)
@@ -526,57 +544,61 @@ class TestModuleSkills(unittest.TestCase):
         # session; a long job writes <marker>.pid naming the job process itself and is terminated on a stop; the
         # second part of a two-part hand-back comes as a followup, no return. The wordings are the engine's.
         source = read(engine.__file__)
-        for head in ("# 用户回答了你的问题", "# 继续：交回的第二部分", "# 长任务已结束"):
-            self.assertIn(head, source)
+        answered = "# The user answered your questions"
+        second = "# Continue: the second part of the hand-back"
+        finished = "# Long job finished"
         for name in MODULE_SKILLS + (TEMPLATE_NAME,):
             path = module_path(name)
             text = read(path)
-            out = skill_section(path, "输出")
-            self.assertIn("一个都不登记", out, name)
-            self.assertIn("# 用户回答了你的问题", out, name)
-            self.assertIn("同一个会话", out, name)
-            inp = skill_section(path, "输入")
-            self.assertIn("# 继续：交回的第二部分", inp, name)
-            self.assertIn("不算退回", inp, name)
-            long_job = skill_section(path, "长任务")
-            for token in ("<marker>.pid", "date +%s", "$$", "os.getpid()", "终止", "rm -f <marker> <marker>.pid"):
+            out = skill_section(path, "Outputs")
+            inp = skill_section(path, "Inputs")
+            for head, where in ((answered, out), (second, inp), (finished, out)):
+                self.assertIn(head, source)
+                self.assertIn("`%s`" % head, where, "%s: %s" % (name, head))
+            self.assertIn("none of the artifacts of this hand-back is registered", out, name)
+            self.assertIn("same session", out, name)
+            self.assertIn("not a return", inp, name)
+            long_job = skill_section(path, "Long jobs")
+            for token in ("<marker>.pid", "date +%s", "$$", "os.getpid()", "terminates",
+                          "rm -f <marker> <marker>.pid", "must write the completion marker"):
                 self.assertIn(token, long_job, "%s: %s" % (name, token))
             self.assertNotIn("$!", text, name)  # in a shell it may name a wrapper, not the job
             self.assertNotIn("setsid", text, name)  # no such command on macOS
         # M2 (final review): a long job's questions are asked once its marker is there; without artifacts listed the
-        # answer comes with "# 长任务已结束".
+        # answer comes with "# Long job finished". The skills and templates/brief.md say it as HANDBACK_FORMAT does.
+        asked = "asked only once the completion marker is there"
         for name in MODULE_SKILLS + (TEMPLATE_NAME,):
-            out = skill_section(module_path(name), "输出")
-            self.assertIn("完成标记出现后才问", out, name)
-            self.assertIn("「# 长任务已结束」", out, name)
-        for where, text in (("briefs.HANDBACK_FORMAT", briefs.HANDBACK_FORMAT), ("engine.md", read(ENGINE_DOC)),
-                            ("templates/brief.md", read(BRIEF))):
-            self.assertIn("完成标记出现后才问", text, where)
+            self.assertIn(asked, skill_section(module_path(name), "Outputs"), name)
+        for where, text in (("briefs.HANDBACK_FORMAT", briefs.HANDBACK_FORMAT), ("templates/brief.md", read(BRIEF))):
+            self.assertIn(asked, text, where)
+            self.assertIn("must write the completion marker", text, where)  # an instruction, as in every skill
+        self.assertIn(asked, read(ENGINE_DOC))
         # M5: the README's rsi answer row says a module's question holds its hand-back until the answer.
         row = [line for line in read(os.path.join(ROOT, "README.md")).splitlines() if line.startswith("| `rsi answer` |")]
         self.assertEqual(len(row), 1)
-        self.assertIn("不登记", row[0])
-        self.assertIn("同一个会话", row[0])
-        self.assertNotIn("下次续跑时转给它", row[0])
+        self.assertIn("none of the artifacts of this hand-back is registered", row[0])
+        self.assertIn("same session", row[0])
+        self.assertNotIn("at the next resume", row[0])
+        self.assertIn("none of the artifacts of this hand-back is registered", briefs.HANDBACK_FORMAT)
+        self.assertIn("none of the artifacts of this hand-back is registered", read(ENGINE_DOC))
         for where, text in (("briefs.HANDBACK_FORMAT", briefs.HANDBACK_FORMAT), ("engine.md", read(ENGINE_DOC))):
             self.assertIn(".pid", text, where)
-            self.assertIn("不登记", text, where)
             self.assertNotIn("$!", text, where)
             self.assertNotIn("setsid", text, where)
 
     def test_deliver_never_gets_labels_and_judge_never_reads_valset(self):
-        self.assertNotIn("labels.jsonl", skill_section(module_path("deliver"), "输入"))
-        self.assertIn("inputs.jsonl", skill_section(module_path("deliver"), "输入"))
-        self.assertIn("labels.jsonl", skill_section(module_path("deliver"), "门"))
+        self.assertNotIn("labels.jsonl", skill_section(module_path("deliver"), "Inputs"))
+        self.assertIn("inputs.jsonl", skill_section(module_path("deliver"), "Inputs"))
+        self.assertIn("labels.jsonl", skill_section(module_path("deliver"), "Gates"))
         # R25: valset is for data, train and tune only (also in the interface overview table, I1).
-        self.assertNotIn("valset", lower_tokens(skill_section(module_path("judge"), "输入")))
+        self.assertNotIn("valset", lower_tokens(skill_section(module_path("judge"), "Inputs")))
         for path in (MODULES_DOC, DATASETS_DOC, INTERFACES_README):
             self.assertTrue(any(line.startswith("| `valset` |") for line in read(path).splitlines()),
                             "%s has no valset row" % path)
         for line in read(MODULES_DOC).splitlines() + read(DATASETS_DOC).splitlines() + \
                 read(INTERFACES_README).splitlines():
-            if line.startswith("| `valset` |") and "不读" in line:
-                self.assertEqual(line.split("|")[-2].strip(), "不读", line)  # judge column
+            if line.startswith("| `valset` |") and "does not read" in line:
+                self.assertEqual(line.split("|")[-2].strip(), "does not read", line)  # judge column
             if line.startswith("| `valset` |") and "judge" in line:
                 self.fail("valset visible to judge: " + line)
 
@@ -588,12 +610,12 @@ class TestModuleSkills(unittest.TestCase):
         train = read(module_path("train"))
         for token in ("--marker", "--producer train", "unregistered"):
             self.assertIn(token, train)
-        self.assertNotIn("输出目录下的 `DONE`", train)
+        self.assertNotIn("`DONE` in the output directory", train)
         # 2026-11-25: the data module does not train (no A/B of trainsets); ② and ④ judge its trainset.
-        data = read(module_path("data")).split("## 负责人和版本")[0]  # the change log keeps the history
+        data = read(module_path("data")).split("## Owner and version")[0]  # the change log keeps the history
         for token in (TRAIN_COMMAND, "--producer data", "ab-<k>-old", "unregistered"):
             self.assertNotIn(token, data)
-        self.assertIn("不训练", skill_section(module_path("data"), "模块指标"))
+        self.assertIn("does not train", skill_section(module_path("data"), "Module metrics"))
         # S5: every place that names the train command also names the override and the default.
         docs = os.path.join(ROOT, "docs", "interfaces")
         paths = [module_path("train")] + [
@@ -603,8 +625,8 @@ class TestModuleSkills(unittest.TestCase):
             text = read(p)
             self.assertIn("resources.train_command", text, p)
             self.assertIn(TRAIN_COMMAND, text, p)
-        self.assertIn("PYTHONPATH=<repo root>", skill_section(module_path("train"), "输出"))
-        self.assertRegex(read(BRIEF), r"训练命令：")
+        self.assertIn("PYTHONPATH=<repo root>", skill_section(module_path("train"), "Outputs"))
+        self.assertRegex(read(BRIEF), r"Train command: ")
         self.assertEqual(os.path.join(ROOT, briefs.DEFAULT_TRAIN_COMMAND),
                          TRAIN_COMMAND.replace("<repo root>", ROOT).replace("/", os.sep))
         self.assertTrue(os.path.isfile(os.path.join(ROOT, briefs.DEFAULT_TRAIN_COMMAND)))
@@ -631,8 +653,9 @@ class TestModuleSkills(unittest.TestCase):
         self.assertGreater(checked, 20)
 
     def test_no_separate_tune_stage(self):
-        # Live status §2: the stages are ① 数据 → ② 训练调优 → ③ 交付 → ④ 评测与决策; tuning is no module, stage, skill
-        # or option of its own (an old workspace's tune is read only, under ②).
+        # The stages are ① Data → ② Train & tune → ③ Compare → ④ Deliver → ⑤ Judge & decide (live status §2, then
+        # ③ Compare); tuning is no module, stage, skill or option of its own (an old workspace's tune is read only,
+        # under ②).
         docs = os.path.join(ROOT, "docs", "interfaces")
         paths = [ORCH, BRIEF, os.path.join(ROOT, "README.md")] + [
             os.path.join(MODULES, n, "SKILL.md") for n in sorted(os.listdir(MODULES))
@@ -640,12 +663,12 @@ class TestModuleSkills(unittest.TestCase):
             os.path.join(docs, n) for n in sorted(os.listdir(docs)) if n.endswith(".md")]
         for p in paths:
             text = read(p)
-            for stale in ("rsi-tune", "③ 调优", "④ 交付", "⑤"):
+            for stale in ("rsi-tune", "③ Tune", "③ Deliver", "④ Judge"):
                 self.assertNotIn(stale, text, "%s still says %s" % (os.path.relpath(p, ROOT), stale))
         for p in (ORCH, BRIEF):
             self.assertNotIn("`tune`", read(p), p)
         for p in (os.path.join(ROOT, "README.md"), MODULES_DOC):
-            self.assertIn("① 数据 → ② 训练调优 → ③ 交付 → ④ 评测与决策", read(p), p)
+            self.assertIn("① Data → ② Train & tune → ③ Compare → ④ Deliver → ⑤ Judge & decide", read(p), p)
 
     def test_modules_use_only_validate_and_score(self):
         # R21/R36: modules run `rsi validate` and `rsi score`, nothing else; every form parses.
@@ -665,32 +688,32 @@ class TestModuleSkills(unittest.TestCase):
         judge = score_calls("judge")
         self.assertTrue(any("--compare" in c and "--clusters" in c and "--train" in c for c in judge), judge)
         self.assertTrue(any("testset" in c for c in judge), judge)  # milestone metrics_test
-        self.assertIn("rsi score", skill_section(module_path("train"), "门"))  # the search's numbers too
+        self.assertIn("rsi score", skill_section(module_path("train"), "Gates"))  # the search's numbers too
         # The judge gets the candidate's trainset for the baselines, as the orchestrator table says.
-        self.assertIn("trainset", lower_tokens(skill_section(module_path("judge"), "输入")))
+        self.assertIn("trainset", lower_tokens(skill_section(module_path("judge"), "Inputs")))
 
     def test_runnable_candidates_and_reproduction_in_skills(self):
         # Task 14: deliver reproduces the candidate on the valset inputs (never labels); train writes the
         # prediction entry and code version, and runs one code version a search; scoring is not owner-defined.
-        deliver_in = skill_section(module_path("deliver"), "输入")
+        deliver_in = skill_section(module_path("deliver"), "Inputs")
         self.assertIn("valset", lower_tokens(deliver_in))
         self.assertNotIn("rows.jsonl", deliver_in)
-        deliver_gate = skill_section(module_path("deliver"), "门")
-        for text in ("predictions_val", "1e-6", "package.location", "external:<名字>", "cost_unit"):
+        deliver_gate = skill_section(module_path("deliver"), "Gates")
+        for text in ("predictions_val", "1e-6", "package.location", "external:<name>", "cost_unit"):
             self.assertIn(text, deliver_gate)
         train = read(module_path("train"))
         for text in ("model.predict", "--inputs <inputs.jsonl> --out <predictions.jsonl>", "code_version"):
             self.assertIn(text, train)
-        self.assertIn("code_version.sha256", skill_section(module_path("train"), "门"))  # one code version a search
-        self.assertIn("inputs.jsonl", skill_section(module_path("data"), "输出"))
-        judge_owner = skill_section(module_path("judge"), "步骤和策略子 skill")
-        self.assertNotIn("由模块负责人填写：打分", judge_owner)
+        self.assertIn("code_version.sha256", skill_section(module_path("train"), "Gates"))  # one code version a search
+        self.assertIn("inputs.jsonl", skill_section(module_path("data"), "Outputs"))
+        judge_owner = skill_section(module_path("judge"), "Steps and strategy sub-skills")
+        self.assertNotIn("Filled in by the module owner: scoring", judge_owner)
         self.assertIn("rsi score", judge_owner)
-        self.assertIn("登记后路径", skill_section(ORCH, "运行"))
+        self.assertIn("registered paths", skill_section(ORCH, "Running"))
 
 
 class TestTrainSkill(unittest.TestCase):
-    """modules/train/SKILL.md: CD's Training RSI skill rewritten as the framework's training-tuning module (D17)."""
+    """modules/train/SKILL.md: CD's Training RSI skill made into the framework's train module (D17)."""
 
     def test_trsi_command_lines_parse(self):
         # Every trsi command line the skill quotes parses with trsi's own parser; the flow uses every trsi command.
@@ -699,7 +722,7 @@ class TestTrainSkill(unittest.TestCase):
         used, checked = set(), 0
         for words in trsi_lines(read(module_path("train"))):
             if not words or words[0].startswith("<") or words in (["--help"], ["--version"]):
-                continue  # `trsi <命令>` stands for any command; --help names none
+                continue  # `trsi <command>` stands for any command; --help names none
             self.assertIn(words[0], names, words)
             used.add(words[0])
             if len(words) == 1:
@@ -721,20 +744,22 @@ class TestTrainSkill(unittest.TestCase):
     def test_flow_rules_and_references(self):
         text = read(module_path("train"))
         source = read(engine.__file__)
-        # the engine's feedback heads
-        for head in ("# 定时检查", "# 长任务已结束", "# 继续：交回的第二部分", "# 用户回答了你的问题"):
+        # the engine's feedback heads, quoted by the skill as they are
+        for head in ("# Check-in", "# Long job finished", "# Continue: the second part of the hand-back",
+                     "# The user answered your questions"):
             self.assertIn(head, source)
-            self.assertIn(head, text)
+            self.assertIn("`%s`" % head, text, head)
         for words in ("nvidia-smi", "ojh doctor", "`resources.gpu_ids`", "`search_space`", "`search.max_configs`",
                       "`note`", "`prediction`", "SIGKILL", "STOP", "unpacked", "`questions`", "ojh cleanup",
-                      "诊断 → 改动 → 预测 → 结果", "<marker>.pid", "registered-<n>.json"):
+                      "diagnosis → change → prediction → result", "<marker>.pid", "registered-<n>.json"):
             self.assertIn(words, text)
         # Fix round 1: the check-in heading in the flow and the long-job section; a restarted trial is relaunched only
         # once collect (given the whole Bash timeout) shows it failed; a background job runs in its own session (a stop
         # kills its process group); YAML exponents keep a dot.
-        for title in ("步骤和策略子 skill", "长任务"):
-            self.assertIn("「# 定时检查」", skill_section(module_path("train"), title), title)
-        for words in ("600000", "failed 后再", "start_new_session=True", "2.0e-5", "registered-*.json"):
+        for title in ("Steps and strategy sub-skills", "Long jobs"):
+            self.assertIn("`# Check-in`", skill_section(module_path("train"), title), title)
+        for words in ("600000", "after collect prints that this trial is failed", "start_new_session=True", "2.0e-5",
+                      "registered-*.json"):
             self.assertIn(words, text)
         refs = set(re.findall(r"reference/[\w.-]+\.md", text))
         self.assertEqual(refs, {"reference/search_space.md", "reference/protocol.md", "reference/lessons.md"})
@@ -747,16 +772,41 @@ class TestDataSkill(unittest.TestCase):
     """modules/data/SKILL.md: the data module's steps with dset (modules/data/dset)."""
 
     def test_dset_command_lines_parse(self):
-        # Every `dset <command> …` line of the data skill parses with dset's own parser; the skill uses all four.
-        parser = dset_cli().build_parser()
-        used = set()
-        for words in dset_lines(read(module_path("data"))):       # the words after `dset`
-            used.add(words[0])
-            self.assertIsNone(dset_parse_error(parser, words), words)
-        self.assertEqual(used, {"sets", "grow", "check", "refresh"})
-        steps = skill_section(module_path("data"), "步骤和策略子 skill")
+        # Every `dset <command> …` and `dgen <command> …` line of the data skill parses with the tool's own parser;
+        # the skill uses every command of both.
+        text = read(module_path("data"))
+        for tool in ("dset", "dgen"):
+            parser = tool_cli(tool).build_parser()
+            used = set()
+            for words in dset_lines(text, tool):       # the words after `dset` / `dgen`
+                used.add(words[0])
+                self.assertIsNone(dset_parse_error(parser, words, tool), (tool, words))
+            commands = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)][0].choices
+            self.assertEqual(used, set(commands), tool)
+        steps = skill_section(module_path("data"), "Steps and strategy sub-skills")
         for token in ("question_of", "split.json", "--dry-run", "record"):
             self.assertIn(token, steps)
+
+    def test_data_skill_names_every_dgen_and_dset_command(self):
+        # The trainset dispatch's mechanics are dgen and dset commands, in a fixed order: repair, near duplicates,
+        # variants last, then grow with one --with per arm; the agent only judges recipes, sizes and variants.
+        text = read(module_path("data"))
+        for cmd in ("score-pool", "diagnose", "generate", "filter", "neardup", "variants", "paraphrase"):
+            self.assertIn("dgen " + cmd, text)
+        for cmd in ("grow", "check", "repair", "sets", "refresh"):
+            self.assertIn("dset " + cmd, text)
+        steps = skill_section(module_path("data"), "Steps and strategy sub-skills")
+        order = [steps.index(s) for s in ("dgen generate --brief", "dgen filter --brief", "dset repair --task",
+                                          "dgen neardup --brief", "dgen variants --task", "--write <outdir>/work/base",
+                                          "dset grow --task <task.json> --pool <pool> --trainset <trainset> --parent "
+                                          "<trainset_id> --with", "--by-source")]
+        self.assertEqual(order, sorted(order))
+        for token in ("generated_matches_heldout", "budget_left.api_usd", "max_synthetic_share", "input.verbatim",
+                      "English", "`existing: true`", "--marker", "`long_job`"):
+            self.assertIn(token, steps)
+        versions = skill_section(module_path("data"), "Owner and version")
+        self.assertIn("dset %s" % tool_cli("dset").DSET_VERSION, versions)
+        self.assertIn("dgen %s" % tool_cli("dgen").DGEN_VERSION, versions)
 
 
 class TestSkillFiles(unittest.TestCase):
@@ -768,19 +818,23 @@ class TestSkillFiles(unittest.TestCase):
         fm = frontmatter(ORCH)
         self.assertEqual(fm.get("name"), "rsi-orchestrator")
         self.assertTrue(fm.get("description"))
-        folders = sorted(n for n in os.listdir(MODULES)
-                         if os.path.isdir(os.path.join(MODULES, n)) and not n.startswith((".", "_")))
+        # modules/common holds the components the modules share: it is no module and has no skill.
+        folders = sorted(n for n in os.listdir(MODULES) if os.path.isdir(os.path.join(MODULES, n))
+                         and not n.startswith((".", "_")) and n != "common")
+        # MODULE_SKILLS are the agents' skills; a code module's (rsi.flow.CODE_MODULES: a fixed command, no agent) is
+        # the contract of its command (test_code_module_skill_states_the_command_contract).
         self.assertEqual(folders, sorted(briefs.MODULE_PURPOSES))
-        self.assertEqual(sorted(MODULE_SKILLS), folders)
+        self.assertEqual(sorted(MODULE_SKILLS + CODE_MODULES), folders)
         for name in folders:
             fm = frontmatter(module_path(name))
             self.assertEqual(fm.get("name"), "rsi-" + name, "%s: frontmatter name" % name)
             self.assertEqual(fm.get("name"), briefs.SKILLS[name])
             self.assertTrue(fm.get("description"), "%s: frontmatter description is empty" % name)
-        self.assertEqual(frontmatter(TEMPLATE).get("name"), "rsi-<模块名>")
+        self.assertEqual(frontmatter(TEMPLATE).get("name"), "rsi-<module>")
 
     def test_engine_gives_each_module_its_folders_skill(self):
-        # R11: the engine hands each module agent modules/<module>/SKILL.md.
+        # R11: the engine hands each module agent modules/<module>/SKILL.md (the prompt of a code module's first launch
+        # is built from it too; the code runner ignores it).
         for module in briefs.MODULE_PURPOSES:
             path = briefs.skill_path(module)
             self.assertEqual(path, module_path(module))
@@ -788,6 +842,33 @@ class TestSkillFiles(unittest.TestCase):
         source = read(engine.__file__)
         self.assertIn("B.skill_path(", source)
         self.assertNotIn('"skills", B.SKILLS', source)
+
+    def test_code_module_skill_states_the_command_contract(self):
+        # A code module's SKILL.md is the contract of its command (rsi.runners.code.CodeRunner): the command line the
+        # runner builds, every launch mode the engine gives (fresh is run as resume; answer never comes), the
+        # hand-back, the long-job protocol and how to run it standalone.
+        from rsi.runners import CodeRunner
+        for name in CODE_MODULES:
+            path = module_path(name)
+            for title in ("Command", "Modes", "Inputs", "Outputs", "Long jobs", "Running standalone"):
+                self.assertIn(title, skill_sections(path), "%s lacks '## %s'" % (name, title))
+            command = skill_section(path, "Command")
+            d = {"module": name, "outdir": "o", "feedback": "feedback-2.md"}
+            argv = CodeRunner({name: [sys.executable]}).argv(types.SimpleNamespace(root=ROOT), d, "/o", "")
+            for word in [w for w in argv if w.startswith("--")] + ["runner.code.commands.%s" % name,
+                                                                   "modules/%s/run" % name, "runner.code.timeout_s"]:
+                self.assertIn(word, command, "%s: %s" % (name, word))
+            modes = skill_section(path, "Modes")
+            for mode in ("first", "fresh") + engine.SESSION_MODES:
+                self.assertIn("| `%s` |" % mode, modes, "%s: mode %s" % (name, mode))
+            out = skill_section(path, "Outputs")
+            for word in ["handback.json"] + ["`%s`" % k for k in briefs.HANDBACK_KEYS + briefs.HANDBACK_STATUSES]:
+                self.assertIn(word, out, "%s: %s" % (name, word))
+            long_job = skill_section(path, "Long jobs")
+            for word in ("<marker>.pid", "os.getpid()", "rm -f <marker> <marker>.pid",
+                         "must write the completion marker", "`# Check-in`", "`# Long job finished`"):
+                self.assertIn(word, long_job, "%s: %s" % (name, word))
+            self.assertIn("`# Continue: the second part of the hand-back`", modes)
 
 
 class TestHelpers(unittest.TestCase):
@@ -809,15 +890,15 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(command_lines(text), ["rsi status <ws>", "rsi validate task <d>", "rsi next <ws>"])
         # trsi command lines: the trsi part ends at a shell operator; trsi's own parser judges it.
         self.assertEqual(trsi_lines("`trsi next <run.yaml>` and\n```\nsh -c 'x; PYTHONPATH=<d> <py> -m trsi collect "
-                                    "<run.yaml> --gpu <卡号> > <log> 2>&1' &\n```\n"),
-                         [["next", "<run.yaml>"], ["collect", "<run.yaml>", "--gpu", "<卡号>"]])
-        self.assertIsNone(trsi_parse_error(["collect", "<run.yaml>", "--gpu", "<卡号>"]))
-        self.assertIsNone(trsi_parse_error(["launch", "<run.yaml>", "--start", "--seed", "0", "--gpus", "<卡>"]))
+                                    "<run.yaml> --gpu <gpu> > <log> 2>&1' &\n```\n"),
+                         [["next", "<run.yaml>"], ["collect", "<run.yaml>", "--gpu", "<gpu>"]])
+        self.assertIsNone(trsi_parse_error(["collect", "<run.yaml>", "--gpu", "<gpu>"]))
+        self.assertIsNone(trsi_parse_error(["launch", "<run.yaml>", "--start", "--seed", "0", "--gpus", "<gpus>"]))
         self.assertIsNotNone(trsi_parse_error(["launch", "<run.yaml>", "--seed", "0"]))  # --gpus is required
         self.assertIsNotNone(trsi_parse_error(["report", "--search", "<dir>"]))  # the run.yaml is required
         self.assertIsNotNone(trsi_parse_error(["stop", "<run.yaml>"]))
-        # dset command lines: the form `dset <命令> …` is left out; dset's own parser judges the rest.
-        self.assertEqual(dset_lines("`dset <命令> …` and `dset check --task <t> --rows <r> > <log>`"),
+        # dset command lines: the form `dset <command> …` is left out; dset's own parser judges the rest.
+        self.assertEqual(dset_lines("`dset <command> …` and `dset check --task <t> --rows <r> > <log>`"),
                          [["check", "--task", "<t>", "--rows", "<r>"]])
         parser = dset_cli().build_parser()
         self.assertIsNone(dset_parse_error(parser, ["grow", "--task", "<t>", "--pool", "<p>", "--add", "<N>",

@@ -4,7 +4,7 @@ their brief.json, run the train command examples/mock_modules/bin/train, compute
 and hand back handback.json (see examples/mock_modules/mocklib.py for the knobs a scenario sets).
 
 TestLongScenario (the long scenario: four rounds, about 20 seconds) goes through every turn of the main flow; each
-round dispatches the training-tuning module once (rsi-train: one search, handed back in two parts, the search as a
+round dispatches the train module once (rsi-train: one search, handed back in two parts, the search as a
 followup of the same session): quality gate failed -> the same data session -> passed; no trial of the search
 through the train gate -> back to the same train session for a new search -> passed; a registration refused -> the
 same deliver session -> registered; V1; the plan revised by the user, then approved; a hand-back question (nothing
@@ -13,7 +13,7 @@ refresh approved -> a new evalset and the best version re-delivered; a round wit
 gate in two searches closed; patience reached -> milestone yes -> milestone delivery and evaluation -> stopped ->
 REPORT.md. Every candidate's config_request lies in the task's search_space and it was trained by the task's train
 command (registration checks both). At each stop it checks that the overview page's
-"现在在等什么" is what next_action says, the exit code of `rsi run`, and at the end the run log, the sessions
+"What the run waits for" is what next_action says, the exit code of `rsi run`, and at the end the run log, the sessions
 that got each return, and that nothing was dispatched or registered twice.
 
 TestCheckins: a long job with check-ins (flow.checkin_minutes): the run waits for it and checks its session in, in
@@ -50,7 +50,7 @@ MOCKS = os.path.join(REPO, "examples", "mock_modules")
 TRAIN_COMMAND = os.path.join(MOCKS, "bin", "train")
 # The exit codes of `rsi run` as docs/interfaces/engine.md documents them.
 EXIT_CODES = {"done": 0, "waiting_user": 10, "waiting_long_job": 11, "waiting_manual": 12, "max_steps": 13}
-USER = "测试用户"
+USER = "Zoë Test"
 
 
 def task_def(**stop):
@@ -204,7 +204,7 @@ class E2ECase(unittest.TestCase):
     # ---- checks --------------------------------------------------------------------------------------
 
     def assertPageAgrees(self, expect_type):
-        """The overview on disk (written by the last command) says what next_action says now: its "现在在等什么"
+        """The overview on disk (written by the last command) says what next_action says now: its "What the run waits for"
         card is the one the current workspace renders, which _view derives from next_action; and it shows the
         action itself (the question and its options, the module, the long job, the stop). Returns the action."""
         ws = self.ws()
@@ -218,8 +218,8 @@ class E2ECase(unittest.TestCase):
         card = re.compile(r'<section id="now".*?</section>', re.S)
         now = card.search(page).group(0)
         self.assertEqual(now, card.search(P.render_pages(ws)["dashboard.html"]).group(0))
-        if not ws.state["stopped"]:  # the card's sentence (a next step's drops its lead "下一步 <where>：")
-            lead = "下一步 %s：" % where
+        if not ws.state["stopped"]:  # the card's sentence (a next step's drops its lead "Next <where>: ")
+            lead = "Next %s: " % where
             self.assertIn(html.escape(what[len(lead):] if what.startswith(lead) else what), now)
         if a["type"] == "ask":
             self.assertIn(html.escape(a["question"]), page)
@@ -228,10 +228,10 @@ class E2ECase(unittest.TestCase):
         elif a["type"] in ("dispatch", "decide"):
             self.assertIn("rsi-%s" % (a.get("module") or ws.dispatch(a["dispatch_id"])["module"]), now)
         elif a["type"] == "wait_long_job":
-            self.assertIn("长任务等待标记", now)
+            self.assertIn("long job waiting for its marker", now)
         elif a["type"] == "done":
-            self.assertIn("已停止", now)
-            self.assertIn("查看运行报告", now)
+            self.assertIn("Stopped", now)
+            self.assertIn("View the run report", now)
         return a
 
     def assertNothingTwice(self):
@@ -302,7 +302,8 @@ class TestLongScenario(E2ECase):
         task["approvals"].append("plan")
         release = self.flag("release-long-job")
         self.init(task, {
-            "data": {"near_dups": {"1": 0.1}, "questions": {"2": ["新数据里有 12 条来源不明的样本：保留还是删掉？"]}},
+            "data": {"near_dups": {"1": 0.1},
+                     "questions": {"2": ["The new data holds 12 samples of unknown source: keep them or drop them?"]}},
             "train": {"trials": {"1": [{"lr": 100}, {"lr": 1000}]},
                       "config": {"2": {"capacity": 0.95}, "3": {"capacity": 0.75}, "4": {"lr": 100}},
                       "long_job": {"2": {"release": release}}},
@@ -324,7 +325,7 @@ class TestLongScenario(E2ECase):
         self.assertEqual([(d["round"], d["point"], d["choice"], d["by"]) for d in self.ws().decisions()], [
             (1, "quality_gate_failed", "resume_data", "code"), (1, "train_gate_failed", "train", "code"),
             (1, "handback_refused", "resume", "code"), (1, "plan", "revise", USER), (1, "plan", "approve", USER),
-            (2, "handback", "已回答", USER), (2, "plan", "approve", USER), (3, "refresh_sets", "approve", USER),
+            (2, "handback", "answered", USER), (2, "plan", "approve", USER), (3, "refresh_sets", "approve", USER),
             (3, "plan", "approve", USER), (4, "train_gate_failed", "train", "code"), (4, "milestone", "yes", USER)])
         # One search per train dispatch and per return: every trial's configuration lies in the search space.
         ws = self.ws()
@@ -362,7 +363,7 @@ class TestLongScenario(E2ECase):
         # Quality gate failed -> the same data session, told which check failed -> a trainset through the gate.
         self.assertEqual((ds["d-0001"]["launches"], ds["d-0001"]["returns"]), (2, 1))
         fb = self.calls("d-0001")[1]["feedback"]
-        self.assertIn("没过质量门", fb)
+        self.assertIn("failed its quality gate", fb)
         self.assertIn("max_near_dup_rate", fb)
         self.assertEqual(ws.current("trainset"), "trainset-0002")
         self.assertTrue(ws.manifest("trainset-0002")["quality"]["passed"])
@@ -370,9 +371,9 @@ class TestLongScenario(E2ECase):
         # trials' ids; train_gate_failed sends the session back (a return) for a second search, which passes.
         self.assertEqual((ds["d-0002"]["launches"], ds["d-0002"]["returns"], ds["d-0002"]["followups"]), (4, 1, 2))
         calls = self.calls("d-0002")
-        self.assertIn("candidate-0001、candidate-0002", calls[1]["feedback"])
-        self.assertIn("`trial-1` → candidate-0001（candidate）", calls[1]["feedback"])
-        self.assertIn("训练门", calls[2]["feedback"])
+        self.assertIn("candidate-0001, candidate-0002", calls[1]["feedback"])
+        self.assertIn("`trial-1` → candidate-0001 (candidate)", calls[1]["feedback"])
+        self.assertIn("train gate", calls[2]["feedback"])
         self.assertFalse(any(ws.manifest(c)["train_gate"]["passed"] for c in ("candidate-0001", "candidate-0002")))
         search = ws.manifest("search-0002")
         self.assertGreaterEqual(search["gain_vs_default"]["delta"], 0)
@@ -390,38 +391,38 @@ class TestLongScenario(E2ECase):
         self.snapshot("2-plan-approval")
 
         # The user wants the plan changed: the judge's session gets the user's words and writes a new plan.
-        self.answer("revise", "改成从 data 开始：先补数据覆盖")
+        self.answer("revise", "start from data instead: widen the data coverage first")
         self.assertIn("plan-0002", self.run_engine("waiting_user"))
         ws = self.ws()
-        self.assertIn("改成从 data 开始", self.calls("d-0004")[2]["feedback"])
+        self.assertIn("start from data instead", self.calls("d-0004")[2]["feedback"])
         # The plan was the judge's second part (a followup); the user's revision is its one return.
         self.assertEqual((ws.dispatch("d-0004")["returns"], ws.dispatch("d-0004")["followups"]), (1, 1))
         self.assertEqual(ws.manifest("plan-0002")["entry_module"], "data")
         self.assertEqual(self.assertPageAgrees("ask")["ref"], "plan-0002")
-        self.answer("approve", "同意新计划，下一轮从 data 开始")
+        self.answer("approve", "agreed to the new plan, the next round starts from data")
 
     def round_2(self, release):
         # A hand-back question from data stops the run until the user answers it; its new trainset is not
         # registered meanwhile.
         reason = self.run_engine("waiting_user")
-        self.assertIn("来源不明", reason)
+        self.assertIn("unknown source", reason)
         ws = self.ws()
         self.assertEqual((ws.state["round"], ws.state["rounds"]["2"]["entry"]), (2, "data"))
         self.assertEqual(ws.state["rounds"]["2"]["artifacts"], [])
         self.assertEqual(ws.dispatch("d-0005")["status"], "handed_back")
         a = self.assertPageAgrees("ask")
-        self.assertEqual((a["what"], a["ref"], a["options"]), ("handback", "d-0005", ["已回答"]))
-        self.answer("已回答", "删掉来源不明的样本")
+        self.assertEqual((a["what"], a["ref"], a["options"]), ("handback", "d-0005", ["answered"]))
+        self.answer("answered", "drop the samples of unknown source")
         # The answer goes back to the same data session, which drops those rows; then the trainset is registered.
         # The train module starts a long job: the run stops until its marker is there (exit 11).
         self.assertIn("search.marker", self.run_engine("waiting_long_job"))
         ws = self.ws()
         d = ws.dispatch("d-0005")
         self.assertEqual((d["launches"], d["returns"], d["answered"]), (2, 0, 1))
-        self.assertIn("删掉来源不明的样本", self.calls("d-0005")[1]["feedback"])
+        self.assertIn("drop the samples of unknown source", self.calls("d-0005")[1]["feedback"])
         trainset = ws.current("trainset")
         self.assertEqual(os.path.dirname(ws.entry(trainset)["source"]), self.outdir("d-0005"))
-        self.assertIn("删掉 12 行来源不明的样本", ws.manifest(trainset)["changes"])
+        self.assertIn("dropped 12 rows of unknown source by the user's answer", ws.manifest(trainset)["changes"])
         self.assertFalse([r for r in ws.rows(trainset, "rows") if r["meta"]["source"] == "unknown-export"])
         self.assertEqual(self.ws().dispatch("d-0006")["status"], "long_job")
         self.assertPageAgrees("wait_long_job")
@@ -435,12 +436,12 @@ class TestLongScenario(E2ECase):
         ws = self.ws()
         d = ws.dispatch("d-0006")
         self.assertEqual((d["launches"], d["returns"], d["continued"], d["followups"]), (3, 0, 1, 1))
-        self.assertIn("长任务已结束", self.calls("d-0006")[1]["feedback"])
+        self.assertIn("Long job finished", self.calls("d-0006")[1]["feedback"])
         self.assertEqual(ws.state["rounds"]["2"]["decision"]["version"], "V2")
         self.assertEqual(ws.state["best"], "V2")
         self.assertEqual(ws.state["eval_use_count"], 2)
         self.assertPageAgrees("ask")
-        self.answer("approve", "同意 plan-0003")
+        self.answer("approve", "agreed to plan-0003")
 
     def round_3(self):
         # The evalset is used up: before ③ the run asks for refresh_sets.
@@ -449,7 +450,7 @@ class TestLongScenario(E2ECase):
         a = self.assertPageAgrees("ask")
         self.assertEqual((a["kind"], a["what"], a["step"]), ("approval", "refresh_sets", "deliver"))
         self.snapshot("4-refresh-sets")
-        self.answer("approve", "批准刷新评测集")
+        self.answer("approve", "approve refreshing the evalset")
         # data makes a new evalset; deliver packs the round's candidate and re-delivers the best version on it; the
         # judge compares the two there: keep.
         self.assertIn("plan-0004", self.run_engine("waiting_user"))
@@ -465,12 +466,12 @@ class TestLongScenario(E2ECase):
         self.assertEqual(ev["recommendation"]["decision"], "keep")
         self.assertEqual(ws.state["rounds"]["3"]["decision"]["decision"], "keep")
         self.assertPageAgrees("ask")
-        self.answer("approve", "同意 plan-0004，下一轮再调")
+        self.answer("approve", "agreed to plan-0004, tune again next round")
 
     def round_4_and_milestone(self):
         # The search's trials all fail the train gate -> back to train, the same session -> its second search fails:
         # the attempts are used up and the round is closed; patience is reached: the milestone.
-        self.assertIn("里程碑", self.run_engine("waiting_user"))
+        self.assertIn("Milestone release", self.run_engine("waiting_user"))
         ws = self.ws()
         r4 = [d for d in ws.dispatches() if d["round"] == 4]
         self.assertEqual([(d["module"], d["launches"], d.get("returns"), d.get("followups")) for d in r4],
@@ -483,7 +484,7 @@ class TestLongScenario(E2ECase):
         a = self.assertPageAgrees("ask")
         self.assertEqual((a["what"], a["options"]), ("milestone", ["yes", "no"]))
         self.snapshot("5-milestone")
-        self.answer("yes", "做里程碑发布，用封存 test 验证 V2")
+        self.answer("yes", "make the milestone release, verify V2 on the sealed testset")
         # The milestone delivery and evaluation on the sealed testset, each with its use_testset approval quoting the
         # user; then the run stops and writes the report (exit 0).
         self.assertIn("REPORT.md", self.run_engine("done"))
@@ -494,8 +495,8 @@ class TestLongScenario(E2ECase):
                          [("deliver", "milestone_deliver", "done"), ("judge", "milestone_judge", "done")])
         uses = [a for a in ws.state["approvals"] if a["what"] == "use_testset"]
         self.assertEqual([(a["by"], a["quote"], a["used_by"]) for a in uses],
-                         [(USER, "做里程碑发布，用封存 test 验证 V2", "delivery-0005"),
-                          (USER, "做里程碑发布，用封存 test 验证 V2", "evaluation-0004")])
+                         [(USER, "make the milestone release, verify V2 on the sealed testset", "delivery-0005"),
+                          (USER, "make the milestone release, verify V2 on the sealed testset", "evaluation-0004")])
         ev = ws.manifest("evaluation-0004")
         self.assertTrue(ev["uses_testset"])
         self.assertEqual(ev["candidate_id"], ws.version("V2")["candidate_id"])
@@ -542,6 +543,57 @@ TIMELINE = [
 ]
 
 
+# ---- ③ Compare ---------------------------------------------------------------------------------------
+
+class TestCompareRound(E2ECase):
+    def test_compare_between_train_and_deliver(self):
+        # With a compare section, round 1 runs ③ between ② and ④: under --runner mock the mock compare (its one
+        # baseline, the trainset's prior) works as a long job, then registers the baseline and, as a followup of the
+        # same session, the comparison with a record. The judge reports the baseline on the evalset; at the milestone
+        # (answered yes) compare scores it on the testset inputs between the milestone delivery and the milestone
+        # judge, which reports it on the testset.
+        task = task_def(max_rounds=1)
+        task["compare"] = {"baselines": ["prior"]}
+        release = self.flag("compare.release")
+        self.init(task, {"compare": {"long_job": {"1": {"release": release}}}})
+        self.assertIn("baselines.marker", self.run_engine("waiting_long_job"))
+        d = self.ws().dispatches(module="compare")[0]
+        open(release, "w").close()
+        wait_until(lambda: os.path.exists(os.path.join(self.outdir(d["id"]), "baselines.marker")),
+                   what="the mock compare's long job")
+        self.assertIn("Milestone release", self.run_engine("waiting_user"))  # max_rounds 1 and V1: the milestone
+        ws = self.ws()
+        # The judge reported the round's baseline on the evalset; status and the overview show candidate vs prior.
+        self.assertEqual(list(ws.manifest(ws.entries("evaluation")[0]["id"])["baselines_eval"]), ["baseline-0001"])
+        status = self.rsi("status", self.ws_dir).stdout
+        self.assertRegex(status, r"compare: comparison-0001 \(vs prior Δauc [+-]\d\.\d{3}\)")
+        with open(os.path.join(self.ws_dir, "dashboard.html"), encoding="utf-8") as f:
+            self.assertRegex(f.read(), r'<g id="n-compare"(?:(?!</g>).)*>vs prior Δ[+-]\d\.\d{3}<')
+        self.answer("yes", "make the milestone release with the baselines on the testset")
+        self.assertIn("REPORT.md", self.run_engine("done"))
+        ws = self.ws()
+        self.assertEqual([(x["module"], x["purpose"]) for x in ws.dispatches()],
+                         [("data", "sets"), ("train", "train"), ("compare", "compare"), ("deliver", "deliver"),
+                          ("judge", "judge"), ("deliver", "milestone_deliver"), ("compare", "milestone_compare"),
+                          ("judge", "milestone_judge")])
+        d = ws.dispatch(d["id"])
+        self.assertEqual((d["runner"], d["launches"], d["continued"], d["followups"]), ("mock", 3, 1, 1))
+        self.assertEqual([x["kind"] for x in d["registered"]], ["baseline", "comparison", "record"])
+        self.assertEqual(len(ws.entries("comparison")), 1)
+        # The milestone scored the comparison's baseline on the testset inputs; the milestone judge reported it.
+        test_baselines = F.milestone_baselines(ws)
+        self.assertEqual([ws.manifest(b)["reused_from"] for b in test_baselines], ["baseline-0001"])
+        milestone = [e["id"] for e in ws.entries("evaluation") if ws.manifest(e["id"])["uses_testset"]]
+        self.assertEqual(list(ws.manifest(milestone[0])["baselines_test"]), test_baselines)
+        with open(os.path.join(self.ws_dir, "REPORT.md"), encoding="utf-8") as f:
+            report = f.read()
+        self.assertIn("### ③ Compare (round 1)", report)
+        self.assertIn("Candidate vs strongest baseline (prior): Δauc ", report)
+        self.assertIn("On the sealed testset: candidate vs prior Δauc ", report)
+        self.assertSessions()
+        self.assertNothingTwice()
+
+
 # ---- check-ins ---------------------------------------------------------------------------------------
 
 class TestCheckins(E2ECase):
@@ -551,15 +603,15 @@ class TestCheckins(E2ECase):
         task = task_def(max_rounds=1)
         task["flow"] = {"checkin_minutes": 0.0005, "max_checkins": 5}
         self.init(task, {"train": {"long_job": {"1": {"checkins": 2}}}})
-        self.assertIn("里程碑", self.run_engine("waiting_user"))
+        self.assertIn("Milestone release", self.run_engine("waiting_user"))
         d = self.ws().dispatch("d-0002")
         self.assertEqual((d["launches"], d["checkins"], d["continued"], d["followups"], d.get("returns")),
                          (5, 2, 1, 1, 0))
         self.assertEqual([(r["dispatch_id"], r["launch"]) for r in self.log() if r["event"] == "checkin"],
                          [("d-0002", 2), ("d-0002", 3)])
         calls = self.calls("d-0002")
-        self.assertEqual([c["feedback"].splitlines()[0].split("（")[0] for c in calls[1:4]],
-                         ["# 定时检查", "# 定时检查", "# 长任务已结束"])
+        self.assertEqual([c["feedback"].splitlines()[0].split(" (")[0] for c in calls[1:4]],
+                         ["# Check-in", "# Check-in", "# Long job finished"])
         self.assertEqual(len(self.ws().entries("search")), 1)
         self.assertSessions()
         self.assertNothingTwice()
@@ -586,13 +638,13 @@ class TestStop(E2ECase):
 
         wait_until(agent_pid, what="the train agent")
         agent = agent_pid()
-        p = self.rsi("stop", self.ws_dir, "--by", USER, "--quote", "这个运行不要了")
+        p = self.rsi("stop", self.ws_dir, "--by", USER, "--quote", "this run is not needed any more")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(run.wait(timeout=30), 0)  # the run notices the stop while the agent works
         wait_until(lambda: not pid_alive(agent), timeout=10, what="the train agent to be stopped")
         d = self.ws().dispatch("d-0002")
         self.assertEqual(d["status"], "done")
-        self.assertIn("agent 已终止", d["closed"])
+        self.assertIn("agent terminated", d["closed"])
         self.assertTrue(os.path.isfile(os.path.join(self.ws_dir, "REPORT.md")))
         self.assertPageAgrees("done")
 
@@ -603,16 +655,16 @@ class TestStop(E2ECase):
         with open(marker + ".pid") as f:
             job = int(f.read().split()[0])
         self.assertTrue(pid_alive(job))
-        p = self.rsi("stop", self.ws_dir, "--by", USER, "--quote", "结束整个运行，训练不用等了")
+        p = self.rsi("stop", self.ws_dir, "--by", USER, "--quote", "end the whole run, do not wait for the training")
         self.assertEqual(p.returncode, 0, p.stderr)
         reason = self.run_engine("done")
-        self.assertIn("终止了长任务 d-0002（rsi-train，pid %d）" % job, reason)
+        self.assertIn("The stop terminated long job d-0002 (rsi-train, pid %d)" % job, reason)
         wait_until(lambda: not pid_alive(job), timeout=10, what="the long job to be stopped")
         d = self.ws().dispatch("d-0002")
         self.assertEqual((d["long_job_stop"]["result"], d["long_job_stop"]["pid"]), ("terminated", job))
-        self.assertIn("长任务已终止", d["closed"])
+        self.assertIn("long job terminated", d["closed"])
         with open(os.path.join(self.ws_dir, "REPORT.md"), encoding="utf-8") as f:
-            self.assertIn("停止时的长任务 d-0002（rsi-train）：已终止（pid %d）" % job, f.read())
+            self.assertIn("- At the stop, long job d-0002 (rsi-train): terminated (pid %d)" % job, f.read())
         self.assertFalse(os.path.exists(marker))
         self.assertPageAgrees("done")
 
@@ -678,18 +730,18 @@ class TestInterruptedRun(E2ECase):
 
         # 4. The next run finds the deliver agent gone without a hand-back: a failed hand-back, sent back to the
         # same session by default; then judge, V1, and the milestone question (max_rounds 1).
-        self.assertIn("里程碑", self.run_engine("waiting_user"))
+        self.assertIn("Milestone release", self.run_engine("waiting_user"))
         ws = self.ws()
         d = ws.dispatch("d-0003")
         self.assertEqual((d["launches"], d["returns"], d["status"]), (2, 1, "done"))
         calls = self.calls("d-0003")
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 2)
-        self.assertIn("进程已不在", calls[1]["feedback"])
+        self.assertIn("process was gone", calls[1]["feedback"])
         self.assertEqual([(x["point"], x["choice"], x["by"]) for x in ws.decisions()],
                          [("handback_failed", "resume", "code")])
         self.assertEqual([v["version"] for v in ws.state["versions"]], ["V1"])
         self.assertPageAgrees("ask")
-        self.answer("no", "不做里程碑发布，直接结束")
+        self.answer("no", "no milestone release, end now")
         self.assertIn("REPORT.md", self.run_engine("done"))
 
         # Nothing was dispatched or registered twice, and the run completed.

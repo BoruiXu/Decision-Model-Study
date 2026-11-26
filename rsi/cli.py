@@ -11,9 +11,9 @@ from rsi import __version__
 from rsi import metrics as M
 from rsi import rows as R
 from rsi import timing
-from rsi.artifacts import validate_artifact
-from rsi.report import report_markdown, write_report
-from rsi.rules import APPROVAL_ITEMS, flow_settings, stop_settings
+from rsi.artifacts import load_manifest, validate_artifact
+from rsi.report import report_markdown, round_comparison, write_report
+from rsi.rules import APPROVAL_ITEMS, compare_settings, flow_settings, stop_settings
 from rsi.workspace import DATASETS, KINDS, RsiError, Workspace, check_task_dir
 
 # (name, one-line help); ARGUMENTS below maps every name to its argument setup.
@@ -267,6 +267,44 @@ def score_numbers(task: dict, labels: list[dict], preds: list[dict], train: list
     return out
 
 
+# --baselines-on: the set -> (the evaluation field it prints, the baseline's prediction file of that set).
+BASELINES_FIELDS = {"evalset": ("baselines_eval", "predictions_eval"),
+                    "testset": ("baselines_test", "predictions_test")}
+
+
+def baselines_numbers(task: dict, labels: list[dict], preds: list[dict], context: list[dict] | None, on: str,
+                      dirs: list[str]) -> dict:
+    """What `rsi score --baselines-on <set> --baseline <dir>...` adds: {field: the evaluation's baselines_eval (on
+    "evalset") or baselines_test (on "testset")}, exactly as registration recomputes it (rsi.metrics.baselines_scored:
+    each baseline's metrics and its delta, `preds` minus its predictions, clusters from `context`). The id is each
+    directory's manifest id (its directory name while unregistered)."""
+    field, logical = BASELINES_FIELDS[on]
+    if context is None:
+        raise RsiError("--baselines-on needs --clusters <%s>/inputs.jsonl: the clusters of the intervals" % on)
+    if not dirs:
+        raise RsiError("--baselines-on needs a --baseline <dir> for each baseline")
+    m = task["metrics"]
+    if m["primary"] not in M.KNOWN_METRICS:
+        raise RsiError("--baselines-on: the primary metric %r is not one rsi computes (%s); rsi cannot compute the "
+                       "baselines' deltas" % (m["primary"], ", ".join(M.KNOWN_METRICS)))
+    ids = [r["id"] for r in labels]
+    baselines = []
+    for d in dirs:
+        try:
+            man = load_manifest(d)
+            name, path = man["name"], os.path.join(d, man["files"][logical]["path"])
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise RsiError("--baseline %s: not a baseline with %s (%s)" % (d, logical, e))
+        rows = _read_rows("--baseline", path)
+        _checked("--baseline %s" % d, R.check_predictions(rows, task, ids))
+        baselines.append((man.get("id") or os.path.basename(os.path.normpath(d)), name, rows))
+    names = [n for n in dict.fromkeys([m["primary"]] + list(m["others"])) if n in M.KNOWN_METRICS]
+    try:
+        return {field: M.baselines_scored(task, labels, preds, M.clusters_of(context), baselines, names)}
+    except ValueError as e:
+        raise RsiError("--baselines-on: %s" % e)
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     task = _load_task_file(args.task)
     labels = _read_rows("--labels", args.labels)
@@ -284,6 +322,10 @@ def _cmd_score(args: argparse.Namespace) -> int:
         compare = _read_rows("--compare", args.compare)
         _checked("--compare", R.check_predictions(compare, task, ids))
     out = score_numbers(task, labels, preds, train, context, compare)
+    if args.baselines_on is not None or args.baseline:
+        if args.baselines_on is None:
+            raise RsiError("--baseline needs --baselines-on evalset or testset")
+        out.update(baselines_numbers(task, labels, preds, context, args.baselines_on, args.baseline))
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
@@ -362,6 +404,22 @@ def _now_line(ws: Workspace) -> str:
         return "now: (unavailable: %s: %s)" % (type(e).__name__, e)
 
 
+def _compare_status(ws: Workspace, task: dict) -> str | None:
+    """`compare: <comparison id> (vs <strongest> Δ<primary> <delta>)` for the current round's comparison (③ Compare,
+    report only; the delta on the valset); None for a task without a compare section and no comparison (an old
+    workspace)."""
+    comp = round_comparison(ws, ws.state["round"])
+    if comp is None:
+        return "compare: none this round" if compare_settings(task) is not None else None
+    m = ws.manifest(comp)
+    name = m["strongest"]
+    if name is None:
+        return "compare: %s (no baseline compared)" % comp
+    d = m["deltas_val"].get(name)
+    return "compare: %s (vs %s Δ%s %s)" % (comp, name, task["metrics"]["primary"],
+                                           "%+.3f" % d["delta"] if d else "n/a")
+
+
 def status_lines(ws: Workspace) -> list[str]:
     s = ws.state
     task = ws.task()
@@ -388,6 +446,9 @@ def status_lines(ws: Workspace) -> list[str]:
     lines += _attempt_lines(ws, rnd)
     lines += _checkin_lines(ws)
     lines.append("eval uses: %d/%d" % (s["eval_use_count"], task["eval_use_limit"]))
+    compare = _compare_status(ws, task)
+    if compare:
+        lines.append(compare)
     approved = set(a.get("ref") for a in s["approvals"] if a.get("what") == "plan")
     pending = [aid for aid in rnd.get("artifacts", [])
                if ws.entry(aid)["kind"] == "plan" and aid not in approved]
@@ -398,9 +459,8 @@ def status_lines(ws: Workspace) -> list[str]:
         lines.append("stopped: %s (at %s)" % (stopped["reason"], timing.format_full(at) if timing._good(at) else at))
     else:
         lines.append("stopped: no")
-    budget = task["budget"]["compute_hours"]
-    lines.append("compute hours: %s / %s" % (_num(s["budget_used"]["compute_hours"]),
-                                             "no budget" if budget is None else _num(budget)))
+    from rsi import live
+    lines.append("budget: %s" % live.ledger_text(ws))  # used/budget of each resource, the dollar accounts apart
     # The round's registered artifacts in order, each with its module gate or role (Workspace.summary).
     arts = rnd.get("artifacts", [])
     lines.append("round %d artifacts (%d):" % (s["round"], len(arts)))
@@ -502,6 +562,12 @@ def _args_score(p: argparse.ArgumentParser) -> None:
                         "interval, groups for group_prior (default: the label rows)")
     p.add_argument("--compare", metavar="ROWS",
                    help="other predictions on the same rows: adds the primary metric's delta and interval")
+    p.add_argument("--baselines-on", choices=BASELINES_FIELDS, metavar="SET",
+                   help="evalset or testset: adds ③ Compare's baselines (each --baseline) as an evaluation reports "
+                        "them, baselines_eval or baselines_test (needs --clusters, the set's inputs.jsonl)")
+    p.add_argument("--baseline", action="append", default=[], metavar="DIR",
+                   help="a baseline artifact directory (repeat for each): its predictions_eval (evalset) or "
+                        "predictions_test (testset) are scored with --baselines-on")
     p.set_defaults(handler=_cmd_score)
 
 

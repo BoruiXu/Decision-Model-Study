@@ -119,12 +119,12 @@ def _smi(run, smi, query):
     try:
         r = run([smi] + list(query), capture_output=True, text=True, timeout=SMI_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("nvidia-smi 超时（%d 秒没有返回）" % SMI_TIMEOUT_S)
+        raise RuntimeError("nvidia-smi timed out (no return in %d seconds)" % SMI_TIMEOUT_S)
     except OSError as e:
-        raise RuntimeError("nvidia-smi 运行不了：%s" % (e.strerror or e))
+        raise RuntimeError("nvidia-smi cannot run: %s" % (e.strerror or e))
     if r.returncode != 0:
         why = ((r.stderr or "").strip() or (r.stdout or "").strip()).splitlines()
-        raise RuntimeError("nvidia-smi 退出码 %s%s" % (r.returncode, "：%s" % why[0][:200] if why else ""))
+        raise RuntimeError("nvidia-smi exit code %s%s" % (r.returncode, ": %s" % why[0][:200] if why else ""))
     return r.stdout or ""
 
 
@@ -135,7 +135,7 @@ def snapshot(run=run_bounded, which=shutil.which, owner=None):
     (default run_bounded, called like subprocess.run) and `which` (shutil.which) run and find nvidia-smi; `owner(pid)`
     gives (uid, user name) or None (default proc_owner, through `run`). Never raises and never hangs; on an error the
     cards read before it are kept. While an nvidia-smi run_bounded gave up on still runs, no new one is started: the
-    status is "error" (「上一次 nvidia-smi 仍未结束」)."""
+    status is "error" ("the previous nvidia-smi has not ended")."""
     getuid = getattr(os, "getuid", None)
     snap = {"at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "ok",
             "error": None, "uid": getuid() if getuid else None, "gpus": []}
@@ -147,8 +147,8 @@ def snapshot(run=run_bounded, which=shutil.which, owner=None):
         stuck = still_running("nvidia-smi")
         if stuck:  # the driver hangs: starting another one would only hang too
             snap["status"] = "error"
-            snap["error"] = "上一次 nvidia-smi 仍未结束（进程 %s 杀不掉，可能卡在驱动里），这次没有再运行" % (
-                getattr(stuck[0], "pid", None) or "?")
+            snap["error"] = ("the previous nvidia-smi has not ended (process %s cannot be killed; it may hang in the "
+                             "driver); not run again this time" % (getattr(stuck[0], "pid", None) or "?"))
             return snap
         for cells in _rows(_smi(run, smi, QUERY_GPUS), 6):
             index = _int(cells[0])
@@ -207,11 +207,11 @@ def load_snapshot(root):
     except FileNotFoundError:
         return None, None
     except OSError as e:
-        return None, "读不了：%s" % (e.strerror or e)
+        return None, "cannot read: %s" % (e.strerror or e)
     except Exception as e:  # not UTF-8, not JSON, nested too deep
-        return None, "不是合法的 JSON：%s" % e
+        return None, "not valid JSON: %s" % e
     if not isinstance(snap, dict):
-        return None, "不是 JSON 对象"
+        return None, "not a JSON object"
     return snap, None
 
 

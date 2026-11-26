@@ -174,10 +174,11 @@ class TestInputs(BriefCase):
                          (task["search_space"], task["search"], {"onejev": {"python": "/x/python"}, "gpu_ids": [0, 2]},
                           30, "fixture-trainer"))
         text = B.render_brief(b)
-        for word in ('"seed": [0, 1]', '"gpu_ids": [0, 2]', "定时检查"):
+        for word in ('"seed": [0, 1]', '"gpu_ids": [0, 2]', "a check-in every 30 minutes (the feedback starts with "
+                     "`# Check-in`"):
             self.assertIn(word, text)
-        # The train skill's 输入 names every input this brief gives (a registered one by its kind) and its fields.
-        section = TS.skill_section(TS.module_path("train"), "输入")
+        # The train skill's Inputs names every input this brief gives (a registered one by its kind) and its fields.
+        section = TS.skill_section(TS.module_path("train"), "Inputs")
         names = set(re.sub(r"-\d{4}$", "", k) for k in b["inputs"]) | {
             "search_space", "search", "checkin_minutes", "budget_left", "dispatch_id", "train_command"}
         self.assertEqual(names, {"task", "trainset", "valset", "best_candidate", "plan", "candidate", "search",
@@ -298,7 +299,7 @@ class TestInputs(BriefCase):
         b = self.brief("data")
         ws = Workspace(self.ws)
         self.assertEqual(b["purpose"], "trainset")
-        self.assertEqual(set(b["inputs"]), {"task", "trainset", "valset", "plan"})
+        self.assertEqual(set(b["inputs"]), {"task", "trainset", "valset", "plan", "best_candidate"})
         self.assertEqual(b["inputs"]["plan"], ws.path(ws.state["rounds"]["1"]["plan_id"]))
         text = json.dumps(b)
         self.assertNotIn("evalset", text)
@@ -323,12 +324,12 @@ class TestInputs(BriefCase):
         raw = self.task["data"]["sources"][0]["path"]
         b = self.brief("data", purpose="sets")
         self.assertEqual(b["sources"], [raw]); self.assertTrue(b["dset"].endswith("python3 -m dset"))
-        self.assertIn("原始数据", B.render_brief(b)); self.assertIn(raw, B.render_brief(b))
+        self.assertIn("Raw data", B.render_brief(b)); self.assertIn(raw, B.render_brief(b))
         self.register_corpus_and_pool()                     # sets() plus corpus-0001 and pool-0001
         self.assertLessEqual({"corpus", "pool"}, set(self.brief("data", purpose="sets")["inputs"]))   # a resumed sets
         tb = self.brief("data", purpose="trainset")
         self.assertIn("pool", tb["inputs"]); self.assertNotIn("corpus", tb["inputs"]); self.assertNotIn("sources", tb)
-        self.assertNotIn("原始数据", B.render_brief(tb)); self.assertIn("切分工具：`%s`" % tb["dset"], B.render_brief(tb))
+        self.assertNotIn("Raw data", B.render_brief(tb)); self.assertIn("Split tool: `%s`" % tb["dset"], B.render_brief(tb))
         self.refreshed()                                     # evalset-0002 registered after an approved refresh
         rb = self.brief("data", purpose="refresh")
         self.assertIn("corpus", rb["inputs"]); self.assertNotIn("pool", rb["inputs"])
@@ -337,6 +338,27 @@ class TestInputs(BriefCase):
         self.assertTrue(all(os.path.basename(rb["inputs"][k]) == "inputs.jsonl"
                             for k in rb["inputs"] if k.startswith("evalset_")))
         self.assertNotIn("dset", self.brief("train"))
+        self.assertFalse([x for x in (b, rb) if "dgen" in x or "features" in x or "resources" in x])   # trainset's
+
+    def test_data_trainset_brief_gives_the_best_candidate_and_nothing_held_out(self):
+        task = fixtures.binary_task()
+        task["resources"] = {"gpu_ids": [2, 3], "onejev": {"python": "/v/bin/python"}}
+        self.use_task(task, "ws-dgen")
+        self.two_promoted_rounds()
+        ws = Workspace(self.ws)
+        b = self.brief("data", purpose="trainset")
+        self.assertEqual(b["inputs"]["best_candidate"], ws.path(ws.version(ws.state["best"])["candidate_id"]))
+        self.assertIn("-m dgen", b["dgen"]); self.assertEqual(b["features"], {"adapter": None, "constraints": []})
+        self.assertEqual(b["resources"], {"gpu_ids": [2, 3], "onejev": {"python": "/v/bin/python"}})
+        self.assertIn("Data generation tool: `%s`" % b["dgen"], B.render_brief(b))
+        self.assertFalse([k for k in b["inputs"] if k.startswith(("evalset", "testset"))])
+        denied = B.denied_paths(ws, b)
+        for kind in ("evalset", "testset"):
+            self.assertIn(ws.path(ws.current(kind)), denied)            # whole directories, inputs included
+        path = os.pathsep.join(os.path.join(REPO, *p) for p in (("modules", "data"), ("modules", "common"), ()))
+        self.assertEqual(B.dgen_command({"resources": {"onejev": {"python": "/v/bin/python"}}}),
+                         "PYTHONPATH=%s /v/bin/python -m dgen" % path)
+        self.assertEqual(B.dgen_command({}), "PYTHONPATH=%s python3 -m dgen" % path)
 
     def test_data_refresh_gets_the_task_and_plan_issues(self):
         self.refreshed(data_issue=True)
@@ -387,6 +409,25 @@ class TestInputs(BriefCase):
         self.assertEqual(b["inputs"]["delivery"], ws.path(dlv))
         self.assertTrue(b["inputs"]["testset_labels"].endswith("labels.jsonl"))
         self.assertTrue(b["inputs"]["evalset_labels"].endswith("labels.jsonl"))
+        self.check_paths(b)
+
+    def test_compare_brief_has_no_evalset_labels(self):
+        # ③ gets the candidate, the trainset and valset whole, the evalset's inputs and the registered baselines.
+        task = fixtures.binary_task()
+        task["compare"] = {"baselines": ["lr"], "few_shot": {"k": 2}}
+        self.use_task(task, "ws-compare")
+        self.sets()
+        cand = self.candidate()
+        bl = self.reg("baseline", ids=VAL_IDS, eval_ids=EVAL_IDS)
+        ws = Workspace(self.ws)
+        b = B.build_brief(ws, "compare")
+        self.assertEqual(set(b["inputs"]), {"task", "candidate", "trainset", "valset", "evalset_inputs", bl})
+        self.assertEqual(b["inputs"]["candidate"], ws.path(cand))
+        self.assertTrue(b["inputs"]["evalset_inputs"].endswith("inputs.jsonl"))
+        self.assertIn(os.path.join(ws.path(ws.current("evalset")), "labels.jsonl"), B.denied_paths(ws, b))
+        self.assertNotIn("testset_inputs", b["inputs"])
+        self.assertEqual(sorted(b["ids"]), ["evalset", "trainset", "valset"])
+        self.assertEqual(b["compare"]["few_shot"], {"base": None, "k": 2, "max_example_chars": 2000})
         self.check_paths(b)
 
     def test_dispatch_purpose_and_outdir(self):
@@ -459,7 +500,7 @@ class TestOwnRecordsAndPlan(BriefCase):
             self.assertNotIn(r3["train"], b["inputs"])  # this round's record is no earlier round's
             for rid in want:
                 self.assertEqual(b["inputs"][rid], ws.path(rid))
-                self.assertIn("实验记录", b["input_notes"][rid])
+                self.assertIn("experiment record", b["input_notes"][rid])
                 self.assertIn(rid, B.render_brief(b))
             self.check_paths(b)
         self.assertLessEqual(records, set(self.brief("judge")["inputs"]))  # the judge reads every record, as before
@@ -472,7 +513,7 @@ class TestOwnRecordsAndPlan(BriefCase):
         b = self.brief("judge")
         self.assertEqual(b["purpose"], "judge")
         self.assertEqual(b["inputs"]["plan"], ws.path(plan2))
-        self.assertIn("计划", b["input_notes"]["plan"])
+        self.assertIn("Plan", b["input_notes"]["plan"])
         self.assertNotIn(ws.path(plan1), b["inputs"].values())
         self.check_paths(b)
         for purpose in ("plan", "milestone_judge"):  # only the evaluation brief
@@ -625,9 +666,10 @@ class TestDenied(BriefCase):
         cand = self.candidate()
         dlv = self.delivery(cand)
         ev = self.evaluation(cand, dlv)
+        bl = self.reg("baseline", ids=VAL_IDS, eval_ids=EVAL_IDS)  # baselines hold evalset predictions
         ws = Workspace(self.ws)
         den = B.decision_denied(ws)
-        for aid in ("trainset-0001", "valset-0001", "evalset-0001", "testset-0001", dlv, ev):
+        for aid in ("trainset-0001", "valset-0001", "evalset-0001", "testset-0001", dlv, ev, bl):
             self.assertIn(self.art(aid), den)
         self.assertNotIn(self.art(cand), den)
 
@@ -692,16 +734,17 @@ class TestRender(BriefCase):
         self.delivery(cand)
         text = B.render_brief(self.brief("judge"))
         for part in ("rsi-judge", "task.json", "PYTHONPATH=%s python3 -m rsi validate" % REPO,
-                     "python3 -m rsi score", "不要运行 `rsi register`", "handback.json", "输出目录", "当前最佳版本"):
+                     "python3 -m rsi score", "do not run `rsi register`", "handback.json", "Output directory",
+                     "Current best version"):
             self.assertIn(part, text)
         self.assertNotIn(Workspace(self.ws).root + "\n", text)
-        self.assertNotIn("训练命令", text)
-        self.assertIn("训练命令：`%s/modules/train/train`" % REPO, B.render_brief(self.brief("train")))
+        self.assertNotIn("Train command", text)
+        self.assertIn("Train command: `%s/modules/train/train`" % REPO, B.render_brief(self.brief("train")))
         # R18: the train module's trials go through trsi launch (its skill); the data module does not train.
         self.assertIn("trsi launch", B.render_brief(self.brief("train")))
         data = B.render_brief(self.brief("data"))
-        self.assertNotIn("训练命令", data)
-        self.assertIn("本模块不训练", data)
+        self.assertNotIn("Train command", data)
+        self.assertIn("this module does not train", data)
 
     def test_cli_brief(self):
         self.sets()
@@ -801,7 +844,10 @@ class TestSkillsMatchBriefs(BriefCase):
         self.reg("record", 2, artifacts=[cand])
         self.reg("feedback", 2)
         self.delivery(cand, 2)
-        grab(("data", "trainset"), ("train", "train"), ("deliver", "deliver"), ("judge", "judge"), ("judge", "plan"))
+        bl = self.reg("baseline", 2, ids=VAL_IDS, eval_ids=EVAL_IDS)  # ③: compare reuses it, the judge reports it
+        self.reg("comparison", 2, ids=VAL_IDS, candidate=cand, baselines={"lr": (bl, ())})
+        grab(("data", "trainset"), ("train", "train"), ("compare", "compare"), ("deliver", "deliver"),
+             ("judge", "judge"), ("judge", "plan"))
         self.refreshed(data_issue=True)
         grab(("data", "refresh"), ("deliver", "deliver"))
         self.milestone()
@@ -812,7 +858,14 @@ class TestSkillsMatchBriefs(BriefCase):
         fixtures.add_predictions(d, self.task, "predictions_test", TEST_IDS, testset_id="testset-0001")
         ws.approve("use_testset", "alice", "go")
         ws.register("delivery", d)
-        grab(("deliver", "milestone_deliver"), ("judge", "milestone_judge"))
+        bl = self.reg("baseline", ids=VAL_IDS, eval_ids=EVAL_IDS)  # the best version's comparison, then its test copy
+        self.reg("comparison", ids=VAL_IDS, candidate=cand1, baselines={"lr": (bl, ())})
+        ws = Workspace(self.ws)
+        ws.approve("use_testset", "alice", "go")
+        ws.register("baseline", fixtures.add_predictions(
+            fixtures.make_artifact("baseline", self.src("bl-test"), self.task, ids=VAL_IDS, eval_ids=EVAL_IDS,
+                                   reused_from=bl), self.task, "predictions_test", TEST_IDS, testset_id="testset-0001"))
+        grab(("deliver", "milestone_deliver"), ("compare", "milestone_compare"), ("judge", "milestone_judge"))
         return out
 
     def kinds_of(self, brief):
@@ -838,12 +891,12 @@ class TestSkillsMatchBriefs(BriefCase):
                 self.assertTrue(labels, (module, purpose))
             else:
                 self.assertEqual(labels, [], (module, purpose))
-        # The input kinds are the ones each skill's 输入 section names.
+        # The input kinds are the ones each module's skill names in its Inputs section (a code module's too).
         for module in B.MODULE_PURPOSES:
             reach = self.reach[module]
-            skill = set(t for t in TS.lower_tokens(TS.skill_section(TS.module_path(module), "输入"))
+            skill = set(t for t in TS.lower_tokens(TS.skill_section(TS.module_path(module), "Inputs"))
                         if t in TS.KINDS)
-            self.assertEqual(reach, skill, "%s: brief inputs vs the skill's 输入 section" % module)
+            self.assertEqual(reach, skill, "%s: brief inputs vs the skill's Inputs section" % module)
         # brief.json keys are in templates/brief.md's field table and the skills.
         template = TS.read(TS.BRIEF)
         table = [l for l in template.splitlines() if l.startswith("| `")]
@@ -857,14 +910,14 @@ class TestSkillsMatchBriefs(BriefCase):
             self.assertIn(key, real)
         listed = {"module", "purpose", "round", "task_json", "ids", "inputs", "outdir", "budget_left", "goal"}
         for name in TS.MODULE_SKILLS:
-            text = TS.skill_section(TS.module_path(name), "输入")
-            named = set(re.findall(r"`(\w+)`", text.split("只读下面列出")[0])) & (real | listed)
+            text = TS.skill_section(TS.module_path(name), "Inputs")
+            named = set(re.findall(r"`(\w+)`", text.split("Read only the artifacts listed below")[0])) & (real | listed)
             self.assertTrue(listed <= named, name)
             self.assertLessEqual(listed, real)
 
     def test_output_kinds_match_the_skills(self):
         for module, kinds in EXPECTED_OUTPUTS.items():
-            skill = set(t for t in TS.lower_tokens(TS.skill_section(TS.module_path(module), "输出"))
+            skill = set(t for t in TS.lower_tokens(TS.skill_section(TS.module_path(module), "Outputs"))
                         if t in TS.KINDS)
             self.assertEqual(skill, kinds, module)
         for kinds in EXPECTED_OUTPUTS.values():
@@ -877,10 +930,10 @@ class TestSkillsMatchBriefs(BriefCase):
             self.assertIn(kind, EXPECTED_OUTPUTS[producer])
 
     def handback_examples(self):
-        """The handback.json example of the format text, and of each skill (its 输出 paragraph)."""
+        """The handback.json example of the format text, and of each skill (its Outputs paragraph)."""
         yield "briefs.HANDBACK_FORMAT", B.HANDBACK_FORMAT
         for name in TS.MODULE_SKILLS + (TS.TEMPLATE_NAME,):
-            yield name, TS.skill_section(TS.module_path(name), "输出")
+            yield name, TS.skill_section(TS.module_path(name), "Outputs")
 
     def test_handback_format_texts_and_example_pass_read_handback(self):
         for where, text in self.handback_examples():

@@ -11,11 +11,12 @@ from unittest import mock
 
 import fixtures
 import test_dashboard as TD
+from rsi import briefs as B
 from rsi import cli
 from rsi import dashboard as D
 from rsi import flow as F
 from rsi import rows
-from rsi.rules import MODULE_OF, flow_settings
+from rsi.rules import MODULE_OF, compare_settings, flow_settings
 from rsi.workspace import Workspace, now_iso
 
 VAL_IDS, TRAIN_IDS, EVAL_IDS, TEST_IDS = TD.VAL_IDS, TD.TRAIN_IDS, TD.EVAL_IDS, TD.TEST_IDS
@@ -74,7 +75,7 @@ class FlowCase(TD.DashboardCase):
                                          "reason": "user answer"})
 
     def set_waiting(self, **w):
-        record = {"kind": "question", "question": "q?", "options": ["已回答"]}
+        record = {"kind": "question", "question": "q?", "options": ["answered"]}
         record.update(w)
         Workspace(self.ws).set_waiting(record)
 
@@ -379,7 +380,7 @@ def b_plan_revise(c, launches=1):
     issue = dict(fixtures._plan_issue(), attribution="model_capacity", module="train")
     c.handback_into("d-0001", "plan", evaluation_id="evaluation-0001", entry_module="train", issues=[issue])
     Workspace(c.ws).add_decision({"point": "plan", "options": ["approve", "revise"], "choice": "revise", "by": "alice",
-                                  "quote": "加上短消息的切片", "ref": "plan-0001", "dispatch_id": "d-0001",
+                                  "quote": "add a slice for short messages", "ref": "plan-0001", "dispatch_id": "d-0001",
                                   "launches": 1})
     Workspace(c.ws).update_dispatch("d-0001", launches=launches)
 
@@ -464,6 +465,19 @@ def refresh_round(c):
     c.candidate(2)
 
 
+def b_compare_due(c):
+    task = fixtures.binary_task()
+    task["compare"] = {"baselines": ["lr"]}
+    c.use_task(task, c.unique())
+    c.sets()
+    c.candidate()
+
+
+def b_compare_failed_at_the_cap(c):
+    b_compare_due(c)
+    c.add_dispatch("compare", "failed", returns=2)
+
+
 def b_evalset_used_up(c):
     refresh_round(c)
 
@@ -503,7 +517,7 @@ def b_stopped_no_report(c):
 def b_stopped_report(c):
     b_stopped_no_report(c)
     with open(os.path.join(c.ws, "REPORT.md"), "w", encoding="utf-8") as f:
-        f.write("# 报告\n")
+        f.write("# Report\n")
 
 
 def b_stopped_with_waiting_and_agents(c):
@@ -516,14 +530,14 @@ def b_stopped_with_waiting_and_agents(c):
 def b_waiting(c):
     c.plan_task(c.unique())
     c.plan(c.promoted_round())
-    c.set_waiting(kind="approval", what="plan", ref="plan-0001", question="批准计划 plan-0001？",
+    c.set_waiting(kind="approval", what="plan", ref="plan-0001", question="Approve plan plan-0001?",
                   options=["approve", "reject"])
 
 
 def b_waiting_before_agents(c):
     c.sets()
     c.add_dispatch("train", "handed_back")
-    c.set_waiting(question="用哪台机器？", options=["a", "b"])
+    c.set_waiting(question="Which machine to use?", options=["a", "b"])
 
 
 def b_old_workspace(c):
@@ -593,6 +607,12 @@ TABLE = (
      {"type": "resume", "dispatch_id": "d-0001", "step": "train", "mode": "followup"}),
     ("candidates through the train gate", b_passed_candidate,
      {"type": "dispatch", "module": "deliver", "candidate_id": "candidate-0002", "step": "deliver"}),
+    ("candidate through the train gate, ③ Compare on", b_compare_due,
+     {"type": "dispatch", "module": "compare", "purpose": "compare", "candidate_id": "candidate-0001",
+      "step": "compare"}),
+    ("compare failed at the cap", b_compare_failed_at_the_cap,
+     {"type": "decide", "point": "handback_failed", "options": ["resume", "skip", "ask"], "default": "skip",
+      "dispatch_id": "d-0001", "step": "compare"}),
     ("delivery without evaluation", b_delivery_without_evaluation, {"type": "dispatch", "module": "judge"}),
     ("judge handed back no evaluation", b_judge_handed_back_nothing,
      {"type": "decide", "point": "handback_failed", "dispatch_id": "d-0001", "step": "judge"}),
@@ -638,7 +658,7 @@ TABLE = (
     ("stopped, report written", b_stopped_report, {"type": "done"}),
     ("stopped beats waiting and agents", b_stopped_with_waiting_and_agents, {"type": "report"}),
     ("waiting for an answer", b_waiting,
-     {"type": "ask", "kind": "approval", "what": "plan", "ref": "plan-0001", "question": "批准计划 plan-0001？",
+     {"type": "ask", "kind": "approval", "what": "plan", "ref": "plan-0001", "question": "Approve plan plan-0001?",
       "options": ["approve", "reject"], "step": "plan"}),
     ("waiting beats agents", b_waiting_before_agents,
      {"type": "ask", "kind": "question", "what": None, "options": ["a", "b"]}),
@@ -806,17 +826,18 @@ class TestTransitionDetails(FlowCase):
         # answered it for this launch, the same session gets the answer (a resume with mode answer, no return).
         did = self.add_dispatch("data", "handed_back")
         Workspace(self.ws).update_dispatch(did, launches=1, asked={"launch": 1, "question_id": "q-0001",
-                                                                   "questions": ["保留还是删掉？"]})
-        self.set_waiting(what="handback", ref=did, question="rsi-data（d-0001）交回时有要你决定的事：保留还是删掉？")
+                                                                   "questions": ["Keep them or drop them?"]})
+        self.set_waiting(what="handback", ref=did, question="rsi-data (d-0001) handed back something for the user to "
+                                                             "decide: Keep them or drop them?")
         self.assertAction({"type": "ask", "what": "handback", "ref": did})
-        Workspace(self.ws).add_decision({"point": "handback", "choice": "已回答", "by": "alice", "quote": "删掉",
+        Workspace(self.ws).add_decision({"point": "handback", "choice": "answered", "by": "alice", "quote": "drop them",
                                          "dispatch_id": did, "launches": 1, "question_id": "q-0001"})
         Workspace(self.ws).clear_waiting()
         self.assertAction({"type": "resume", "dispatch_id": did, "mode": "answer", "step": "handed"})
-        self.assertIn("还没有登记", self.action()["feedback"])
+        self.assertIn("Nothing of that hand-back is registered yet", self.action()["feedback"])
         # An answer to an earlier launch's question does not count for this hand-back: it is processed (and asks).
         Workspace(self.ws).update_dispatch(did, launches=2, asked={"launch": 2, "question_id": "q-0002",
-                                                                   "questions": ["再问一次"]})
+                                                                   "questions": ["One more question?"]})
         self.assertAction({"type": "process_handback", "dispatch_id": did})
 
     def test_a_handback_question_of_a_closed_dispatch_is_stale(self):
@@ -824,7 +845,7 @@ class TestTransitionDetails(FlowCase):
         self.set_waiting(what="handback", ref=did)
         ws = Workspace(self.ws)
         self.assertFalse(F.stale_waiting(ws, ws.waiting()))
-        Workspace(self.ws).update_dispatch(did, status="done", closed="运行已停止")
+        Workspace(self.ws).update_dispatch(did, status="done", closed="run stopped")
         ws = Workspace(self.ws)
         self.assertTrue(F.stale_waiting(ws, ws.waiting()))
 
@@ -865,14 +886,18 @@ class TestTransitionDetails(FlowCase):
                       "\n".join(cli.status_lines(ws)))
         b_long_job_checkins_used_up(self)
         q = self.assertAction({"type": "ask", "what": "checkin"})
-        self.assertIn("2", q["question"])
+        self.assertEqual(q["question"], "The long job of rsi-train (d-0001) has not finished (completion marker %s is "
+                         "not there yet) after 2 check-ins, reaching the cap flow.max_checkins = 2. continue: 2 more "
+                         "check-ins; wait: no more check-ins, only wait for the completion marker; stop: stop the run "
+                         "(as rsi stop, which terminates the long job)"
+                         % os.path.join(self.ws, "work/round-1/train/DONE"))
         self.set_waiting(what="checkin", ref="d-0001", question=q["question"], options=q["options"])
         self.assertFalse(F.stale_waiting(Workspace(self.ws), Workspace(self.ws).waiting()))
         Workspace(self.ws).clear_waiting()
-        Workspace(self.ws).add_decision({"point": "checkin", "choice": "continue", "by": "alice", "quote": "接着查",
+        Workspace(self.ws).add_decision({"point": "checkin", "choice": "continue", "by": "alice", "quote": "keep checking",
                                          "dispatch_id": "d-0001", "options": list(F.CHECKIN_OPTIONS)})
         self.assertAction({"type": "resume", "dispatch_id": "d-0001", "mode": "checkin"})
-        Workspace(self.ws).add_decision({"point": "checkin", "choice": "wait", "by": "alice", "quote": "只等标记",
+        Workspace(self.ws).add_decision({"point": "checkin", "choice": "wait", "by": "alice", "quote": "just wait",
                                          "dispatch_id": "d-0001", "options": list(F.CHECKIN_OPTIONS)})
         self.assertAction({"type": "wait_long_job", "dispatch_id": "d-0001", "checkin_at": None})
         self.assertIn("check-ins of long job d-0001 (rsi-train): 2 of -, every 30 minutes; no more (the user said wait)",
@@ -908,10 +933,10 @@ class TestTransitionDetails(FlowCase):
         ws = Workspace(self.ws)
         self.assertEqual(ws.attempts(rnd=1), [search])  # the train candidate is no attempt now
         self.assertEqual(ws.next_round(), (2, "tune"))
-        # The plan's entry tune opens round 2 at the merged training-tuning step.
+        # The plan's entry tune opens round 2 at the merged train step.
         self.assertAction({"type": "dispatch", "module": "train", "purpose": "train", "step": "train"})
         lines = cli.status_lines(Workspace(self.ws))
-        self.assertRegex(lines[0], r"^now: \d\d:\d\d 第2轮 下一步：② 训练调优$")  # rsi.live.now_line
+        self.assertRegex(lines[0], r"^now: \d\d:\d\d round 2 next: ② Train & tune \| budget: GPU hours 4\.5/–$")
         self.assertIn("round: 2 (entry tune, decision none, plan none)", lines)
         self.assertIn("attempts: 0 of 3", lines)
         ws = Workspace(self.ws)
@@ -952,22 +977,24 @@ class TestBudgetHoldFlow(FlowCase):
         self.assertTrue(F.budget_held(ws, ws.dispatch(did)))
         ws.update_dispatch(did, launches=2)  # held for an earlier launch: not this hand-back
         self.assertFalse(F.budget_held(Workspace(self.ws), Workspace(self.ws).dispatch(did)))
-        ws.update_dispatch(did, launches=1, status="done", closed="运行已停止（user requested: 停）：这次派出的交回不再登记")
+        ws.update_dispatch(did, launches=1, status="done",
+                           closed="run stopped (user requested: stop): this dispatch's hand-back is no longer registered")
         self.assertFalse(F.budget_held(Workspace(self.ws), Workspace(self.ws).dispatch(did)))
         ws.update_dispatch(did, status="handed_back", closed=None)
-        Workspace(self.ws).approve("over_budget", "alice", "可以超")
+        Workspace(self.ws).approve("over_budget", "alice", "going over is fine")
         ws = Workspace(self.ws)
         self.assertFalse(F.budget_held(ws, ws.dispatch(did)))  # approved: the next process_handback registers it
         self.assertEqual(ws.dispatch(did)["held_budget"], self.HELD)  # kept as history
 
     def test_held_budget_question_goes_stale_with_its_dispatch(self):
         did = self.held_dispatch()
-        self.set_waiting(kind="approval", what="over_budget", ref=None, dispatch_id=did, question="over_budget：…",
+        self.set_waiting(kind="approval", what="over_budget", ref=None, dispatch_id=did, question="over_budget: …",
                          options=["approve", "stop"])
         ws = Workspace(self.ws)
         self.assertFalse(F.stale_waiting(ws, ws.waiting()))
         self.assertAction({"type": "ask", "what": "over_budget", "ref": None})
-        self.set_status(did, "done", closed="运行已停止（user requested: 停）：这次派出的交回不再登记，也不再退回")
+        self.set_status(did, "done", closed="run stopped (user requested: stop): this dispatch's hand-back is no longer "
+                                            "registered or sent back")
         ws = Workspace(self.ws)
         self.assertTrue(F.stale_waiting(ws, ws.waiting()))
         ws.set_waiting(dict(ws.waiting(), dispatch_id="d-0099"))  # a dispatch the workspace does not know
@@ -981,8 +1008,9 @@ class TestBudgetHoldFlow(FlowCase):
 class TestStopTexts(FlowCase):
     """S1 (third simulation): a question's options say only what will happen, the stop that follows included."""
 
-    OVER_BUDGET = ("over_budget：已用算力 0.25 小时，达到预算 0.25 小时，继续派训练要你批准超预算。approve：批准超预算，"
-                   "本轮接着训练到判定为止，判定后因算力达到预算停止运行；stop：停止运行（同 rsi stop）。")
+    OVER_BUDGET = ("over_budget: GPU hours used 0.25, which reaches the budget of 0.25; more training needs your "
+                   "approval to go over budget. approve: approve going over budget (the round goes on until it is "
+                   "decided, then the run stops because the budget is reached); stop: stop the run (as rsi stop)")
 
     def test_over_budget_before_dispatch_text(self):
         task = fixtures.binary_task()
@@ -994,16 +1022,39 @@ class TestStopTexts(FlowCase):
         self.assertAction({"type": "ask", "kind": "approval", "what": "over_budget", "ref": None, "step": "train",
                            "question": self.OVER_BUDGET, "options": ["approve", "stop"]})
 
+    def test_counts_in_the_texts(self):
+        # One of a thing in the singular, more in the plural: attempts, evalset uses, check-ins, returns.
+        from rsi import decisions as DP
+        b_attempts_used_up(self)
+        self.assertEqual(self.action()["reason"],
+                         "round 1 used up its 1 attempt with no candidate through the train gate")
+        b_evalset_used_up(self)
+        self.assertIn("refresh_sets: the evalset has been used 1 time, reaching its limit of 1;",
+                      self.action()["question"])
+        checkin_task(self, max_checkins=1)
+        did = self.add_dispatch("train", "long_job", marker="DONE")
+        Workspace(self.ws).update_dispatch(did, ended_at=LONG_AGO, checkins=1)
+        self.assertIn("after 1 check-in, reaching the cap flow.max_checkins = 1. continue: 1 more check-in;",
+                      self.action()["question"])
+        self.use_task(fixtures.binary_task(), self.unique())
+        b_failed_dispatch(self)
+        for returns, words in ((0, "0 times"), (1, "1 time"), (2, "2 times")):
+            Workspace(self.ws).update_dispatch("d-0001", returns=returns)
+            self.assertEqual(DP._returns(Workspace(self.ws), "train"),
+                             "rsi-train was sent back %s this round (cap flow.max_returns = 2)" % words)
+
     def test_refresh_close_round_says_whether_the_run_stops(self):
         b_evalset_used_up(self)
         q = self.action()["question"]
-        self.assertIn("close_round：不刷新，关闭本轮（没有评测，记 keep），接着 rsi-judge 写计划；", q)
+        self.assertIn("close_round: no refresh, close the round (no evaluation, recorded as keep), then rsi-judge "
+                      "writes the plan; ", q)
         self.edit_state(lambda s: s.__setitem__("no_promotion_streak", 1))  # closing round 2 reaches patience 2
         stop, why = Workspace(self.ws).stop_check_if_closed()
         self.assertTrue(stop)
         q = self.action()["question"]
-        self.assertIn("close_round：不刷新，关闭本轮（没有评测，记 keep），然后运行停止（%s）；" % why, q)
-        self.assertNotIn("写计划", q)
+        self.assertIn("close_round: no refresh, close the round (no evaluation, recorded as keep), then the run stops "
+                      "(%s); " % why, q)
+        self.assertNotIn("writes the plan", q)
 
 
 class TestStateFields(FlowCase):
@@ -1097,7 +1148,7 @@ class TestWriters(FlowCase):
 
     def test_set_and_clear_waiting(self):
         ws = Workspace(self.ws)
-        w = ws.set_waiting({"kind": "approval", "what": "plan", "ref": "plan-0001", "question": "批准？",
+        w = ws.set_waiting({"kind": "approval", "what": "plan", "ref": "plan-0001", "question": "Approve?",
                             "options": ["approve", "reject"]})
         self.assertRegex(w["since"], r"Z$")
         self.assertEqual(Workspace(self.ws).waiting()["ref"], "plan-0001")
@@ -1177,9 +1228,9 @@ class TestPagesFollowFlow(FlowCase):
         self.assertNotIn("rsi-tune", w)
         self.assertNotIn("rsi-judge", w)
         st = self.assertFlow(train="current")
-        self.assertIn("运行中", st["train"]["text"])
+        self.assertIn("running", st["train"]["text"])
         self.set_status(train, "handed_back")
-        self.assertIn("登记", self.waiting())
+        self.assertIn("registered", self.waiting())
         self.assertFlow(train="current")
         # A failed dispatch with an empty output directory is no running module.
         self.set_status(train, "failed")
@@ -1199,8 +1250,8 @@ class TestPagesFollowFlow(FlowCase):
         Workspace(self.ws).approve("refresh_sets", "alice", "refresh it")
         self.assertAction({"type": "dispatch", "module": "data", "purpose": "refresh"})
         st = self.assertFlow(data="current", deliver="todo")
-        self.assertEqual(st["data"]["text"], "● 刷新评测集")
-        self.assertIn("新的评测集", self.waiting())
+        self.assertEqual(st["data"]["text"], "● refreshing evalset")
+        self.assertIn("a new evalset", self.waiting())
 
     def test_agent_of_an_earlier_round_is_named(self):
         self.round_two(entry="train")
@@ -1208,22 +1259,153 @@ class TestPagesFollowFlow(FlowCase):
         self.assertAction({"type": "wait_agent", "dispatch_ids": ["d-0001"]})
         self.assertIn("rsi-judge", self.waiting())
         now = TD.section(TD.pages(self.ws)[TD.OVERVIEW], "now")
-        self.assertIn("④ 评测与决策：rsi-judge 运行中", now)
+        self.assertIn("⑤ Judge &amp; decide: rsi-judge running", now)
         self.assertFlow(judge="current")
         self.set_status("d-0001", "handed_back")
-        self.assertIn("rsi-judge 已交回", TD.section(TD.pages(self.ws)[TD.OVERVIEW], "now"))
+        self.assertIn("rsi-judge has handed back", TD.section(TD.pages(self.ws)[TD.OVERVIEW], "now"))
 
     def test_waiting_question_on_the_page(self):
         self.sets()
-        self.set_waiting(question="训练用哪台机器？", options=["a100", "h100"])
+        self.set_waiting(question="Which machine to train on?", options=["a100", "h100"])
         ws = Workspace(self.ws)
         q = D.pending_questions(ws, D.module_progress(ws))
-        self.assertEqual([i["text"] for i in q], ["训练用哪台机器？"])
+        self.assertEqual([i["text"] for i in q], ["Which machine to train on?"])
         self.assertIsNotNone(q[0]["since"])
-        self.assertIn("训练用哪台机器？", TD.section(TD.pages(self.ws)[TD.OVERVIEW], "ask"))
-        self.assertIn("等用户回答", self.waiting())
+        self.assertIn("Which machine to train on?", TD.section(TD.pages(self.ws)[TD.OVERVIEW], "ask"))
+        self.assertIn("Waiting for the user", self.waiting())
         st = self.assertFlow(data="done", train="wait")
-        self.assertEqual(st["train"]["text"], "⏸ 等你回答")
+        self.assertEqual(st["train"]["text"], "⏸ waiting for the user")
+
+
+class CompareCase(FlowCase):
+    """Workspaces at ③ Compare, with or without a `compare` section in the task. Artifacts are registered through the
+    Workspace object a test holds, so its next_action sees them."""
+
+    def ws_passed_candidate(self, compare=None, **task_changes):
+        """A new workspace (its task with `compare` when given) holding the four sets and a candidate through the
+        train gate: ② is done."""
+        task = fixtures.binary_task()
+        task.update(task_changes)
+        if compare is not None:
+            task["compare"] = compare
+        self.use_task(task, self.unique())
+        self.sets()
+        self.candidate()
+        return Workspace(self.ws)
+
+    def put(self, ws, kind, src=None, **fields):
+        """Register a `kind` artifact from `src` (default a fresh source directory) into `ws`; return its id."""
+        return ws.register(kind, fixtures.make_artifact(kind, src or self.src(kind), self.task,
+                                                        round=ws.state["round"], **fields))
+
+    def register_comparison(self, ws, out=None, name="lr"):
+        """A baseline `name` (wrong on q0) and the comparison of the chosen candidate with it, from subdirectories of
+        `out` (a dispatch's output directory) when given; return the baseline's id."""
+        b = self.put(ws, "baseline", out and os.path.join(out, "bl-" + name), ids=VAL_IDS, eval_ids=EVAL_IDS,
+                     wrong=(0,), name=name)
+        self.put(ws, "comparison", out and os.path.join(out, "comparison"), ids=VAL_IDS,
+                 candidate=F.chosen_candidate(ws), baselines={name: (b, (0,))})
+        return b
+
+    def ws_compare_dispatch_registered(self, kinds):
+        """A workspace at ③ whose compare dispatch handed back and registered `kinds` (["baseline"], or with
+        "comparison" too); returns (ws, the dispatch record)."""
+        self.ws_passed_candidate({"baselines": ["lr"]})
+        did = self.add_dispatch("compare", "done", purpose="compare")
+        ws = Workspace(self.ws)
+        out = os.path.join(self.ws, ws.dispatch(did)["outdir"])
+        if "comparison" in kinds:
+            self.register_comparison(ws, out)
+        else:
+            self.put(ws, "baseline", os.path.join(out, "bl-lr"), ids=VAL_IDS, eval_ids=EVAL_IDS, wrong=(0,))
+        return ws, ws.dispatch(did)
+
+    def ws_milestone_asked(self, compare=None, skipped=False, name="lr"):
+        """Round 1 compared and promoted its candidate (V1) and the stop check says stop: the milestone is asked.
+        skipped: the comparison lists no baseline (each was skipped); else its one baseline is `name`."""
+        ws = self.ws_passed_candidate(compare, stop=dict(fixtures.binary_task()["stop"], target=0.8))
+        cand = F.chosen_candidate(ws)
+        scored = {}  # the judge reports the comparison's baseline on the evalset (baselines_eval)
+        if skipped:
+            self.put(ws, "comparison", ids=VAL_IDS, candidate=cand, baselines={},
+                     skipped={"zero_shot": "needs 0.1 GPU hours, 0 left"})
+        else:
+            scored[self.register_comparison(ws, name=name)] = (name, (0,))
+        dlv = self.put(ws, "delivery", ids=EVAL_IDS, val_ids=VAL_IDS, candidate_id=cand)
+        ev = self.put(ws, "evaluation", ids=EVAL_IDS, train_ids=TRAIN_IDS, delivery_id=dlv, candidate_id=cand,
+                      evalset_id="evalset-0001", best_before=None, baselines=scored)
+        self.assertEqual(ws.promote(ev)[:2], ("promote", "V1"))
+        return ws
+
+    def milestone_yes_with_delivery(self):
+        """The user says yes to the milestone and the milestone delivery is registered."""
+        self.decide("milestone", "yes")
+        milestone_delivery(self)
+        return Workspace(self.ws)
+
+    def register_milestone_baseline(self, ws):
+        """The comparison's baseline lr scored on the testset inputs (its use_testset approval given, as the engine
+        writes it); returns its id."""
+        ws.approve("use_testset", "alice", "yes, validate it on the test inputs")
+        src = fixtures.make_artifact("baseline", self.src("baseline"), self.task, round=ws.state["round"], ids=VAL_IDS,
+                                     eval_ids=EVAL_IDS, wrong=(0,), reused_from="baseline-0001")
+        fixtures.add_predictions(src, self.task, "predictions_test", TEST_IDS, testset_id="testset-0001")
+        return ws.register("baseline", src)
+
+
+class TestCompareStep(CompareCase):
+    def test_compare_comes_after_train_and_before_deliver(self):
+        ws = self.ws_passed_candidate(compare={"baselines": ["lr"]})
+        a = F.next_action(ws)
+        self.assertEqual((a["type"], a["module"], a["purpose"], a["step"]),
+                         ("dispatch", "compare", "compare", "compare"))
+        self.assertEqual(a["candidate_id"], F.chosen_candidate(ws))
+        self.register_comparison(ws)                                  # baseline + comparison of the chosen candidate
+        self.assertEqual(F.next_action(ws)["module"], "deliver")
+        self.assertEqual(F.next_action(self.ws_passed_candidate())["module"], "deliver")   # no compare section
+
+    def test_the_compare_section_of_the_task(self):
+        # Any lower-case name passes (the mock compare's prior); defaults are filled in by compare_settings only.
+        task = fixtures.binary_task()
+        self.assertIsNone(compare_settings(task))
+        for compare in ({"baselines": ["prior"]},
+                        {"baselines": ["lr", "zero_shot"], "team_recipe": dict(fixtures.CONFIG_REQUEST)}):
+            task["compare"] = compare
+            self.assertEqual(rows.check_task(task), [], compare)
+        self.assertEqual(compare_settings(task)["gpu_hours"], {"zero_shot": 0.1, "few_shot": 0.1, "predict": 0.1})
+        for compare, word in (({"baselines": []}, "minItems"), ({"baselines": ["LR"]}, "pattern"),
+                              ({"baselines": ["lr", "lr"]}, "named once"), ({"seed": 0}, "baselines"),
+                              ({"baselines": ["lr"], "few_shot": {"k": 0}}, "minimum")):
+            task["compare"] = compare
+            errors = rows.check_task(task)
+            self.assertTrue(any(word in e and "compare" in e for e in errors), (compare, errors))
+
+    def test_compare_baselines_then_comparison_in_the_same_session(self):
+        ws, d = self.ws_compare_dispatch_registered(["baseline"])
+        a = F.next_action(ws)
+        self.assertEqual((a["type"], a["mode"], a["dispatch_id"]), ("resume", "followup", d["id"]))
+
+    def test_milestone_compare_between_milestone_deliver_and_judge(self):
+        q = F.next_action(self.ws_milestone_asked(compare={"baselines": ["lr"]}))["question"]
+        self.assertIn("up to 3 times", q)  # deliver, the comparison's one baseline, judge
+        self.assertIn("rsi-compare scores 1 baseline of the best version's comparison comparison-0001", q)
+        self.assertNotIn("GPU hours", q)                                  # lr is no GPU baseline
+        ws = self.milestone_yes_with_delivery()   # best version has a comparison
+        a = F.next_action(ws)
+        self.assertEqual((a["module"], a["purpose"], a["step"]), ("compare", "milestone_compare", "milestone"))
+        b = B.build_brief(ws, "compare", purpose="milestone_compare")
+        self.assertTrue(b["inputs"]["testset_inputs"].endswith("inputs.jsonl"))
+        self.assertIn(fixtures.labels_path(ws, "testset"), B.denied_paths(ws, b))
+        self.register_milestone_baseline(ws)
+        self.assertEqual(F.next_action(ws)["purpose"], "milestone_judge")
+        q = F.next_action(self.ws_milestone_asked(compare={"baselines": ["team_recipe"]}, name="team_recipe"))
+        self.assertIn("may use GPU hours beyond the compute budget", q["question"])   # predict-only, not held by it
+
+    def test_milestone_has_no_compare_step_when_the_comparison_lists_no_baseline(self):
+        q = F.next_action(self.ws_milestone_asked(compare={"baselines": ["zero_shot"]}, skipped=True))["question"]
+        self.assertIn("twice", q)
+        self.assertNotIn("rsi-compare", q)
+        self.assertEqual(F.next_action(self.milestone_yes_with_delivery())["purpose"], "milestone_judge")
 
 
 if __name__ == "__main__":

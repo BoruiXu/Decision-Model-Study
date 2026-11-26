@@ -4,8 +4,8 @@ The run starts at the first `rsi run` (first_run: `rsi init` may come hours befo
 opened (made_at: STATE rounds["1"]["opened_at"]; a workspace made before that field existed falls back to the
 task's registration time), and ends at `stopped.at`, or is still going. A round starts at its `opened_at` (round 1
 at the first `rsi run`, when that is before its end) and ends where the next round starts (the last one at
-`stopped.at`). Where `opened_at` is missing the start is approximated and the duration is shown with a leading 约.
-Reads only.
+`stopped.at`). Where `opened_at` is missing the start is approximated and the duration is shown with a leading
+"about". plural() builds the counted words the run report, the pages and the status line share. Reads only.
 """
 import datetime
 import json
@@ -129,17 +129,28 @@ def round_windows(ws):
     return out
 
 
+def plural(n, word, words=None):
+    """`n` followed by `word`, or by its plural `words` (default: `word` + "s") unless `n` is 1: "1 minute",
+    "3 minutes", "0 GPUs". An integer shows as is, any other number with %.6g."""
+    return "%s %s" % ("%d" % n if isinstance(n, int) else "%.6g" % n, word if n == 1 else words or word + "s")
+
+
 def format_duration(seconds):
-    """Four tiers, rounded down: 不到 1 分钟 / N 分钟 / H 小时 M 分 / D 天 H 小时."""
+    """Four tiers, rounded down: under a minute / N minutes / H hours M minutes / D days H hours."""
     s = max(0, int(seconds))
     if s < 60:
-        return "不到 1 分钟"
+        return "under a minute"
     if s < 3600:
-        return "%d 分钟" % (s // 60)
+        return plural(s // 60, "minute")
     if s < 86400:
         h, m = s // 3600, s % 3600 // 60
-        return "%d 小时" % h if m == 0 else "%d 小时 %d 分" % (h, m)
-    return "%d 天 %d 小时" % (s // 86400, s % 86400 // 3600)
+        return plural(h, "hour") if m == 0 else "%s %s" % (plural(h, "hour"), plural(m, "minute"))
+    return "%s %s" % (plural(s // 86400, "day"), plural(s % 86400 // 3600, "hour"))
+
+
+def approx_duration(seconds, approx):
+    """format_duration with a leading "about " when `approx` (not before "under a minute")."""
+    return ("about " if approx and seconds >= 60 else "") + format_duration(seconds)
 
 
 def _local(dt):
@@ -166,21 +177,22 @@ def seconds_between(start_iso, end, now):
 
 
 def _dur(win_start, win_end, approx, now):
-    return ("约 " if approx else "") + format_duration(seconds_between(win_start, win_end, now))
+    return approx_duration(seconds_between(win_start, win_end, now), approx)
 
 
 def elapsed_parts(ws, now):
-    """(prefix, duration text, suffix, start ISO if still running else None), or None when the
-    run's start is unknown. The text is prefix + duration + suffix."""
+    """(prefix, duration text, suffix, start ISO if still running else None, approx), or None when the
+    run's start is unknown. The text is prefix + duration + suffix; approx: the start is approximated (the
+    duration text leaves "about" out under a minute, so a live label takes it from here)."""
     start, end, approx = run_window(ws)
     if start is None:
         return None
     if stopped_unknown(ws):
-        return "共运行 ", "未知", "", None
+        return "total time: ", "unknown", "", None, False
     dur = _dur(start, end, approx, now)
     if end is None:
-        return "已运行 ", dur, "（%s 开始）" % format_start(start, now), start
-    return "共运行 ", dur, "", None
+        return "running for ", dur, " (started %s)" % format_start(start, now), start, approx
+    return "total time: ", dur, "", None, approx
 
 
 def elapsed_text(ws, now):
@@ -188,23 +200,28 @@ def elapsed_text(ws, now):
     return "" if p is None else p[0] + p[1] + p[2]
 
 
+OPEN_ROUND = "in progress for "  # round_parts' prefix while the round is open
+SO_FAR = " so far"  # the suffix that replaces it once something else says the round is open or decided
+
+
 def round_parts(win, now):
-    """(prefix, duration text, start ISO if the round is still open else None), or None."""
+    """(prefix, duration text, start ISO if the round is still open else None, approx), or None."""
     if win["start"] is None:
         return None
     if win.get("unknown"):
-        return "", "未知", None
+        return "", "unknown", None, False
     dur = _dur(win["start"], win["end"], win["approx"], now)
     if win["end"] is None:
-        return "进行中 · 已 ", dur, win["start"]
-    return "", dur, None
+        return OPEN_ROUND, dur, win["start"], win["approx"]
+    return "", dur, None, win["approx"]
 
 
 def round_text(win, now, decided=False):
     """The round's time as text; `decided`: the round is decided but still the current one (until
-    `rsi next`), so it reads "已 N 分钟" rather than "进行中 · 已 N 分钟"."""
+    `rsi next`), so it reads "N minutes so far" rather than "in progress for N minutes"."""
     p = round_parts(win, now)
     if p is None:
         return ""
-    prefix = "已 " if decided and p[0].startswith("进行中") else p[0]
-    return prefix + p[1]
+    if decided and p[0] == OPEN_ROUND:
+        return p[1] + SO_FAR
+    return p[0] + p[1]

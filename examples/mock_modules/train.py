@@ -1,4 +1,4 @@
-"""Mock rsi-train, the training-tuning module (see mocklib for the call, the task and the knobs).
+"""Mock rsi-train, the train module (see mocklib for the call, the task and the knobs).
 
 One dispatch runs one search, handed back in two parts. First part: one trial per config through the train command
 (producer train), each trial a candidate in trial-<i>/ (trial-<search>-<i>/ from the second search of the dispatch
@@ -9,7 +9,7 @@ feedback names the trials' registered ids (in the order handed back); the search
 validation primary metric, never worse than the default) is handed back. Sent back after the second part (no
 trial through the train gate), the session runs a new search with the default trials. With the long_job knob the
 trials run in the background and the hand-back is long_job with the marker search.marker; a check-in (feedback
-「# 定时检查」) looks at the job and hands back long_job again; the session continued after the marker says ok
+`# Check-in`) looks at the job and hands back long_job again; the session continued after the marker says ok
 collects the trials. A train gate that fails is reported as it is (passed false), for the engine to decide.
 """
 import json
@@ -32,8 +32,8 @@ def start(c):
     if best:
         cfg = dict(M.read_json(os.path.join(best, "manifest.json"))["config"])
         cfg.pop("seed", None)
-        return cfg, M.art_id(best), "当前最佳版本的候选 %s 的配置" % M.art_id(best)
-    return {}, "default", "训练命令的默认配置"
+        return cfg, M.art_id(best), "the config of the current best version's candidate %s" % M.art_id(best)
+    return {}, "default", "the train command's default config"
 
 
 def plan_trials(c, st):
@@ -49,9 +49,9 @@ def plan_trials(c, st):
         cfg.update(over)
         cfg["seed"] = 10 * (k - 1) + i - 1  # a seed of its own: no two trials train the same model
         out.append(("trial-%d" % i if k == 1 else "trial-%d-%d" % (k, i), cfg))
-    why += "；%d 个试验%s" % (len(out), "，本轮改了 %s" % json.dumps(over, sort_keys=True) if over else "")
+    why += "; %d trials%s" % (len(out), ", this round changed %s" % json.dumps(over, sort_keys=True) if over else "")
     if k > 1:
-        why += "；上一次搜索没有候选过训练门，换默认试验重新搜索"
+        why += "; no candidate of the last search passed the train gate, so a new search with the default trials"
     return out, source, why
 
 
@@ -77,19 +77,21 @@ def collect(c, st):
                      "compute_hours": m["cost"]["compute_hours"], "status": "ok", "gate": m["train_gate"]["passed"]})
         dirs.append(cand)
     if not dirs:
-        c.fail("没有一个试验成功：%s" % json.dumps(done, ensure_ascii=False))
+        c.fail("no trial succeeded: %s" % json.dumps(done, ensure_ascii=False))
     passed = [d for d in done if d.get("gate")]
     best = max((d for d in done if d["status"] == "ok"), key=lambda d: d["metric_val"])
-    r = M.write_record(c, "record", c.reason("这一轮要一个过训练门的候选"),
-                       "在配置空间里换配置会改变验证集上的 %s" % primary, s["why"], "val %s" % primary,
+    r = M.write_record(c, "record", c.reason("this round needs a candidate that passes the train gate"),
+                       "another config in the config space changes %s on the valset" % primary, s["why"],
+                       "val %s" % primary,
                        done[0]["metric_val"], best["metric_val"], "success" if passed else "failure",
-                       "%d 个试验，%d 个过训练门" % (len(dirs), len(passed)),
+                       "%d trials, %d passed the train gate" % (len(dirs), len(passed)),
                        artifacts=[c.brief["ids"]["trainset"], c.brief["ids"]["valset"]], automation="automated")
     s["done"] = done
     st.pop("long_job", None)
     c.save_state(st)
-    c.handback(dirs + [r], notes="试验（验证集 %s，训练门）：%s；登记后请把 id 发回，按交回的顺序" % (primary, "；".join(
-        "%s %s %s" % (d["dir"], d["metric_val"], "通过" if d.get("gate") else "没过") for d in done)))
+    trials = "; ".join("%s %s %s" % (d["dir"], d["metric_val"], "passed" if d.get("gate") else "failed") for d in done)
+    c.handback(dirs + [r], notes="trials (valset %s, train gate): %s; after registration, send the ids back in the "
+                                 "order handed back" % (primary, trials))
 
 
 def search(c, st, ids):
@@ -98,7 +100,7 @@ def search(c, st, ids):
     done = s["done"]
     ok = [d for d in done if d["status"] == "ok"]
     if len(ids) != len(ok):
-        c.fail("反馈里有 %d 个候选 id，成功的试验有 %d 个" % (len(ids), len(ok)))
+        c.fail("the feedback has %d candidate ids, and %d trials succeeded" % (len(ids), len(ok)))
     it = iter(ids)
     rows = []
     for d in done:
@@ -125,7 +127,7 @@ def search(c, st, ids):
     c.check("search", out)
     s["search"] = os.path.basename(out)
     c.save_state(st)
-    c.handback([out], notes="调优门：最佳 %s 相对默认 %s 的增益 %+.4f；花费 %.4f 算力小时"
+    c.handback([out], notes="tune gate: best %s against default %s, gain %+.4f; cost %.4f compute hours"
                             % (best["candidate_id"], default["candidate_id"], best["metric_val"] - default["metric_val"],
                                spent))
 
@@ -141,9 +143,9 @@ def checkin(c, st):
         open(os.path.join(c.outdir, RELEASE), "w").close()
         M.wait_for(job["marker"], 120, within=c.outdir)
     return c.handback([], status="long_job", marker=job["marker"],
-                      notes="定时检查 %d：后台进程 pid %d %s；完成标记%s" % (
-                          job["checkins"], job["pid"], "在运行" if alive else "已结束",
-                          "已出现" if os.path.exists(job["marker"]) else "还没有出现"))
+                      notes="check-in %d: background process pid %d %s; the completion marker %s" % (
+                          job["checkins"], job["pid"], "running" if alive else "ended",
+                          "is there" if os.path.exists(job["marker"]) else "has not appeared yet"))
 
 
 def main():
@@ -152,12 +154,13 @@ def main():
         return
     st = c.state()
     job = st.get("long_job")
-    if job and c.feedback.startswith("# 定时检查"):
+    if job and c.feedback.startswith("# Check-in"):
         return checkin(c, st)
-    if job and "长任务已结束" in c.feedback:
+    if job and "Long job finished" in c.feedback:
         first = (M.read_text(job["marker"]).splitlines() or [""])[0].strip()
         if first != "ok":
-            c.fail("后台试验的完成标记 %s 不是 ok：%s" % (job["marker"], first or "（没有标记）"))
+            c.fail("the completion marker %s of the background trials is not ok: %s" % (job["marker"],
+                                                                                      first or "(no marker)"))
         return collect(c, st)
     s = (st.get("searches") or [None])[-1]
     ids = re.findall(r"candidate-\d{4}", c.reason())
@@ -180,7 +183,8 @@ def main():
         st["long_job"] = {"marker": marker, "pid": pid, "checkins_until": until}
         c.save_state(st)
         return c.handback([], status="long_job", marker=marker,
-                          notes="%d 个试验在后台运行（pid %d，日志 %s），完成后写标记 %s" % (len(argvs), pid, log, marker))
+                          notes="%d trials running in the background (pid %d, log %s); the marker %s is written when "
+                                "they end" % (len(argvs), pid, log, marker))
     for argv in argvs:
         M.run_argv(c.brief, argv)
     c.save_state(st)

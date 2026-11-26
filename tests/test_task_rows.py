@@ -103,7 +103,7 @@ class TestTask(unittest.TestCase):
         self.assertEqual(rows.check_task(binary_task()), [])  # binary_task's primary is auc
 
     def test_search_space_and_training_settings(self):
-        # D5, D9, R14a: the training-tuning module's task fields: search_space (config path -> a list of allowed
+        # D5, D9, R14a: the train module's task fields: search_space (config path -> a list of allowed
         # values, {min, max}, or {values, dead} with dead optional), search, resources.onejev (any object) and
         # resources.gpu_ids.
         t = binary_task()
@@ -175,7 +175,7 @@ class TestTask(unittest.TestCase):
             t = binary_task()
             t["data"] = dict({"sources": [], "label_sources": ["rule"]}, **data)
             return t
-        ok = [dict(sources=["只有说明的旧写法"]), dict(sources=[{"path": "/d/raw", "about": "x"}]),
+        ok = [dict(sources=["only a description, the old form"]), dict(sources=[{"path": "/d/raw", "about": "x"}]),
               dict(split={"sizes": {"trainset": 10}}), dict(split=dict(TIME, unit="state_id", seed=3)),
               dict(rows={"about": "a", "expect": {"rows": 10, "label_counts": {"yes": 2, "no": 8}}})]
         for d in ok:

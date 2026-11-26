@@ -12,6 +12,7 @@ MAPPING = {
     "evalset": "datasets.md", "testset": "datasets.md",
     "corpus": "datasets.md", "pool": "datasets.md",
     "candidate": "models.md", "search": "models.md",
+    "baseline": "compare.md", "comparison": "compare.md",
     "delivery": "delivery.md", "feedback": "delivery.md",
     "evaluation": "evaluation.md", "plan": "evaluation.md",
     "record": "record.md",

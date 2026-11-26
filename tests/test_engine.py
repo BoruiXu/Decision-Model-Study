@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.join(REPO, "modules", "data"))
 from dset.cli import main as dset_main  # noqa: E402
 TEST_IDS, EVAL_IDS, VAL_IDS, TRAIN_IDS = range(10, 14), range(20, 24), range(0, 4), range(40, 44)
 ROUND = ["dispatch", "wait_agent", "process_handback"]  # one module dispatched and handed back
+NO_SPEND = {"api_usd": 0, "agent_usd": 0, "annotation_items": 0}  # the ledger's other accounts, unused (mock agents)
 SECOND_PART = ["resume", "wait_agent", "process_handback"]  # the second part of a two-part hand-back
 
 
@@ -132,7 +133,7 @@ class EngineCase(unittest.TestCase):
 
     def assertMilestoneAsk(self, reason):
         """The run of a one-round task stops at the milestone question once V1 is promoted."""
-        self.assertIn("里程碑", reason)
+        self.assertIn("Milestone release", reason)
         ws = self.state()
         self.assertEqual([v["version"] for v in ws.state["versions"]], ["V1"])
         self.assertEqual(ws.waiting()["what"], F.MILESTONE)
@@ -183,7 +184,7 @@ class TestOneRound(EngineCase):
         self.assertEqual([r["event"] for r in log].count("agent_end"), 5)
         # The pages were rewritten and show the question the engine stopped at.
         with open(os.path.join(self.ws, "dashboard.html"), encoding="utf-8") as f:
-            self.assertIn("里程碑发布", f.read())
+            self.assertIn("Milestone release", f.read())
         # A second run changes nothing: the question is still open.
         self.assertEqual(self.run_engine(), reason)
         self.assertEqual(len(self.state().dispatches()), 4)
@@ -233,7 +234,7 @@ class TestTwoPart(EngineCase):
         # part registered, each hand-back subdirectory with its id, also as registered-2.json beside the feedback.
         train = self.calls("d-0002")
         self.assertEqual([c["session"] for c in train], [ds[1]["session"]] * 2)
-        self.assertIn("- `candidate` → candidate-0001（candidate）", train[1]["feedback"])
+        self.assertIn("- `candidate` → candidate-0001 (candidate)", train[1]["feedback"])
         self.assertIn("registered-2.json", train[1]["feedback"])
         with open(self.outfile("d-0002", "registered-2.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f), [{"dir": "candidate", "kind": "candidate", "id": "candidate-0001"}])
@@ -245,7 +246,7 @@ class TestTwoPart(EngineCase):
         # The hand-back of the first part was kept, the second one written anew.
         self.assertTrue(os.path.isfile(self.outfile("d-0002", "handback-1.json")))
         with open(self.outfile("d-0002", "feedback-2.md"), encoding="utf-8") as f:
-            self.assertIn("继续", f.read().splitlines()[0])
+            self.assertIn("Continue", f.read().splitlines()[0])
         # Each registered artifact notes the launch that handed it back.
         self.assertEqual([(x["kind"], x["launch"]) for x in ds[1]["registered"]], [("candidate", 1), ("search", 2)])
         self.assertNoDoubleRegistration()
@@ -265,7 +266,7 @@ class TestTwoPart(EngineCase):
         self.assertEqual(registered(2), [("candidate", "candidate-0001")])
         self.assertEqual(registered(3), [("candidate", "candidate-0001"), ("candidate-t2-fixed", "candidate-0002")])
         feedback = self.calls("d-0002")[2]["feedback"]
-        for line in ("- `candidate` → candidate-0001（candidate）", "- `candidate-t2-fixed` → candidate-0002（candidate）"):
+        for line in ("- `candidate` → candidate-0001 (candidate)", "- `candidate-t2-fixed` → candidate-0002 (candidate)"):
             self.assertIn(line, feedback)
 
 
@@ -316,7 +317,7 @@ class TestAsyncMockRunner(EngineCase):
         pid = self.wait_for_pid(started)
         self.assertTrue(alive(pid))
         t0 = time.time()
-        Workspace(self.ws).stop("bob", "不要了")
+        Workspace(self.ws).stop("bob", "not needed any more")
         t.join(30)
         self.assertFalse(t.is_alive())
         self.assertNotIn("error", out)
@@ -325,7 +326,7 @@ class TestAsyncMockRunner(EngineCase):
         self.assertFalse(alive(pid))
         d = self.state().dispatch("d-0002")
         self.assertEqual(d["status"], "done")
-        self.assertIn("agent 已终止", d["closed"])
+        self.assertIn("agent terminated", d["closed"])
         self.assertIn("agent_stopped", [r["event"] for r in self.log()])
         self.assertTrue(os.path.isfile(os.path.join(self.ws, "REPORT.md")))
 
@@ -358,7 +359,7 @@ class TestPendingRecords(EngineCase):
 
         def prepare(eng, ws, d):
             if os.path.isfile(os.path.join(ws_path, d["outdir"], "handback.json")):
-                Workspace(ws_path).stop("bob", "先停")
+                Workspace(ws_path).stop("bob", "stop for now")
             return orig(eng, ws, d)
 
         with mock.patch.object(engine.Engine, "prepare", prepare):
@@ -366,7 +367,7 @@ class TestPendingRecords(EngineCase):
         self.assertEqual(status, "done")
         d = self.state().dispatch("d-0001")
         self.assertEqual(d["status"], "done")
-        self.assertIn("没有启动", d["closed"])
+        self.assertIn("never launched", d["closed"])
         self.assertIsNone(d["launched_at"])
         self.assertEqual((d["launches"], d["returns"], len(self.calls("d-0001"))), (1, 0, 1))
         self.assertTrue(os.path.isfile(self.outfile("d-0001", "feedback-2.md")))
@@ -417,8 +418,8 @@ class TestReturns(EngineCase):
         calls = self.calls("d-0001")
         self.assertEqual(calls[1]["session"], calls[0]["session"])
         self.assertIn("overlaps the current evalset", calls[1]["feedback"])
-        self.assertIn("新的子目录", calls[1]["feedback"])
-        self.assertNotIn("没有合法的交回", calls[1]["feedback"])
+        self.assertIn("new subdirectories", calls[1]["feedback"])
+        self.assertNotIn("no valid hand-back", calls[1]["feedback"])
         self.assertEqual(len(ws.dispatches(module="data")), 1)
 
     def test_a_session_that_cannot_be_resumed_gets_a_fresh_one_with_the_history(self):
@@ -433,7 +434,7 @@ class TestReturns(EngineCase):
         self.assertEqual(d["session"], calls[2]["session"])
         self.assertTrue(calls[2]["feedback_file"].startswith("history-"))
         history = calls[2]["feedback"]
-        self.assertIn("你负责 RSI 运行里的一个模块", history)  # the previous brief
+        self.assertIn("You are in charge of one module of an RSI run", history)  # the previous brief
         self.assertIn('"status": "ok"', history)  # the previous hand-back
         self.assertIn("dup_rate", history)  # the feedback
         self.assertIn("resume_failed", [r["event"] for r in self.log()])
@@ -501,7 +502,7 @@ class TestDataHandback(EngineCase):
         self.assertIsNone(F.data_missing(ws, [ws.entry(a) for a in ws.state["rounds"]["1"]["artifacts"]]))
         # A task/ that also changes eval_use_limit, or whose TASK.md says more than the rule, is refused, and an open
         # task_change approval stays unused (the fill is checked on the staged copy, TASK.md byte for byte).
-        for edit in ({"edit_task": {"eval_use_limit": 9}}, {"edit_md": "\n另加的一段。\n"}):
+        for edit in ({"edit_task": {"eval_use_limit": 9}}, {"edit_md": "\nOne more paragraph.\n"}):
             ws, d = self.data_dispatch(task=fixtures.time_task(), approve="task_change", **edit)
             registered, refused, _ = self.engine.register(ws, d, ["task", "corpus"])
             self.assertEqual(refused[0]["kind"], "task"); self.assertIn("rsi-data", refused[0]["error"])
@@ -523,10 +524,11 @@ class TestDataHandback(EngineCase):
         self.assertEqual([x["kind"] for x in registered], ["task", "record"])
         self.assertEqual([x["kind"] for x in refused], ["corpus", "testset", "evalset", "valset", "pool", "trainset"])
         self.assertIn("data.sources", refused[0]["error"])
-        self.assertIn("corpus（子目录 corpus）被拒，后面依赖它的集合不登记", refused[1]["error"])
+        self.assertIn("corpus (subdirectory corpus) of this hand-back was refused, so the sets that depend on it are "
+                      "not registered", refused[1]["error"])
         reason = F.refused_decision(ws, dict(d, launches=1, refused=refused))["reason"]  # the line once, with the kinds
-        self.assertEqual(reason.count("后面依赖它的集合不登记"), 1)
-        self.assertIn("（未登记：testset、evalset、valset、pool、trainset）", reason)
+        self.assertEqual(reason.count("the sets that depend on it are not registered"), 1)
+        self.assertIn("(not registered: testset, evalset, valset, pool, trainset)", reason)
         ws = Workspace(self.ws)
         self.assertEqual([ws.current(k) for k in ("corpus", "testset", "evalset")], [None, None, None])
         self.assertTrue(all(os.path.isdir(os.path.join(out, k)) for k in ("testset", "evalset")))
@@ -560,7 +562,7 @@ class TestDecisions(EngineCase):
                          + SECOND_PART + ["close_round", "next", "report", "done"])
         calls = self.calls("d-0002")
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 4)
-        self.assertIn("没过训练门", calls[2]["feedback"])
+        self.assertIn("failed the train gate", calls[2]["feedback"])
 
     def test_train_gate_failed_sends_train_back_for_a_new_search(self):
         self.behave("train", gate_fail=True)  # the first search's trials fail
@@ -574,7 +576,7 @@ class TestDecisions(EngineCase):
         train = self.calls("d-0002")
         self.assertEqual([c["session"] for c in train], [ds[1]["session"]] * 4)  # back to the same train session
         # It is told the gate numbers of the trials that failed.
-        self.assertIn("候选 candidate-0001（train）没过训练门", train[2]["feedback"])
+        self.assertIn("Candidate candidate-0001 (train) failed the train gate", train[2]["feedback"])
         self.assertIn('"majority"', train[2]["feedback"])
         self.assertEqual((ds[1]["returns"], ds[1]["followups"]), (1, 2))
         self.assertEqual(ws.attempts(), ["search-0001", "search-0002"])
@@ -596,8 +598,8 @@ class TestDecisions(EngineCase):
         self.assertEqual(len(self.state().dispatches()), 1)
         self.assertEqual(self.state().dispatch("d-0001")["returns"], 0)
         # The question names the step's current part; new_session sends a fresh data session for it.
-        self.assertIn("目的 trainset", w["question"])
-        DP.answer(self.state(), "new_session", "alice", "换个会话补训练集")
+        self.assertIn("purpose trainset", w["question"])
+        DP.answer(self.state(), "new_session", "alice", "a new session for the trainset")
         self.assertMilestoneAsk(self.run_engine())
         d = self.state().dispatch("d-0002")
         self.assertEqual((d["module"], d["purpose"]), ("data", "trainset"))
@@ -605,10 +607,11 @@ class TestDecisions(EngineCase):
 
 class TestStatuses(EngineCase):
     def test_why_the_run_stopped(self):
-        self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS), max_steps=1)[0], "max_steps")
+        self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS), max_steps=1),
+                         ("max_steps", "Stopped after 1 step (the --max-steps limit); run rsi run again to go on."))
         self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS))[0], "waiting_user")
         # The user says no to the milestone release: the run stops and reports, without using the testset.
-        DP.answer(self.state(), "no", "alice", "不用 test")
+        DP.answer(self.state(), "no", "alice", "no testset")
         status, reason = engine.run_status(self.ws, MockRunner(MOCKS))
         self.assertEqual(status, "done")
         ws = self.state()
@@ -624,7 +627,7 @@ class TestStatuses(EngineCase):
         # (An approval given after the question clears it at once; this one was given before it was asked.)
         ws = self.state()
         ws.approve("refresh_sets", "alice", "ok")
-        ws.set_waiting({"kind": "approval", "what": "refresh_sets", "question": "批准刷新？",
+        ws.set_waiting({"kind": "approval", "what": "refresh_sets", "question": "Approve the refresh?",
                         "options": ["approve", "stop"]})
         self.run_engine(max_steps=1)
         self.assertIsNone(self.state().waiting())
@@ -637,24 +640,24 @@ class TestQuestionsAndLongJobs(EngineCase):
         # data hands back its sets with a question: nothing is registered before the user answers; the answer goes
         # back to the same session (no return), the module hands back again (here: a changed trainset), and that
         # hand-back is registered.
-        self.behave("data", questions=["要不要多造一些短消息？"])
+        self.behave("data", questions=["Make some more short messages?"])
         reason = self.run_engine()
-        self.assertIn("要不要多造一些短消息？", reason)
+        self.assertIn("Make some more short messages?", reason)
         ws = self.state()
         d = ws.dispatch("d-0001")
         self.assertEqual(d["status"], "handed_back")
-        self.assertEqual((d["asked"]["launch"], d["asked"]["questions"]), (1, ["要不要多造一些短消息？"]))
+        self.assertEqual((d["asked"]["launch"], d["asked"]["questions"]), (1, ["Make some more short messages?"]))
         self.assertEqual([e["kind"] for e in ws.entries()], ["task"])  # nothing registered yet
         self.assertIsNone(ws.current("trainset"))
         w = ws.waiting()
-        self.assertEqual((w["kind"], w["what"], w["ref"], w["options"]), ("question", "handback", "d-0001", ["已回答"]))
+        self.assertEqual((w["kind"], w["what"], w["ref"], w["options"]), ("question", "handback", "d-0001", ["answered"]))
         self.assertEqual(d["asked"]["question_id"], w["id"])
-        self.assertIn("登记", w["question"])  # says the hand-back waits for the answer
+        self.assertIn("registered only after the answer", w["question"])  # says the hand-back waits for the answer
         self.assertEqual(self.run_engine(), reason)  # still waiting: nothing registered, nothing dispatched
         self.assertEqual((len(self.state().dispatches()), len(self.calls("d-0001"))), (1, 1))
         self.assertEqual([e["kind"] for e in self.state().entries()], ["task"])
         from rsi import decisions as DP
-        rec = DP.answer(self.state(), "已回答", "alice", "要，多造短消息", ref=w["id"])
+        rec = DP.answer(self.state(), "answered", "alice", "yes, make more short messages", ref=w["id"])
         self.assertIn("d-0001", rec["effect"])
         a = F.next_action(self.state())
         self.assertEqual((a["type"], a["dispatch_id"], a["mode"]), ("resume", "d-0001", "answer"))
@@ -665,13 +668,13 @@ class TestQuestionsAndLongJobs(EngineCase):
         calls = self.calls("d-0001")
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 2)
         self.assertEqual(calls[1]["feedback_file"], "feedback-2.md")
-        self.assertIn("要，多造短消息", calls[1]["feedback"])
-        self.assertIn("要不要多造一些短消息？", calls[1]["feedback"])
-        self.assertIn("还没有登记", calls[1]["feedback"])
+        self.assertIn("yes, make more short messages", calls[1]["feedback"])
+        self.assertIn("Make some more short messages?", calls[1]["feedback"])
+        self.assertIn("registered yet", calls[1]["feedback"])
         # The registered trainset is the one handed back after the answer.
         cur = ws.current("trainset")
         self.assertEqual(ws.entry(cur)["source"], self.outfile("d-0001", "trainset-2"))
-        self.assertIn("要，多造短消息", ws.manifest(cur)["notes"])
+        self.assertIn("yes, make more short messages", ws.manifest(cur)["notes"])
         self.assertEqual([r["kind"] for r in d["registered"]], ["testset", "evalset", "valset", "trainset"])
         self.assertEqual(set(r["launch"] for r in d["registered"]), {2})
         rec = [x for x in ws.decisions() if x["point"] == "handback"][0]
@@ -682,11 +685,11 @@ class TestQuestionsAndLongJobs(EngineCase):
     def test_an_answer_cut_off_after_its_delivery_mark_still_reaches_the_session(self):
         # M3 (final review): the run is cut off in resume(mode answer) after the answer was marked delivered and before
         # the record says the new launch; the rerun sends the answer back again, with the user's words.
-        self.behave("data", questions=["要不要多造一些短消息？"])
+        self.behave("data", questions=["Make some more short messages?"])
         self.run_engine()
         from rsi import decisions as DP
         ws = self.state()
-        DP.answer(ws, "已回答", "alice", "要，多造短消息", ref=ws.waiting()["id"])
+        DP.answer(ws, "answered", "alice", "yes, make more short messages", ref=ws.waiting()["id"])
         with mock.patch.object(engine.Engine, "_archive", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 self.run_engine()
@@ -699,20 +702,20 @@ class TestQuestionsAndLongJobs(EngineCase):
         self.assertEqual((d["launches"], d["answered"], d["returns"]), (2, 1, 0))
         calls = self.calls("d-0001")
         self.assertEqual(calls[1]["feedback_file"], "feedback-2.md")
-        self.assertIn("要，多造短消息", calls[1]["feedback"])
-        self.assertIn("要不要多造一些短消息？", calls[1]["feedback"])
+        self.assertIn("yes, make more short messages", calls[1]["feedback"])
+        self.assertIn("Make some more short messages?", calls[1]["feedback"])
         rec = [x for x in self.state().decisions() if x["point"] == "handback"][0]
         self.assertEqual(rec["delivered_to"], ["d-0001 launch 2"])  # once
 
     def test_a_stop_while_a_question_waits_registers_only_records(self):
-        self.behave("data", questions=["要不要多造一些短消息？"])
+        self.behave("data", questions=["Make some more short messages?"])
         self.run_engine()
-        Workspace(self.ws).stop("bob", "先停")
+        Workspace(self.ws).stop("bob", "stop for now")
         self.assertIn("REPORT.md", self.run_engine())
         ws = self.state()
         d = ws.dispatch("d-0001")
         self.assertEqual(d["status"], "done")
-        self.assertIn("运行已停止", d["closed"])
+        self.assertIn("run stopped", d["closed"])
         self.assertEqual([e["kind"] for e in ws.entries()], ["task"])
         self.assertIsNone(ws.waiting())
 
@@ -720,7 +723,7 @@ class TestQuestionsAndLongJobs(EngineCase):
         self.behave("train", long_job=True)
         status, reason = engine.run_status(self.ws, MockRunner(MOCKS))
         self.assertEqual(status, "waiting_long_job")
-        self.assertIn("长任务", reason)
+        self.assertIn("long job", reason)
         d = self.state().dispatch("d-0002")
         self.assertEqual(d["status"], "long_job")
         marker = self.outfile("d-0002", "job.marker")
@@ -734,7 +737,7 @@ class TestQuestionsAndLongJobs(EngineCase):
         self.assertEqual((d["returns"], d["continued"], d["followups"]), (0, 1, 1))
         calls = self.calls("d-0002")
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 3)
-        self.assertIn("长任务已结束", calls[1]["feedback"])
+        self.assertIn("Long job finished", calls[1]["feedback"])
 
     def test_checkins_until_the_marker(self):
         # Review focus 2: a long job that goes on: its session is checked in on every flow.checkin_minutes (counted
@@ -753,7 +756,7 @@ class TestQuestionsAndLongJobs(EngineCase):
                          [("d-0002", 2), ("d-0002", 3)])
         calls = self.calls("d-0002")
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 3)
-        self.assertTrue(calls[1]["feedback"].startswith("# 定时检查"), calls[1]["feedback"])
+        self.assertTrue(calls[1]["feedback"].startswith("# Check-in"), calls[1]["feedback"])
         with open(self.outfile("d-0002", "job.marker"), "w") as f:
             f.write("ok\n")
         self.assertMilestoneAsk(self.run_engine())
@@ -787,7 +790,7 @@ def failed_check_in(case, name):
     """A long job's check-in failed with no returns left: the run asks about d-0002 (handback_failed). The job is a
     sleeper named in job.marker.pid. Returns (its pid, STATE waiting)."""
     case.use_task(task_def(checkin_minutes=0.0005, max_returns=0), name)
-    case.behave("train", long_job=True, checkin={"fail": "查不了环境"})
+    case.behave("train", long_job=True, checkin={"fail": "cannot check the environment"})
     status, reason = engine.run_status(case.ws, MockRunner(MOCKS))
     case.assertEqual(status, "waiting_user", reason)
     w = case.state().waiting()
@@ -822,7 +825,7 @@ class TestLiveStatus(EngineCase):
             eng.tick(self.state(), 1301)  # status_minutes (5): a heartbeat line
         lines = buf.getvalue().splitlines()
         self.assertEqual(len(lines), 1, lines)
-        self.assertRegex(lines[0], r"^\d\d:\d\d 第1轮 ② 训练调优 d-0001 · rsi-train 运行中（第 1 次启动）$")
+        self.assertRegex(lines[0], r"^\d\d:\d\d round 1 ② Train & tune d-0001 · rsi-train running \(launch 1\)$")
         self.assertEqual(pages.call_count, 2)
         self.assertEqual(err.getvalue(), "")  # no nvidia-smi is no failure
         # A status stream that cannot be written to (its reader gone) ends the status lines, never the run.
@@ -859,7 +862,8 @@ class TestLiveStatus(EngineCase):
         def disk_full(_ws):
             raise OSError(28, "No space left on device", ".dashboard.%s.tmp" % os.urandom(4).hex())
 
-        timed_out = {"at": now_iso(), "status": "error", "error": "nvidia-smi 超时（5 秒没有返回）", "uid": 0, "gpus": []}
+        timed_out = {"at": now_iso(), "status": "error", "error": "nvidia-smi timed out (no return in 5 seconds)",
+                     "uid": 0, "gpus": []}
         with mock.patch("rsi.dashboard.write_dashboard", side_effect=disk_full) as pages, \
                 mock.patch("rsi.gpus.snapshot", side_effect=[RuntimeError("boom")] + [timed_out] * 100) as snap, \
                 contextlib.redirect_stderr(err):
@@ -868,7 +872,7 @@ class TestLiveStatus(EngineCase):
         self.assertGreaterEqual(min(pages.call_count, snap.call_count), 3)
         self.assertEqual(text.count("warning: dashboard not updated: [Errno 28] No space left on device"), 1, text)
         self.assertEqual(text.count("warning: GPU snapshot failed: boom"), 1, text)
-        self.assertEqual(text.count("warning: GPU snapshot failed: nvidia-smi 超时"), 1, text)
+        self.assertEqual(text.count("warning: GPU snapshot failed: nvidia-smi timed out"), 1, text)
         self.assertEqual(len(text.splitlines()), 3, text)
 
     def test_status_lines_on_state_changes(self):
@@ -876,9 +880,9 @@ class TestLiveStatus(EngineCase):
         status, _reason = engine.run_status(self.ws, MockRunner(MOCKS), status=buf)
         self.assertEqual(status, "waiting_user")
         lines = buf.getvalue().splitlines()
-        self.assertTrue(any("② 训练调优 d-" in line for line in lines), lines)
+        self.assertTrue(any("② Train & tune d-" in line for line in lines), lines)
         for line in lines:
-            self.assertRegex(line, r"^\d\d:\d\d 第\d+轮 ")
+            self.assertRegex(line, r"^\d\d:\d\d round \d+ ")
         # Stopped at the milestone question: the next run asks again and stops; its first step prints one line.
         buf = io.StringIO()
         engine.run_status(self.ws, MockRunner(MOCKS), status=buf)
@@ -898,7 +902,7 @@ class TestLongJobStop(EngineCase):
         return self.outfile("d-0002", "job.marker")
 
     def stop_and_report(self):
-        Workspace(self.ws).stop("bob", "不要了")
+        Workspace(self.ws).stop("bob", "not needed any more")
         status, reason = engine.run_status(self.ws, MockRunner(MOCKS))
         self.assertEqual(status, "done")
         d = self.state().dispatch("d-0002")
@@ -917,10 +921,10 @@ class TestLongJobStop(EngineCase):
         reason, d, report = self.stop_and_report()
         self.assertFalse(alive(pid))
         self.assertEqual((d["long_job_stop"]["result"], d["long_job_stop"]["pid"]), ("terminated", pid))
-        self.assertIn("终止了长任务 d-0002", reason)
+        self.assertIn("terminated long job d-0002", reason)
         self.assertIn(str(pid), reason)
         self.assertIn("d-0002", report)
-        self.assertIn("已终止", report)
+        self.assertIn("terminated", report)
         self.assertIn("long_job_stopped", [r["event"] for r in self.log()])
         self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS)), ("done", reason))  # said again, not redone
 
@@ -941,7 +945,7 @@ class TestLongJobStop(EngineCase):
         # Review I1: a check-in relaunched the session; the run is stopped while its agent works, or after it failed:
         # the long job is terminated all the same, and the stop says so.
         for variant, status, how in (("working", "running", {"wait": self.flag("never")}),
-                                     ("failed", "failed", {"fail": "查不了环境"})):
+                                     ("failed", "failed", {"fail": "cannot check the environment"})):
             with self.subTest(variant):
                 self.use_task(task_def(checkin_minutes=0.0005), "ws-ci-" + variant)
                 self.behave("train", long_job=True, checkin=how)
@@ -952,9 +956,9 @@ class TestLongJobStop(EngineCase):
                 reason, d, report = self.stop_and_report()
                 self.assertFalse(alive(pid))
                 self.assertEqual((d["long_job_stop"]["result"], d["long_job_stop"]["pid"]), ("terminated", pid))
-                self.assertIn("长任务已终止", d["closed"])
-                self.assertIn("终止了长任务 d-0002", reason)
-                self.assertIn("已终止（pid %d）" % pid, report)
+                self.assertIn("long job terminated", d["closed"])
+                self.assertIn("terminated long job d-0002", reason)
+                self.assertIn("terminated (pid %d)" % pid, report)
 
     def test_a_decision_that_closes_a_failed_check_in_terminates_the_job(self):
         # R16: a check-in failed and, no returns left, the user answers stop or new_session: closing the failed dispatch
@@ -962,31 +966,31 @@ class TestLongJobStop(EngineCase):
         for option in ("stop", "new_session"):
             with self.subTest(option):
                 pid, w = failed_check_in(self, "ws-cd-" + option)
-                DP.answer(self.state(), option, "alice", "这次的训练不要了", ref=w["id"])
+                DP.answer(self.state(), option, "alice", "drop this training", ref=w["id"])
                 if option == "new_session":  # carried out by the next run; the new session's check-in fails as well
                     self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS))[0], "waiting_user")
                     self.assertEqual(self.state().dispatch("d-0003")["module"], "train")
-                    self.state().stop("bob", "停")
+                    self.state().stop("bob", "stop")
                 d = self.state().dispatch("d-0002")
                 self.assertFalse(alive(pid))
                 self.assertEqual((d["status"], d["long_job_stop"]["result"], d["long_job_stop"]["pid"]),
                                  ("done", "terminated", pid))
-                self.assertIn("长任务已终止", d["closed"])
+                self.assertIn("long job terminated", d["closed"])
                 status, reason = engine.run_status(self.ws, MockRunner(MOCKS))
                 self.assertEqual(status, "done", reason)
-                self.assertIn("终止了长任务 d-0002（rsi-train，pid %d）" % pid, reason)
+                self.assertIn("terminated long job d-0002 (rsi-train, pid %d)" % pid, reason)
                 with open(os.path.join(self.ws, "REPORT.md"), encoding="utf-8") as f:
                     report = f.read()
-                self.assertIn("d-0002（rsi-train）：已终止（pid %d）" % pid, report)
+                self.assertIn("long job d-0002 (rsi-train): terminated (pid %d)" % pid, report)
                 if option == "new_session":  # F15: ended by closing the dispatch, not by the stop
-                    self.assertIn("关闭派出时的长任务 d-0002", report)
-                    self.assertNotIn("停止时的长任务 d-0002", report)
+                    self.assertIn("When its dispatch was closed, long job d-0002", report)
+                    self.assertNotIn("At the stop, long job d-0002", report)
 
     def test_close_round_terminates_a_failed_dispatchs_long_job(self):
         # F16: `rsi close-round` closes the round's failed dispatches whose long job may still run, and ends the job.
         pid, _w = failed_check_in(self, "ws-cr")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.main(["close-round", self.ws, "--reason", "这一轮不做了"]), 0)
+            self.assertEqual(cli.main(["close-round", self.ws, "--reason", "drop this round"]), 0)
         d = self.state().dispatch("d-0002")
         self.assertFalse(alive(pid))
         self.assertEqual((d["status"], d["long_job_stop"]["result"], d["long_job_stop"]["context"]),
@@ -1006,7 +1010,7 @@ class TestLongJobStop(EngineCase):
             f.write("%d\n%d\n" % (other, int(time.time())))
         with mock.patch.object(DP, "terminate_after_commit"):  # the process dies right after the save
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(cli.main(["close-round", self.ws, "--reason", "这一轮不做了"]), 0)
+                self.assertEqual(cli.main(["close-round", self.ws, "--reason", "drop this round"]), 0)
         ws = self.state()
         self.assertEqual([(ws.dispatch(x)["status"], ws.dispatch(x)["long_job_stop"]["result"]) for x in
                           ("d-0002", "d-0003")], [("done", "pending")] * 2)
@@ -1026,7 +1030,7 @@ class TestLongJobStop(EngineCase):
                 raise OSError("boom")
             return real(ws, d, context)
 
-        ws.stop("bob", "停")
+        ws.stop("bob", "stop")
         with mock.patch.object(engine, "terminate_long_job", flaky):
             self.assertEqual(engine.run_status(self.ws, MockRunner(MOCKS))[0], "done")
         ws = self.state()
@@ -1044,7 +1048,7 @@ class TestLongJobStop(EngineCase):
         self.assertFalse(alive(pids[0]) or alive(pids[1]))
         self.assertEqual([(ws.dispatch(x)["long_job_stop"]["result"], ws.dispatch(x)["long_job_stop"]["context"])
                           for x in ("d-0002", "d-0003")], [("terminated", "close")] * 2)
-        self.assertIn("长任务已终止", ws.dispatch("d-0002")["closed"])
+        self.assertIn("long job terminated", ws.dispatch("d-0002")["closed"])
         self.assertNotIn(self.actions()[-1], ("report", "done"))  # no stop: not the report step's settling
 
     def test_a_stop_during_a_check_in_relaunch_terminates_the_new_watch(self):
@@ -1086,7 +1090,7 @@ class TestLongJobStop(EngineCase):
                 engine.run(self.ws, MockRunner(MOCKS), max_steps=1)  # process_handback
                 os.remove(marker)
                 _reason, d, report = self.stop_and_report()
-                self.assertNotIn("没能终止", report)
+                self.assertNotIn("not terminated", report)
                 self.assertNotIn("long_job_stop", d)
                 self.assertEqual(d["marker_seen"], d["marker"])
 
@@ -1147,7 +1151,7 @@ class TestLongJobStop(EngineCase):
         ws_path = self.ws
 
         def register(ws, kind, src, fill_only=False):
-            Workspace(ws_path).stop("bob", "停下")
+            Workspace(ws_path).stop("bob", "stop here")
             raise StoppedError("the run has stopped")
 
         with mock.patch.object(Workspace, "register", register):
@@ -1166,9 +1170,9 @@ class TestLongJobStop(EngineCase):
         reason, d, report = self.stop_and_report()
         self.assertTrue(alive(pid))
         self.assertEqual(d["long_job_stop"]["result"], "unconfirmed")
-        self.assertIn("没能终止", reason)
+        self.assertIn("not terminated", reason)
         self.assertIn(str(pid), reason)
-        self.assertIn("可能仍在运行", report)
+        self.assertIn("may still be running", report)
         self.assertIn(str(pid), report)
 
     def test_ps_may_show_the_start_a_second_early(self):
@@ -1195,15 +1199,15 @@ class TestLongJobStop(EngineCase):
         reason, d, _report = self.stop_and_report()
         self.assertTrue(alive(pid))
         self.assertEqual(d["long_job_stop"]["result"], "unconfirmed")
-        self.assertIn("没能终止", reason)
+        self.assertIn("not terminated", reason)
 
     def test_no_pid_file_and_a_process_that_is_gone(self):
         marker = self.long_job("ws-lj4")
         reason, d, report = self.stop_and_report()
         self.assertEqual(d["long_job_stop"]["result"], "no_pid_file")
         self.assertIn(marker + ".pid", d["long_job_stop"]["why"])
-        self.assertIn("没能终止", reason)
-        self.assertIn("可能仍在运行", report)
+        self.assertIn("not terminated", reason)
+        self.assertIn("may still be running", report)
         marker = self.long_job("ws-lj5")
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
@@ -1211,13 +1215,13 @@ class TestLongJobStop(EngineCase):
             f.write("%d\n" % dead.pid)
         reason, d, _report = self.stop_and_report()
         self.assertEqual(d["long_job_stop"]["result"], "gone")
-        self.assertNotIn("没能终止", reason)
+        self.assertNotIn("not terminated", reason)
         marker = self.long_job("ws-lj6")
         with open(marker + ".pid", "w") as f:
             f.write("not a pid\n")
         reason, d, _report = self.stop_and_report()
         self.assertEqual(d["long_job_stop"]["result"], "bad_pid_file")
-        self.assertIn("没能终止", reason)
+        self.assertIn("not terminated", reason)
 
     def test_a_finished_long_job_is_not_touched(self):
         marker = self.long_job("ws-lj7")
@@ -1226,12 +1230,87 @@ class TestLongJobStop(EngineCase):
             f.write("%d\n" % pid)
         with open(marker, "w") as f:
             f.write("ok\n")
-        Workspace(self.ws).stop("bob", "不要了")
+        Workspace(self.ws).stop("bob", "not needed any more")
         status, reason = engine.run_status(self.ws, MockRunner(MOCKS))
         self.assertEqual(status, "done")
         self.assertTrue(alive(pid))  # its marker says it ended: nothing to terminate
         self.assertNotIn("long_job_stop", self.state().dispatch("d-0002"))
-        self.assertNotIn("长任务", reason)
+        self.assertNotIn("long job", reason)
+
+
+# A compare command (the task's runner.code.commands.compare): logs each --mode; first: writes the baseline bl-lr and
+# starts a detached job that writes the marker gpu.done a second later (its pid file first), hands back long_job;
+# continue: hands back bl-lr; followup: reads registered-<n>.json and hands back the comparison with that baseline.
+FAKE_COMPARE = r'''
+import json, os, subprocess, sys, time
+sys.path[:0] = [@TESTS@, @REPO@]
+import fixtures
+a = sys.argv[1:]
+arg = lambda k: a[a.index(k) + 1] if k in a else None
+out, mode = arg("--outdir"), arg("--mode")
+with open(arg("--brief"), encoding="utf-8") as f:
+    brief = json.load(f)
+with open(brief["task_json"], encoding="utf-8") as f:
+    task = json.load(f)
+with open(os.path.join(out, "modes.log"), "a") as f:
+    f.write(mode + "\n")
+marker, artifacts, status = os.path.join(out, "gpu.done"), [], "ok"
+if mode == "first":
+    fixtures.make_artifact("baseline", os.path.join(out, "bl-lr"), task, ids=range(0, 4), eval_ids=range(20, 24),
+                           wrong=(0,))
+    p = subprocess.Popen(["/bin/sh", "-c", 'sleep 1; echo ok > "$0"', marker], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with open(marker + ".pid", "w") as f:
+        f.write("%d\n%d\n" % (p.pid, int(time.time())))
+    status = "long_job"
+elif mode == "continue":
+    artifacts = ["bl-lr"]
+elif mode == "followup":
+    n = os.path.basename(arg("--feedback"))[len("feedback-"):-len(".md")]
+    with open(os.path.join(out, "registered-%s.json" % n), encoding="utf-8") as f:
+        bid = [x["id"] for x in json.load(f) if x["kind"] == "baseline"][0]
+    fixtures.make_artifact("comparison", os.path.join(out, "comparison"), task, ids=range(0, 4),
+                           candidate=os.path.basename(brief["inputs"]["candidate"]), baselines={"lr": (bid, (0,))})
+    artifacts = ["comparison"]
+with open(os.path.join(out, "handback.json"), "w", encoding="utf-8") as f:
+    json.dump({"status": status, "artifacts": artifacts, "marker": marker if status == "long_job" else None,
+               "notes": "fake compare, mode " + mode, "questions": []}, f)
+'''
+
+
+class TestCodeModule(EngineCase):
+    def wait_for(self, path, limit=30):
+        end = time.time() + limit
+        while not os.path.exists(path):
+            self.assertLess(time.time(), end, "timed out waiting for %s" % path)
+            time.sleep(0.02)
+
+    def test_a_code_module_runs_its_command_and_goes_on_as_a_long_job(self):
+        # ③ Compare is a code module: whatever --runner says (here manual) its dispatch runs the task's command
+        # through the code runner, with the whole protocol: a long job and its continuation, then the followup.
+        fake = os.path.join(self.root, "fake_compare.py")
+        with open(fake, "w", encoding="utf-8") as f:
+            f.write(FAKE_COMPARE.replace("@TESTS@", repr(os.path.join(REPO, "tests"))).replace("@REPO@", repr(REPO)))
+        task = task_def()
+        task["compare"] = {"baselines": ["lr"]}
+        task["runner"] = {"code": {"commands": {"compare": [sys.executable, fake]}}}
+        self.use_task(task, "ws-code")
+        self.run_engine(max_steps=len(ROUND * 2 + SECOND_PART))  # ① and ② with the mock modules
+        self.assertEqual(F.next_action(self.state())["module"], "compare")
+        status, _ = engine.run_status(self.ws, ManualRunner(), pages=False, poll_s=0.05)
+        self.assertEqual(status, "waiting_long_job")
+        d = self.state().dispatches(module="compare")[0]
+        self.wait_for(os.path.join(self.ws, d["outdir"], "gpu.done"))
+        status, _ = engine.run_status(self.ws, ManualRunner(), pages=False, poll_s=0.05)
+        self.assertEqual(status, "waiting_manual")  # ④ deliver is next, a manual dispatch
+        ws = self.state()
+        d = ws.dispatch(d["id"])
+        self.assertEqual((d["runner"], d["status"], d["session"][:5]), ("code", "done", "code-"))
+        self.assertEqual([x["kind"] for x in d["registered"]], ["baseline", "comparison"])
+        with open(os.path.join(self.ws, d["outdir"], "modes.log")) as f:
+            self.assertEqual(f.read().split(), ["first", "continue", "followup"])
+        self.assertEqual([(x["module"], x["runner"]) for x in ws.dispatches()][-1], ("deliver", "manual"))
+        self.assertFalse(os.path.exists(os.path.join(self.ws, d["outdir"], "prompt-1.md")))  # no agent, no prompt
 
 
 class TestManualRunner(EngineCase):
@@ -1386,7 +1465,7 @@ class TestInterrupted(EngineCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual([c["session"] for c in calls], [session, session])  # back to the same session
         self.assertEqual(calls[1]["feedback_file"], "feedback-2.md")
-        self.assertIn("进程已不在", calls[1]["feedback"])
+        self.assertIn("process was gone", calls[1]["feedback"])
 
     def test_decision_interrupted_before_it_was_carried_out(self):
         # Cut off after the decision was recorded and the hand-back kept, before the return was written: the rerun
@@ -1411,7 +1490,7 @@ class TestInterrupted(EngineCase):
         self.assertEqual(ws.dispatch("d-0001")["returns"], 1)
         self.assertIn("decision_reused", [r["event"] for r in self.log()])
         feedback = self.calls("d-0001")[1]["feedback"]
-        self.assertIn("上次交回的 notes", feedback)
+        self.assertIn("Notes of the last hand-back", feedback)
         self.assertIn("mock", feedback)
 
     def test_running_dispatch_still_alive_is_waited_for(self):
@@ -1433,7 +1512,7 @@ class TestInterrupted(EngineCase):
         self.assertEqual(ws.dispatch("d-0001")["returns"], 1)
         feedback = self.calls("d-0001")[0]["feedback"]
         self.assertIn("handback.json", feedback)  # it ended while watched without a hand-back
-        self.assertNotIn("进程已不在", feedback)  # so it was not lost
+        self.assertNotIn("process was gone", feedback)  # so it was not lost
 
 
 class TestClaudeCodeRunner(EngineCase):
@@ -1460,14 +1539,16 @@ class TestClaudeCodeRunner(EngineCase):
                                 "--model", "claude-opus-5-5", "--effort", "xhigh", "--session-id",
                                 d["session"]])
         self.assertEqual(d["exit_code"], 0)  # the fake took every argument and the prompt
+        self.assertEqual((self.state().used("agent_usd"), d["spent_launches"], d["spent_sessions"]),
+                         (0.01, [1], {d["session"]: 0.01}))  # its total_cost_usd, by its session
         skill = os.path.join(REPO, "modules", "data", "SKILL.md")  # D8: each module's folder holds its skill
-        self.assertTrue(prompt.startswith("你是 RSI 运行里的模块 agent `rsi-data`"))
+        self.assertTrue(prompt.startswith("You are the module agent `rsi-data`"))
         self.assertIn(skill, prompt)
         with open(skill, encoding="utf-8") as f:
             text = f.read()
         self.assertTrue(text.startswith("---"))  # front matter: as an argument it would read as an option
         self.assertIn(text.rstrip("\n"), prompt)
-        self.assertIn("你负责 RSI 运行里的一个模块", prompt)  # the brief
+        self.assertIn("You are in charge of one module of an RSI run", prompt)  # the brief
         self.assertIn("handback.json", prompt)
         with open(self.outfile("d-0001", "prompt-1.md"), encoding="utf-8") as f:
             self.assertEqual(f.read(), prompt)
@@ -1533,7 +1614,7 @@ class TestLock(EngineCase):
         self.assertFalse(os.path.exists(lock))
 
     def test_the_pages_say_running_only_while_the_run_holds_the_lock(self):
-        # P9 (sim2): the pages written during the run say "● 运行中" (the lock names this live process); the run
+        # P9 (sim2): the pages written during the run say "● running" (the lock names this live process); the run
         # writes them once more after it let go of the lock, so a run that has returned is not shown as running.
         from rsi import dashboard as D
         seen = []
@@ -1549,8 +1630,8 @@ class TestLock(EngineCase):
         self.assertEqual(seen, [True, False])  # the step's pages, then the pages after the run
         with open(os.path.join(self.ws, "dashboard.html"), encoding="utf-8") as f:
             page = f.read()
-        self.assertNotIn("● 运行中</span>", page)
-        self.assertIn('<span class="chip idle">等待 rsi run</span>', page)
+        self.assertNotIn("● running</span>", page)
+        self.assertIn('<span class="chip idle">waiting for rsi run</span>', page)
         self.assertFalse(os.path.exists(self.lock()))
 
     def test_without_fcntl_a_live_pid_refuses_and_a_dead_one_is_moved_aside(self):
@@ -1589,8 +1670,8 @@ class TestCli(EngineCase):
         out = json.loads(r.stdout)
         self.assertEqual(r.stdout.strip().count("\n"), 0, r.stdout)
         self.assertEqual(out["status"], "waiting_user")
-        self.assertIn("里程碑", out["reason"])
-        self.assertRegex(r.stderr, r"(?m)^\d\d:\d\d 第1轮 ")
+        self.assertIn("Milestone release", out["reason"])
+        self.assertRegex(r.stderr, r"(?m)^\d\d:\d\d round 1 ")
         r = self.run_rsi("--runner", "mock", "--mock-dir", MOCKS)  # without --json: the reason, one line
         self.assertEqual(r.returncode, 10, r.stderr)
         self.assertEqual(len(r.stdout.strip().splitlines()), 1)
@@ -1624,9 +1705,11 @@ class TestBudgetHold(EngineCase):
     held unregistered and the run asks over_budget at once (no handback_refused loop); approved, the same hand-back
     is registered without retraining, the round goes on to its decision and the budget stops the run."""
 
-    QUESTION = ("over_budget：rsi-train（%s）这次交回的候选（%s）要 0.35 小时算力，加上已用 0 小时，超过预算 0.25 小时。"
-                "approve：批准超预算，登记这次交回的产物，本轮接着做到判定为止，判定后因算力超过预算停止运行；"
-                "stop：现在停止运行（同 rsi stop），这次交回的候选不登记。")
+    QUESTION = ("over_budget: the candidates rsi-train (%s) handed back this time (%s) need 0.35 compute hours; with "
+                "0 compute hours already used, that goes over the budget of 0.25 compute hours. approve: approve going "
+                "over budget and register this hand-back (the round goes on until it is decided, then the run stops "
+                "because compute is over the budget); stop: stop the run now (as rsi stop) without registering the "
+                "candidates of this hand-back")
 
     def setUp(self):
         super(TestBudgetHold, self).setUp()
@@ -1687,10 +1770,10 @@ class TestBudgetHold(EngineCase):
         self.assertEqual(ws.state["rounds"]["1"]["decision"]["decision"], "promote")
         self.assertFalse(F.budget_held(ws, d))
         self.assertEqual((status, ws.waiting()["what"]), ("waiting_user", F.MILESTONE), reason)
-        DP.answer(ws, "no", "alice", "不做里程碑")
+        DP.answer(ws, "no", "alice", "no milestone")
         status, reason = self.go()
         self.assertEqual(status, "done", reason)
-        self.assertIn("compute hours used 0.35 reached budget 0.25", self.state().state["stopped"]["reason"])
+        self.assertIn("GPU hours used 0.35 reached budget 0.25", self.state().state["stopped"]["reason"])
         self.assertEqual([(r["dispatch_id"], r["launch"], r["by"]) for r in self.events("budget_released")],
                          [("d-0002", 1, "approve")])
         self.assertEqual(len(self.events("budget_held")), 1)
@@ -1703,15 +1786,16 @@ class TestBudgetHold(EngineCase):
                 self.use_task(budget_task(), "ws-b-" + how)
                 w = self.held()
                 if how == "answer":
-                    rec = DP.answer(self.state(), "approve", "alice", "可以超预算，登记这次的候选", ref=w["id"])
+                    rec = DP.answer(self.state(), "approve", "alice", "going over budget is fine, register these "
+                                    "candidates", ref=w["id"])
                     self.assertEqual((rec["point"], rec["choice"], rec["dispatch_id"]),
                                      ("over_budget", "approve", "d-0002"))
                     ws = self.state()
                     self.assertIsNone(ws.waiting())
                     self.assertEqual([(a["what"], a["ref"], a["quote"]) for a in ws.state["approvals"]],
-                                     [("over_budget", None, "可以超预算，登记这次的候选")])
+                                     [("over_budget", None, "going over budget is fine, register these candidates")])
                 else:
-                    self.state().approve("over_budget", "alice", "可以超")
+                    self.state().approve("over_budget", "alice", "going over is fine")
                     ws = self.state()
                     self.assertTrue(ws.waiting() is None or F.stale_waiting(ws, ws.waiting()))
                     self.assertEqual(F.next_action(ws),
@@ -1722,21 +1806,21 @@ class TestBudgetHold(EngineCase):
         # R7: the held candidates were trained; a stop ends the hold without registering them, so their compute
         # counts as a refused candidate's (budget_used.refused, once per source), right with the stop.
         w = self.held()
-        DP.answer(self.state(), "stop", "alice", "不超预算，先停", ref=w["id"])
+        DP.answer(self.state(), "stop", "alice", "do not go over budget, stop for now", ref=w["id"])
         src = os.path.realpath(self.outfile("d-0002", "candidate"))
         ws = self.state()
-        self.assertEqual(ws.state["budget_used"], {"compute_hours": 0.35, "refused": {src: 0.35}})
+        self.assertEqual(ws.state["budget_used"], dict(NO_SPEND, compute_hours=0.35, refused={src: 0.35}))
         self.assertEqual(ws.refused_compute_hours(), 0.35)
         self.assertFalse(F.budget_held(ws, ws.dispatch("d-0002")))  # the run stopped: no approval awaited
         status, reason = self.go()
         self.assertEqual(status, "done", reason)
         ws = self.state()
         self.assertEqual(ws.state["budget_used"]["refused"], {src: 0.35})
-        self.assertEqual(ws.state["stopped"]["reason"], "user requested: 不超预算，先停")
+        self.assertEqual(ws.state["stopped"]["reason"], "user requested: do not go over budget, stop for now")
         self.assertEqual(self.kinds("candidate", "record"), ["record"])  # the record, as after any stop
         d = ws.dispatch("d-0002")
         self.assertEqual(d["status"], "done")
-        self.assertIn("运行已停止", d["closed"])
+        self.assertIn("run stopped", d["closed"])
         self.assertEqual(self.events("budget_released"), [])
         with open(os.path.join(self.ws, F.REPORT_FILE), encoding="utf-8") as f:
             self.assertIn("0.35", f.read())
@@ -1753,7 +1837,7 @@ class TestBudgetHold(EngineCase):
                 self.use_task(budget_task(budget=None), "ws-b-found-" + variant)
                 self.behave("train", cost=0.075, trials=2, release=self.flag("train-go-" + variant))
                 self.assertEqual(self.run_engine(max_steps=4).count("--max-steps"), 1)  # train launched, waiting
-                self.state().stop("alice", "先停")
+                self.state().stop("alice", "stop for now")
                 open(self.flag("train-go-" + variant), "w").close()
                 deadline = time.time() + 30
                 while not os.path.exists(self.outfile("d-0002", "handback.json")) and time.time() < deadline:
@@ -1777,10 +1861,10 @@ class TestBudgetHold(EngineCase):
     def test_a_stop_after_the_approval_counts_the_held_compute_too(self):
         # Approved, but `rsi stop` came before the next rsi run registered the hand-back: the hold ends unregistered.
         self.held()
-        self.state().approve("over_budget", "alice", "可以超")
-        self.state().stop("alice", "还是停吧")
+        self.state().approve("over_budget", "alice", "going over is fine")
+        self.state().stop("alice", "stop after all")
         src = os.path.realpath(self.outfile("d-0002", "candidate"))
-        self.assertEqual(self.state().state["budget_used"], {"compute_hours": 0.35, "refused": {src: 0.35}})
+        self.assertEqual(self.state().state["budget_used"], dict(NO_SPEND, compute_hours=0.35, refused={src: 0.35}))
         self.assertEqual(self.go()[0], "done")
         self.assertEqual(self.kinds("candidate"), [])
         self.assertEqual(self.state().state["budget_used"]["compute_hours"], 0.35)
@@ -1788,12 +1872,12 @@ class TestBudgetHold(EngineCase):
     def test_questions_come_before_the_budget_hold(self):
         # Review focus 2: a hand-back with questions over the budget: the module's question first; its answer goes
         # back to the session, and the hand-back after it is held for the budget.
-        self.behave("train", questions=["要不要换更大的模型？"])
+        self.behave("train", questions=["Switch to a bigger model?"])
         w = self.held()
         self.assertEqual((w["kind"], w["what"], w["ref"]), ("question", "handback", "d-0002"))
         self.assertNotIn("held_budget", self.state().dispatch("d-0002"))
         self.assertEqual(self.events("budget_held"), [])
-        DP.answer(self.state(), "已回答", "alice", "不换", ref=w["id"])
+        DP.answer(self.state(), "answered", "alice", "no switch", ref=w["id"])
         w = self.held()
         self.assertEqual((w["kind"], w["what"], w["ref"], w["dispatch_id"]),
                          ("approval", "over_budget", None, "d-0002"))
@@ -1856,8 +1940,8 @@ class TestBudgetHold(EngineCase):
         self.assertFalse(ws.stop_check_if_closed()[0])
         r = subprocess.run([sys.executable, "-m", "rsi", "status", self.ws], cwd=REPO, capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("compute hours: 0 / 0.25", r.stdout)
-        ws.approve("over_budget", "alice", "可以超")
+        self.assertIn("budget: GPU hours 0/0.25 · data LLM $ 0.00/– · agent $ 0.00/– · annotation 0/–", r.stdout)
+        ws.approve("over_budget", "alice", "going over is fine")
         self.go()
         ws = self.state()
         self.assertEqual(self.kinds("candidate"), ["candidate"])

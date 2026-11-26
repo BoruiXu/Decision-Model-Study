@@ -1,0 +1,34 @@
+{
+  "type": "object",
+  "required": ["candidate_id", "trainset_id", "valset_id", "evalset_id", "baselines", "metrics_val", "deltas_val",
+               "strongest", "skipped"],
+  "properties": {
+    "kind": {"type": "string", "enum": ["comparison"]},
+    "candidate_id": {"type": "string", "minLength": 1},
+    "trainset_id": {"type": "string", "minLength": 1},
+    "valset_id": {"type": "string", "minLength": 1},
+    "evalset_id": {"type": "string", "minLength": 1},
+    "baselines": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "metrics_val": {
+      "type": "object",
+      "required": ["candidate"],
+      "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}}
+    },
+    "deltas_val": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["metric", "delta", "ci_low", "ci_high"],
+        "additionalProperties": false,
+        "properties": {
+          "metric": {"type": "string", "minLength": 1},
+          "delta": {"type": "number"},
+          "ci_low": {"type": "number"},
+          "ci_high": {"type": "number"}
+        }
+      }
+    },
+    "strongest": {"type": ["string", "null"], "minLength": 1},
+    "skipped": {"type": "object", "additionalProperties": {"type": "string"}}
+  }
+}

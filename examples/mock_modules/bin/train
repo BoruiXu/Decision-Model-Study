@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example train command of the mock modules (the contract in modules/train/SKILL.md, "训练命令（接口契约）"):
+"""Example train command of the mock modules (the contract in modules/train/SKILL.md, "Train command (interface contract)"):
 
   train --task <task.json> --trainset <dir> --trainset-id <id> --valset <dir> --valset-id <id>
         --config <config.json> --config-source <default|candidate or search id> --round <n>
@@ -99,7 +99,7 @@ def read_json(path):
 
 
 def tokens(text):
-    return re.findall(r"[a-z]+|[\u4e00-\u9fff]+", text.lower())  # English words, runs of CJK characters
+    return re.findall(r"[a-z]+|[\u4e00-\u9fff]+", text.lower())  # lower-case words and runs of ideographs
 
 
 def text_of(row):

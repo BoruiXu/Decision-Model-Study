@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""The framework's train command for the training-tuning module (the contract in the module skill):
+"""The framework's train command for the train module (the contract in the module skill):
 
   train --task <task.json> --trainset <dir> --trainset-id <id> --valset <dir> --valset-id <id>
         --config <config.json> --config-source <default|tune|search id> --round <n>
         --producer train --out <candidate dir> --marker <marker path>
 
 --producer accepts train only: the data module does not train (whether a new trainset helps is judged by the round's
-training-tuning and judge dispatches); the producer data of older candidates stays readable (rsi's schemas).
+train and judge dispatches); the producer data of older candidates stays readable (rsi's schemas).
 
 Trains one configuration with trsi's own code (the same run.yaml, ojh launch and candidate packing an agent's search
 uses), blocks until the ojh run ends (or its tmux session is gone without a DONE: a failure), waits (up to 2 minutes)
@@ -15,7 +15,9 @@ qualifies, as `trsi collect --gpu` checks it, else on another; while no card qua
 to 10 minutes) and writes the marker last: `ok`, or `failed` and the reason on the second line. Exit code 0 exactly when
 the marker says ok. Stopped by SIGTERM or SIGINT, it ends its ojh training (tmux kill-session) and writes failed; a
 stop while ojh starts the training is handled once its tmux session is known. Reads only the trainset,
-the valset, the config and the task; needs no agent. It rewrites <dirname(--out)>/progress.json (the framework's module
+the valset, the config and the task; needs no agent. With the task's policy section the candidate carries its decision
+policy (modules/common/dpolicy, fitted on the valset predictions; trsi.pack): policy.json, policy_apply.py and
+predictions_val_raw.jsonl, and its model.predict applies the policy. It rewrites <dirname(--out)>/progress.json (the framework's module
 progress file; trsi.progress) when it starts, at every check of the ojh run, at the end and when it fails; two train
 commands with --out in the same directory overwrite each other's. A failure to write it is only printed.
 
@@ -46,7 +48,7 @@ import signal
 import sys
 import time
 
-TRSI_VERSION = "1.4.3"
+TRSI_VERSION = "1.5.0"
 OJH_COMMIT = "ca0e8f0"
 ONEJEV_COMMIT = "81ce62f"
 DEFAULTS = {"base": "joey-1", "recipe": None, "overrides": {}, "seed": 0, "max_steps": None}
@@ -109,6 +111,7 @@ def write_progress(run):
 
 def train(a, task):
     sys.path.insert(0, HERE)
+    sys.path.insert(1, os.path.join(os.path.dirname(os.path.dirname(HERE)), "modules", "common"))   # dpolicy (packing)
     import trsi
     from pathlib import Path
     from trsi import archive, harness

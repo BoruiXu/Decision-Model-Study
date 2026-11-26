@@ -54,12 +54,12 @@ def _num(x):
 
 
 def _cell(x):
-    """A table cell as shown: a string as is (clipped), a number with %.6g, a boolean 是 or 否, null None; else
+    """A table cell as shown: a string as is (clipped), a number with %.6g, a boolean yes or no, null None; else
     False (not a cell, or a number out of range)."""
     if x is None:
         return None
     if isinstance(x, bool):
-        return "是" if x else "否"
+        return "yes" if x else "no"
     if _number(x):
         s = _num(x)
         return False if s is None else s
@@ -70,7 +70,7 @@ def _cell(x):
 
 def _facts(v, problems):
     if not isinstance(v, list):
-        problems.append("facts 不是列表，没有用")
+        problems.append("facts is not a list; not used")
         return []
     out = []
     for i, f in enumerate(v[:MAX_FACTS], 1):
@@ -82,7 +82,8 @@ def _facts(v, problems):
         else:
             text = None
         if not isinstance(label, str) or text is None:
-            problems.append("facts 第 %d 项不是 {label: 字符串, value: 字符串或数}（或数超出范围），已跳过" % i)
+            problems.append("facts item %d is not {label: string, value: string or number} (or the number is out "
+                            "of range); skipped" % i)
             continue
         out.append((_clip(label, LABEL_CHARS), _clip(text, VALUE_CHARS)))
     return out
@@ -90,22 +91,22 @@ def _facts(v, problems):
 
 def _table(v, problems):
     if not isinstance(v, dict):
-        problems.append("table 不是对象，没有用")
+        problems.append("table is not an object; not used")
         return None
     cols = v.get("columns")
     if not isinstance(cols, list) or not cols or not all(isinstance(c, str) for c in cols):
-        problems.append("table.columns 不是 1–%d 个字符串，表格没有用" % MAX_COLUMNS)
+        problems.append("table.columns is not 1–%d strings; the table is not used" % MAX_COLUMNS)
         return None
     if len(cols) > MAX_COLUMNS:
-        problems.append("table.columns 有 %d 个，只用前 %d 个" % (len(cols), MAX_COLUMNS))
+        problems.append("table.columns has %d entries; only the first %d are used" % (len(cols), MAX_COLUMNS))
         cols = cols[:MAX_COLUMNS]
     title = v.get("title")
     if title is not None and not isinstance(title, str):
-        problems.append("table.title 不是字符串，没有用")
+        problems.append("table.title is not a string; not used")
         title = None
     rows_in = v.get("rows", [])
     if not isinstance(rows_in, list):
-        problems.append("table.rows 不是列表，没有用")
+        problems.append("table.rows is not a list; not used")
         rows_in = []
     rows, bad_rows, bad_cells = [], 0, 0
     for r in rows_in[:MAX_ROWS]:
@@ -117,20 +118,24 @@ def _table(v, problems):
         bad_cells += sum(1 for c in cells if c is False)
         rows.append([None if c is False else c for c in cells])
     if bad_rows:
-        problems.append("table.rows 有 %d 行不是列表，已跳过" % bad_rows)
+        problems.append("table.rows: %s; skipped" % ("1 row is not a list" if bad_rows == 1
+                                                     else "%d rows are not lists" % bad_rows))
     if bad_cells:
-        problems.append("table 有 %d 格不是字符串、数、布尔或 null（或数超出范围），显示为空" % bad_cells)
+        problems.append("table: %s no string, number, boolean or null (or a number out of range); shown empty"
+                        % ("1 cell holds" if bad_cells == 1 else "%d cells hold" % bad_cells))
     return {"title": _clip(title, CELL_CHARS) if title else None,
             "columns": [_clip(c, CELL_CHARS) for c in cols], "rows": rows}
 
 
 def _notes(v, problems):
     if not isinstance(v, list):
-        problems.append("notes 不是列表，没有用")
+        problems.append("notes is not a list; not used")
         return []
     out = [_clip(n, NOTE_CHARS) for n in v[:MAX_NOTES] if isinstance(n, str)]
     if len(out) < len(v[:MAX_NOTES]):
-        problems.append("notes 有 %d 条不是字符串，已跳过" % (len(v[:MAX_NOTES]) - len(out)))
+        bad = len(v[:MAX_NOTES]) - len(out)
+        problems.append("notes: %s; skipped" % ("1 entry is not a string" if bad == 1
+                                                else "%d entries are not strings" % bad))
     return out
 
 
@@ -149,33 +154,34 @@ def read_progress(path, now=None):
         except FileNotFoundError:
             return None
         except OSError as e:
-            problems.append("读不了 progress.json：%s" % (e.strerror or e))
+            problems.append("cannot read progress.json: %s" % (e.strerror or e))
             return out
         if len(raw) > MAX_BYTES:
-            problems.append("progress.json 超过 %d KiB，没有读" % (MAX_BYTES // 1024))
+            problems.append("progress.json is larger than %d KiB; not read" % (MAX_BYTES // 1024))
             return out
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            problems.append("progress.json 不是 UTF-8")
+            problems.append("progress.json is not UTF-8")
             return out
         try:
             doc = json.loads(text)
         except ValueError as e:
-            problems.append("progress.json 不是合法的 JSON（可能正写到一半）：%s" % e)
+            problems.append("progress.json is not valid JSON (it may be half written): %s" % e)
             return out
         if not isinstance(doc, dict):
-            problems.append("progress.json 不是 JSON 对象")
+            problems.append("progress.json is not a JSON object")
             return out
         version = doc.get("version", 1)
         if version != 1 or isinstance(version, bool):
-            problems.append("progress.json 的 version 是 %s，不认识（只认 1），整个文件没有用"
-                            % json.dumps(version, ensure_ascii=False)[:40])
+            problems.append("progress.json has version %s, which is unknown (only 1 is known); the whole file is "
+                            "not used" % json.dumps(version, ensure_ascii=False)[:40])
             return out
         when = _parse_time(doc.get("updated_at"))
         if when is None:
-            problems.append("updated_at 缺失或不是带时区的 ISO 8601 时间，不判断进度是否过时" if "updated_at" in doc
-                            else "没有 updated_at，不判断进度是否过时")
+            problems.append("updated_at is missing or not an ISO 8601 time with a time zone; whether the progress "
+                            "is stale is not judged" if "updated_at" in doc
+                            else "no updated_at; whether the progress is stale is not judged")
         else:
             now = now or datetime.datetime.now(UTC)
             if now.tzinfo is None:
@@ -183,12 +189,13 @@ def read_progress(path, now=None):
             try:
                 out["updated_at"], out["age_s"] = when.astimezone(UTC), (now - when).total_seconds()
             except OverflowError:  # e.g. 0001-01-01T00:00:00+01:00 is before year 1 in UTC
-                problems.append("updated_at 超出能表示的时间范围，不判断进度是否过时")
+                problems.append("updated_at is out of the time range that can be represented; whether the progress "
+                                "is stale is not judged")
         s = doc.get("summary")
         if isinstance(s, str):
             out["summary"] = _clip(s, SUMMARY_CHARS)
         elif s is not None:
-            problems.append("summary 不是字符串，没有用")
+            problems.append("summary is not a string; not used")
         if doc.get("facts") is not None:
             out["facts"] = _facts(doc["facts"], problems)
         if doc.get("table") is not None:
@@ -196,7 +203,7 @@ def read_progress(path, now=None):
         if doc.get("notes") is not None:
             out["notes"] = _notes(doc["notes"], problems)
     except Exception as e:  # never let the pages or the engine fail on a module's file
-        problems.append("读 progress.json 出错：%s: %s" % (type(e).__name__, e))
+        problems.append("reading progress.json failed: %s: %s" % (type(e).__name__, e))
     return out
 
 

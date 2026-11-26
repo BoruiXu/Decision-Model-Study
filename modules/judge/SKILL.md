@@ -1,94 +1,97 @@
 ---
 name: rsi-judge
-description: 由 rsi-orchestrator 派发评测与决策模块时使用：用评测集标签给交付打分、给出升级建议、失败归因和下一轮计划。Use when the orchestrator dispatches the RSI judge module; not for general evaluation requests.
+description: Use when the orchestrator dispatches the RSI judge module: score a delivery with the evalset labels, give the promotion recommendation, the failure attribution and the next round's plan; not for general evaluation requests.
 ---
 
-# rsi-judge：评测与决策模块
+# rsi-judge: judge module
 
-保管评测集的标签，打分、比较，给出升级建议、失败分析和下一轮计划。只做本模块的事，不派别的 subagent；模块内部怎么做由负责人定，本 skill 只固定接口。
+Keep the evalset's labels; score and compare, and give the promotion recommendation, the failure analysis and the next round's plan. Do only this module's work and dispatch no other subagent; how the module works inside is up to its owner, this skill fixes only the interface.
 
-## 输入
+## Inputs
 
-简报由代码生成，放在输出目录里：`brief.md`（人读）和 `brief.json`（同样的内容，结构化：`module`、`purpose`、`round`、`task_json`、`ids`、`inputs`、`outdir`、`budget_left`、`goal` 等；字段说明见框架仓库根目录下的 `skills/rsi-orchestrator/templates/brief.md`）。输入以简报的 `inputs` 为准，只读那里列出的路径。被退回时，同一个会话会收到 `feedback-<k>.md`（`<k>` 是第几次启动），写明为什么退回和要改什么：按它改好，再重新写 `handback.json`。同一个会话还会收到两种不算退回的 `feedback-<k>.md`：开头是「# 继续：交回的第二部分」的（两段式交回的后半段，例如 train 先交回试验候选、judge 先交回评测，登记后在这里拿到登记 id，再写 search 或计划），和开头是「# 用户回答了你的问题」的（见「输出」）。
+The brief is built by code and placed in the output directory: `brief.md` (for people) and `brief.json` (the same content, structured: `module`, `purpose`, `round`, `task_json`, `ids`, `inputs`, `outdir`, `budget_left`, `goal` and more; the fields are described in `skills/rsi-orchestrator/templates/brief.md` under the framework repository root). The brief's `inputs` are authoritative: read only the paths listed there. When sent back, the same session gets `feedback-<k>.md` (`<k>` is the launch number), which says why it was sent back and what to change: fix that, then write `handback.json` again. The same session also gets two kinds of `feedback-<k>.md` that are not a return: one starting with `# Continue: the second part of the hand-back` (the second half of a two-part hand-back, e.g. train first hands back the trial candidates and judge the evaluation; once they are registered, it gets their registered ids here and then writes the search or the plan), and one starting with `# The user answered your questions` (see "Outputs").
 
-只读下面列出的产物，没列出的产物和目录不要找、不要读；不读工作区，不读登记表。
+Read only the artifacts listed below; do not look for or read any artifact or directory not listed; do not read the workspace or the registry.
 
-- `task`（指标、对照组、升级规则）。
-- 送评的 `candidate`，本轮的 `delivery`，本轮有 `search` 时也给。
-- `evalset`，含 labels.jsonl；只有本模块拿标签。
-- 送评候选所用 `trainset` 的 rows.jsonl，只用来算对照组，不做别的分析。
-- 当前最佳版本的版本名，以及它的 `evaluation` 和 `delivery`；简报里写的 `best_before` 的值照用。评测集刷新过时，另拿最佳版本在当前评测集上的 `delivery`：用它算最佳版本一侧的指标和差值，并把它的 id 写进 evaluation 的 parents。
-- `feedback`，全部 `record`。
-- 开启本轮的 `plan`（上一轮写的，只在评测时给）：对照本轮的评测，判断这个计划是否奏效，写进评测报告。
-- 里程碑发布获批时，另拿 `testset`（含标签）。
+- `task` (metrics, baselines, promotion rule).
+- The `candidate` sent for evaluation and this round's `delivery`; also the `search` when this round has one.
+- `evalset`, with labels.jsonl; only this module gets labels.
+- The rows.jsonl of the `trainset` the candidate sent for evaluation used, only to compute the baselines and for no other analysis.
+- The current best version's name, with its `evaluation` and `delivery`; use the value of `best_before` the brief gives. When the evalset was refreshed, also the best version's `delivery` on the current evalset: compute the best version's side of the metrics and deltas from it, and write its id into the evaluation's parents.
+- `feedback`, every `record`.
+- The `plan` that opens this round (written last round; given for the evaluation only): judge against this round's evaluation whether that plan worked, and write it into the evaluation report.
+- When the milestone release is approved, also the `testset` (with labels).
+- With ③ Compare (report only, never a gate): the `comparison` of the candidate with the baselines on the valset (the brief field "strongest" names its strongest baseline), and each `baseline` to report as `baseline_eval_<id>` (the baseline directory: its manifest gives its name, its `predictions_eval` are on the evalset inputs); at the milestone each baseline scored on the testset inputs as `baseline_test_<id>` (its `predictions_test`). Read their predictions only: the judge never trains or runs a baseline.
 
-## 输出
+## Outputs
 
-- `evaluation`：各指标、与当前最佳版本和对照组的比较及区间、升级或保留的建议、失败项及归因、`uses_testset`；报告文件按分组和切片给出结果。
-- `plan`：下一轮从哪个模块进入、每个问题的证据和改动、预期提升。送评候选用的是本轮数据模块新出的训练集时，在证据里写明它训出的候选相对当前最佳版本的结论（升级或保留、主指标差值）：数据模块不训练、自己不验证新训练集，也拿不到 `evaluation`，下一轮从 `plan` 得知新训练集的效果。关闭的轮次：写明新训练集上的候选没过训练门。
-- `record`：每个改进实验一份。
+- `evaluation`: each metric, the comparison with the current best version and with the baselines, with intervals, the promote or keep recommendation, the failed items and their attribution, `uses_testset`; the report file gives the results by group and slice. With ③ Compare also `baselines_eval`: every baseline the brief gives as `baseline_eval_<id>`, by id, with its name, its metrics on the evalset and the delta of the primary metric (candidate minus baseline); a milestone evaluation has `baselines_test` instead, for every `baseline_test_<id>`. They are a report: the recommendation never rests on them, but the failure analysis may use them and the comparison (e.g. the candidate behind a feature baseline such as gbdt points at the attribution model_capacity or config; behind the team's recipe, at what this round changed).
+- `plan`: which module the next round enters at, the evidence and the change for each issue, the expected gain. When the candidate sent for evaluation used a trainset the data module produced this round, state in the evidence the conclusion on the candidate it trained against the current best version (promote or keep, the delta of the primary metric): the data module does not train, does not test a new trainset itself and does not get the `evaluation`, so the next round learns from the `plan` how the new trainset did. A closed round: state that the candidates on the new trainset did not pass the train gate.
+- `record`: one per improvement experiment.
 
-每个产物写成输出目录下的一个子目录，manifest 的 id 写 null，round、task_id、task_version 按简报写，字段见 [evaluation.md](../../docs/interfaces/evaluation.md)。 `record` 见 [record.md](../../docs/interfaces/record.md)。
+Write each artifact as a subdirectory of the output directory, with null as the manifest's id and round, task_id and task_version as the brief says; fields in [evaluation.md](../../docs/interfaces/evaluation.md). `record` in [record.md](../../docs/interfaces/record.md).
 
-`plan` 引用 `evaluation` 的登记 id：先以 `ok` 交回 `evaluation`；引擎登记并判定后让同一个会话接着做（`feedback-<k>.md` 开头是「# 继续：交回的第二部分」，不算退回），`evaluation` 的登记 id 和升级判定在里面，再写 `plan` 交回。
+The `plan` refers to the registered id of the `evaluation`: first hand back the `evaluation` with `ok`; once the engine has registered it and decided, it has the same session go on (`feedback-<k>.md` starts with `# Continue: the second part of the hand-back`, not a return), with the registered id of the `evaluation` and the promotion decision in it; then write the `plan` and hand it back.
 
-简报说本轮已关闭（没有候选通过训练门，本轮没有 `evaluation`）时，只写 `plan` 和 `record`：plan 的 evaluation_id 写 null，问题和证据取自本轮候选的训练门结果和实验记录。
+When the brief says this round is closed (no candidate passed the train gate, so this round has no `evaluation`), write only the `plan` and the `record`: the plan's evaluation_id is null, and the issues and evidence come from the train gate results and the experiment records of this round's candidates.
 
-里程碑评测（简报说是里程碑发布时）：给当前最佳版本的 delivery 打分，`uses_testset` 写 true，`candidate_id` 是当前最佳版本的候选，`best_before` 写当前最佳版本；指标、差值仍按评测集算，test 上的成绩写进 `metrics_test`（含主指标）；建议写 keep，它不是升级判定，不占评测集使用次数。不写 `plan`。格式见 [evaluation.md](../../docs/interfaces/evaluation.md) 的「里程碑评测」。
+Milestone evaluation (when the brief says it is a milestone release): score the current best version's delivery; `uses_testset` is true, `candidate_id` is the current best version's candidate, `best_before` is the current best version; the metrics and deltas are still computed on the evalset, and the scores on the testset go into `metrics_test` (with the primary metric); the recommendation is keep: it is no promotion decision and takes no evalset use. No `plan`. Format in "Milestone evaluation" of [evaluation.md](../../docs/interfaces/evaluation.md).
 
-交回：全部产物写好、校验通过后，在输出目录写 `handback.json`：`status`（`ok`、`failed` 或 `long_job`）、`artifacts`（输出目录下的子目录名，每个产物一个）、`marker`（长任务完成标记的绝对路径，`long_job` 时必填，其他写 null）、`notes`（门数字、花费、遇到的问题；`failed` 时写原因）、`questions`（需要用户决定的事，没有写 `[]`）。引擎读到它才算交回，缺了或格式不对按交回失败处理，重新写好即可。读取很严格：不能有上面没列出的字段，`artifacts` 只能是子目录的名字（不含路径分隔符，不重复），`questions` 的每一项必须是非空字符串，`marker` 必须是绝对路径或 null，`failed` 时 `notes` 不能为空。
+Hand-back: once every artifact is written and validated, write `handback.json` in the output directory: `status` (`ok`, `failed` or `long_job`), `artifacts` (subdirectory names in the output directory, one per artifact), `marker` (the absolute path of the long job's completion marker; required with `long_job`, else null), `notes` (gate numbers, cost, problems met; with `failed`, the reason) and `questions` (what the user must decide; `[]` when nothing). The hand-back counts only once the engine reads this file; a missing or malformed file counts as a failed hand-back, and writing it again correctly is enough. Reading is strict: no field other than those above, `artifacts` holds only subdirectory names (no path separator, no repeats), every item of `questions` is a non-empty string, `marker` is an absolute path or null, and with `failed` `notes` is not empty.
 
-交回带 `questions` 时，这次交回的产物一个都不登记，引擎先问用户；用户回答后，回答送回同一个会话（`feedback-<k>.md` 开头是「# 用户回答了你的问题」，不算退回）。按回答修改或确认产物，再重新写 `handback.json`，列出要登记的全部子目录（上次列过的也要再列）。长任务（`long_job`）交回里的 `questions` 等完成标记出现后才问；它没列产物时，回答写在开头是「# 长任务已结束」的反馈里，和长任务的结果一起送回。
+When the hand-back has `questions`, none of the artifacts of this hand-back is registered: the engine asks the user first; once the user answers, the answer goes back to the same session (`feedback-<k>.md` starts with `# The user answered your questions`, not a return). Change or confirm the artifacts by the answer, then write `handback.json` again, listing every subdirectory to register (those listed last time too). The `questions` of a long job (`long_job`) hand-back are asked only once the completion marker is there; when it lists no artifact, the answer comes in the feedback starting with `# Long job finished`, sent back together with the long job's results.
 
-## 门
+## Gates
 
-- 指标、对照组、差值和区间一律用 `rsi score` 算，打印的数原样写进 evaluation，不自己实现（定义见 [task.md](../../docs/interfaces/task.md) 的「指标的定义」）。登记时代码按同样的定义重算，差超过 1e-9 就被拒：
-  - `metrics.candidate`、`metrics.baselines`、`deltas` 的主指标：`PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <evalset>/labels.jsonl --predictions <delivery>/predictions_eval.jsonl --train <trainset>/rows.jsonl --clusters <evalset>/inputs.jsonl --compare <best-delivery>/predictions_eval.jsonl`，输出的 `metrics`、`baselines`、`delta` 分别写进这三处；还没有最佳版本时去掉 `--compare`，`metrics.best` 写 null，`deltas` 留空。
-  - `metrics.best`：同一条命令把 `--predictions` 换成最佳版本的 `predictions_eval.jsonl`，取输出的 `metrics`。评测集刷新过时，最佳版本一侧用它在当前评测集上的 delivery（简报给出），并把这份 delivery 的 id 写进 `parents`，否则登记被拒。
-  - 里程碑评测的 `metrics_test`：`PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl`。
-  - 输出的 `not_computed` 列出 `rsi` 不认识的指标和基线：这些由本模块自己算，在报告里写明算法，登记时不核对。
-  - 切片、分组结果等报告里的其他数字由本模块自定，不核对。
-- 建议必须与升级规则一致：按任务定义的 `promotion_rule` 和 [task.md](../../docs/interfaces/task.md) 描述的判定方法，用 `rsi score` 算出、写进 evaluation 的差值、区间和护栏指标（登记时会重算核对）得出 `promote` 或 `keep`（提升必须大于 `min_delta`，恰好等于它的平局，容差 1e-9 内，不算提升，写 `keep`），`reason` 引用规则和对应数字。引擎登记并判定升级时会用代码核对，不一致就被拒。
-- 归因只能取 [evaluation.md](../../docs/interfaces/evaluation.md) 规定的值，每个失败项有证据和唯一的归因，模块与归因对应。
-- `plan` 的 `entry_module` 必须是某个 issue 的模块，每个 issue 都有证据、改动和预期提升。
-- 评测集使用次数有限，每份登记的 evaluation（里程碑评测除外）用一次；用封存 test 只在获批后，且 `uses_testset` 写 true。
-- 评测集和封存 test 的标签不得写进给别的模块看的 `plan`、`record` 和报告里的逐条样本。
+- Metrics, baselines, deltas and intervals are always computed with `rsi score`, and the numbers it prints are written into the evaluation as they are; never implement them yourself (definitions in "Metric definitions" of [task.md](../../docs/interfaces/task.md)). At registration the code recomputes them by the same definitions and refuses a difference over 1e-9:
+  - `metrics.candidate`, `metrics.baselines` and the primary metric of `deltas`: `PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <evalset>/labels.jsonl --predictions <delivery>/predictions_eval.jsonl --train <trainset>/rows.jsonl --clusters <evalset>/inputs.jsonl --compare <best-delivery>/predictions_eval.jsonl`; the `metrics`, `baselines` and `delta` it prints go into these three places respectively; when there is no best version yet, leave out `--compare`, `metrics.best` is null and `deltas` stays empty.
+  - `metrics.best`: the same command with `--predictions` replaced by the best version's `predictions_eval.jsonl`, taking the `metrics` it prints. When the evalset was refreshed, the best version's side uses its delivery on the current evalset (the brief gives it), and that delivery's id goes into `parents`, otherwise registration is refused.
+  - `metrics_test` of a milestone evaluation: `PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl`.
+  - `baselines_eval` (③ Compare, report only): add `--baselines-on evalset` and one `--baseline <dir>` per `baseline_eval_<id>` of the brief to the first command above (its `--clusters` is the evalset's inputs), and write the `baselines_eval` object it prints into the evaluation as it is; never assemble or copy the numbers by hand. Every baseline of the round's comparison must be there (`baselines_eval: missing <id> (<name>)` otherwise), and no other.
+  - `baselines_test` of a milestone evaluation: the same on the testset, `PYTHONPATH=<repo root> python3 -m rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl --clusters <testset>/inputs.jsonl --baselines-on testset --baseline <dir>` (one `--baseline` per `baseline_test_<id>`), and its printed `baselines_test` goes in as it is. When `rsi score` refuses (a primary metric `rsi` does not compute, or one undefined on the set), see "③ Compare's baselines" in [evaluation.md](../../docs/interfaces/evaluation.md).
+  - The `not_computed` of the output lists the metrics and baselines `rsi` does not know: this module computes them itself and states the method in the report; registration does not check them.
+  - Slice and group results and the other numbers in the report are this module's choice and are not checked.
+- The recommendation must agree with the promotion rule: by the task definition's `promotion_rule` and the decision method [task.md](../../docs/interfaces/task.md) describes, derive `promote` or `keep` from the deltas, intervals and guard metrics computed with `rsi score` and written into the evaluation (registration recomputes and checks them) (the gain must be greater than `min_delta`; a tie exactly equal to it, within a tolerance of 1e-9, is no gain: write `keep`), and `reason` cites the rule and the matching numbers. When the engine registers it and decides the promotion, it checks this in code and refuses a mismatch.
+- Attributions may only take the values [evaluation.md](../../docs/interfaces/evaluation.md) allows; every failed item has evidence and exactly one attribution, and the module matches the attribution.
+- The `plan`'s `entry_module` must be the module of some issue; every issue has evidence, a change and an expected gain.
+- The evalset's uses are limited: each registered evaluation (except a milestone evaluation) takes one use; the sealed testset is used only after approval, with `uses_testset` true.
+- The labels of the evalset and the sealed testset must never be written into the `plan`, the `record` or the per-sample rows of the report that other modules see.
 
-## 单独运行
+## Running standalone
 
-负责人在自己的沙盒目录里运行，不需要顶层：
+The owner runs it in their own sandbox directory, without the orchestrator:
 
-1. 把 `candidate`、`delivery`、`evalset`（含标签）、送评候选所用 `trainset` 的 rows.jsonl（只用来算对照组）、历史 `evaluation` 和 `record` 从已登记产物复制到沙盒，路径手工指定；任务定义用 `<task.json>`。不需要工作区，也不读登记表。
-2. 输出写到沙盒下自己建的输出目录，每个产物一个子目录，manifest 的 `id` 写 null，`round` 自拟。
-3. 每个产物用 `PYTHONPATH=<repo root> python3 -m rsi validate <kind> <dir> --task <task.json>` 校验，通过才算交出。可以运行的 `rsi` 命令只有它和 `rsi score`（算报告里的指标、对照组和差值），不运行 `rsi register` 等其他命令。
-4. `plan` 引用 `evaluation` 的 id 时，沙盒里手填一个即可，登记时由引擎核对。
+1. Copy the `candidate`, the `delivery`, the `evalset` (with labels), the rows.jsonl of the `trainset` the candidate sent for evaluation used (only to compute the baselines), earlier `evaluation`s and the `record`s from registered artifacts into the sandbox, paths given by hand; the task definition is `<task.json>`. No workspace is needed, and the registry is not read.
+2. Write the output to an output directory you create in the sandbox, one subdirectory per artifact, with null as the manifest's `id` and a `round` of your choice.
+3. Validate every artifact with `PYTHONPATH=<repo root> python3 -m rsi validate <kind> <dir> --task <task.json>`; only an artifact that passes counts as handed in. The only `rsi` commands you may run are this one and `rsi score` (for the metrics, baselines and deltas in the report); do not run `rsi register` or any other command.
+4. When the `plan` refers to the id of the `evaluation`, fill one in by hand in the sandbox; the engine checks it at registration.
 
-## 步骤和策略子 skill
+## Steps and strategy sub-skills
 
-由模块负责人填写：切片分析、失败归因、计划生成、预期提升的校准。打分、对照组和置信区间是固定代码（`rsi score`，见「门」），不在这里另定。把可重复的步骤写成脚本，skill 只写需要判断的部分。
+Filled in by the module owner: slice analysis, failure attribution, plan writing, calibration of the expected gains. Scoring, baselines and confidence intervals are fixed code (`rsi score`, see "Gates") and are not defined again here. Write the repeatable steps as scripts; the skill covers only the parts that need judgement.
 
-## 模块指标
+## Module metrics
 
-由模块负责人填写：计划的命中率：计划里预期的提升有多少真的实现了，及其测量方法。
+Filled in by the module owner: the hit rate of the plans (how much of the gain a plan expected was really achieved) and how it is measured.
 
-## 实验记录
+## Experiment records
 
-由模块负责人填写：每次改进实验交一份 `record`（字段见 [record.md](../../docs/interfaces/record.md)），写明改了什么、前后数值、结论，`module` 写 `judge`。
+Filled in by the module owner: hand in a `record` for every improvement experiment (fields in [record.md](../../docs/interfaces/record.md)), saying what was changed, the numbers before and after and the conclusion; `module` is `judge`.
 
-## 长任务
+## Long jobs
 
-由模块负责人填写：大量重采样或逐条分析（后台运行，写完成标记）。预计超过简报里规定的时长时，在后台启动，写完成标记（第一行 ok 或 failed），立刻交回标记路径、日志路径和预计耗时，不轮询、不等待。
+Filled in by the module owner: large resampling or per-sample analysis (run in the background, writing a completion marker). When it is expected to take longer than the brief allows, start it in the background, write a completion marker (first line ok or failed), and hand back the marker path, the log path and the expected duration at once; do not poll or wait.
 
-长任务的交回：预计超过简报规定的时长时，在后台启动，立刻写 `handback.json`，`status` 写 `long_job`，`marker` 写完成标记的绝对路径，然后结束会话，不轮询、不等待。要交回 `long_job` 时完成标记已经在了（长任务在你交回之前就结束了，例如上一个会话启动的）：不要以 `long_job` 交回。引擎只认这次启动之后写的标记，更早的标记永远不算出现，运行会一直等；直接读结果，接着做完，再交回。任务结束时无论成败都写完成标记，第一行是 `ok` 或 `failed`。标记是 `ok` 时，引擎让同一个会话继续（`feedback-<k>.md` 开头是「# 长任务已结束」），由它读结果、写好产物、再以 `ok` 交回；标记不是 `ok` 时这次派出记为失败。
+Hand-back of a long job: when it is expected to take longer than the brief allows, start it in the background, write `handback.json` at once with `long_job` as `status` and the absolute path of the completion marker as `marker`, then end the session; do not poll or wait. If the completion marker is already there when you would hand back `long_job` (the long job ended before your hand-back, e.g. one a previous session started): do not hand back `long_job`. The engine only accepts a marker written after this launch; an earlier marker never counts as present and the run would wait forever. Read the results, finish the work, then hand back. When the job ends, succeeded or failed, it must write the completion marker, whose first line is `ok` or `failed`. When the marker is `ok`, the engine has the same session go on (`feedback-<k>.md` starts with `# Long job finished`): it reads the results, writes the artifacts and hands back with `ok`; when the marker is not `ok`, this dispatch is recorded as failed.
 
-交回 `long_job` 之前，在完成标记旁写 `<marker>.pid`：第一行是长任务进程自己的进程号，第二行是它的启动时间（Unix 秒，`date +%s`）。进程号要由长任务自己写，例如 shell 里 `sh -c 'printf "%s\n%s\n" $$ "$(date +%s)" > <marker>.pid; exec <命令>' > <日志> 2>&1 &`（`exec` 让命令沿用这个进程号），Python 里任务一开始写 `os.getpid()` 和 `int(time.time())`；不要用 shell 给出的后台进程号代替，它可能是包装进程而不是长任务本身。最好让长任务在自己的进程组里运行（例如 Python 的 `subprocess.Popen(..., start_new_session=True)`）。`<marker>.pid` 写好后再写 `handback.json`。运行被停止时，引擎按这个文件确认进程是这个长任务后终止它（整个进程组）；没有这个文件就终止不了，只能列为可能仍在运行、请用户手动结束。
+Before handing back `long_job`, write `<marker>.pid` next to the completion marker: the first line is the long job process's own pid, the second its start time (Unix seconds, `date +%s`). The pid must be written by the long job itself, e.g. in a shell `sh -c 'printf "%s\n%s\n" $$ "$(date +%s)" > <marker>.pid; exec <command>' > <log> 2>&1 &` (`exec` makes the command keep this pid), and in Python write `os.getpid()` and `int(time.time())` as the job starts; never use the background pid the shell gives instead, which may be a wrapper process and not the long job itself. Preferably run the long job in its own process group (e.g. Python's `subprocess.Popen(..., start_new_session=True)`). Write `handback.json` only after `<marker>.pid` is written. When the run is stopped, the engine checks by this file that the process is this long job, then terminates it (the whole process group); without this file it cannot terminate it and can only list it as possibly still running, for the user to end by hand.
 
-每个长任务用新的完成标记路径（例如 `<名>-<k>.done`，`<k>` 每次加一），启动前 `rm -f <marker> <marker>.pid`：引擎只认修改时间不早于这次启动的标记，同一路径上以前的标记不算这个长任务结束。
+Use a new completion marker path for every long job (e.g. `<name>-<k>.done`, `<k>` one more each time), and run `rm -f <marker> <marker>.pid` before starting it: the engine only accepts a marker whose modification time is not earlier than this launch; an earlier marker at the same path does not count as this long job's end.
 
-## 负责人和版本
+## Owner and version
 
-由模块负责人填写：负责人、当前版本号、变更记录、已知限制。
+Filled in by the module owner: the owner, the current version, the change log, known limitations.
 
-## 常见错误
+## Common mistakes
 
-由模块负责人填写：本模块出现过的错误、后果和正确做法（表格）。已知的一条：建议与升级规则不一致，或归因不取规定的值。
+Filled in by the module owner: the mistakes this module has made, their consequences and the right way (a table). One is known: a recommendation that does not agree with the promotion rule, or attributions that do not take the allowed values.

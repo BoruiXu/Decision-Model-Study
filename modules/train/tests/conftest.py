@@ -149,8 +149,8 @@ class Env:
         b = {"module": "train", "purpose": "train", "round": 1, "task_id": "fraud", "task_version": 1,
              "task_json": str(self.task_json), "ids": {"trainset": "trainset-0001", "valset": "valset-0001"},
              "inputs": {"task": str(self.task_json), "trainset": str(self.trainset), "valset": str(self.valset)},
-             "outdir": str(self.out), "budget_left": {"compute_hours": 100, "annotation_items": None,
-                                                       "api_cost": None},
+             "outdir": str(self.out), "budget_left": {"compute_hours": 100, "api_usd": None, "agent_usd": None,
+                                                       "annotation_items": None},
              "dispatch_id": "d-0002"}
         b.update(changes)
         self.out.mkdir(parents=True, exist_ok=True)

@@ -1,92 +1,92 @@
-# 训练调优模块（`modules/train/`）
+# Train module (`modules/train/`)
 
-在任务定义的配置空间（`search_space`）里搜训练配置：底座、配方、`onejev.<flag>`、`lora.<field>`、种子、步数。训练一律通过 onejev-harness（`ojh run`）。agent 做判断（选空闲卡、诊断、提候选、定时检查），`trsi` 做机械的事：生成 ojh 工作区、启动、等待、把每个跑完的训练打包成框架的候选、按规则比较、写 `search`。agent 的流程在 `SKILL.md`。
+Searches the training config within the task definition's search space (`search_space`): base, recipe, `onejev.<flag>`, `lora.<field>`, seed, step count. Training always goes through onejev-harness (`ojh run`). The agent does the judging (choosing free GPUs, diagnosing, proposing candidates, check-ins), and `trsi` does the mechanical work: building the ojh workspace, launching, waiting, packing every finished training as a framework candidate, comparing by rule, writing the `search`. The agent's flow is in `SKILL.md`.
 
-## 文件
+## Files
 
-| 位置 | 内容 |
+| Path | Content |
 |---|---|
-| `SKILL.md` | 模块 agent 的流程 |
-| `trsi/` | 命令行：`init`、`check`、`launch`、`watch`、`adopt`、`collect`、`next`、`report` |
-| `train` | 框架的训练命令：训一个配置、打包成候选、写完成标记 |
-| `install_env.sh`、`install_env.py` | 装环境：训练要的库装进 ojh 的 `.venv` 并整体检查（见「装环境」）；`.py` 是它的助手（探测、改机器配置、GPU 测试） |
-| `recipes/` | 配方（ojh 格式） |
-| `reference/` | 能搜什么、怎么比较、已经学到的 |
-| `tests/` | pytest：假的 `ojh`（`fake_ojh.py`）和假的打分函数（`fake_scorer.py`） |
+| `SKILL.md` | The module agent's flow |
+| `trsi/` | Command line: `init`, `check`, `launch`, `watch`, `adopt`, `collect`, `next`, `report` |
+| `train` | The framework's train command: trains one config, packs it as a candidate, writes the completion marker |
+| `install_env.sh`, `install_env.py` | Environment install: puts the libraries training needs into ojh's `.venv` and checks the whole (see "Installing the environment"); the `.py` is its helper (probing, machine config edits, GPU test) |
+| `recipes/` | Recipes (ojh format) |
+| `reference/` | What can be searched, how to compare, what has been learned |
+| `tests/` | pytest: a fake `ojh` (`fake_ojh.py`) and a fake scoring function (`fake_scorer.py`) |
 
-## 装环境
+## Installing the environment
 
-`install_env.sh` 把一次训练要的库装进 ojh 的 `.venv`，再整体检查一遍。重跑安全：机器已经就绪时什么都不改。模块 agent 遇到缺库或库不兼容时自己运行它（不问用户，见 `SKILL.md` 的「常见错误」）。
+`install_env.sh` installs the libraries a training needs into ojh's `.venv`, then checks the whole. It is safe to rerun: when the machine is ready it changes nothing. The module agent runs it itself when a library is missing or incompatible (without asking the user, see "Common mistakes" in `SKILL.md`).
 
 ```bash
-bash <repo>/modules/train/install_env.sh --ojh <ojh 仓库> --machine <machine.yaml> [--env-file <ojh-env.sh>] \
-  [--cache-root <目录>] [--check] [--no-gpu-test]
+bash <repo>/modules/train/install_env.sh --ojh <ojh_repo> --machine <machine.yaml> [--env-file <ojh-env.sh>] \
+  [--cache-root <dir>] [--check] [--no-gpu-test]
 ```
 
-- 任务里的对应：`--ojh` 是 `resources.onejev.python` 去掉末尾的 `/.venv/bin/python`，`--machine` 是 `resources.onejev.machine`，`--env-file` 是 `resources.onejev.env_file`（先 source 它）。
-- 五步：① 没有 `<ojh>/.venv` 时按 ojh 的 README 运行 `setup.sh --machine <machine.yaml>`；已有的 venv 不重建，torch、triton、transformers、fla 的版本不动（每次安装都把它们当前的版本加作约束，装完再核对）。② pyyaml、pytest。③ causal-conv1d 1.7.0：按 torch 的 major.minor、CUDA 大版本、C++ ABI（`torch._C._GLIBCXX_USE_CXX11_ABI`）和 Python 选 GitHub release 的预编译 wheel；不行、且找到的 nvcc 和 torch 的 CUDA 大版本相同时从源码编译；都不行只警告（训练照常，走慢的 PyTorch 实现）。④ 有 compute capability ≥ 9.0 的卡（Hopper）时装 tilelang 0.1.15，找 nvcc（`CUDA_HOME`、`/usr/local/cuda*`、venv 里的 `nvidia-cuda-nvcc`，优先和 torch 的 CUDA 版本相同的），在机器配置的 `env` 里写 `CUDA_HOME`、完整的 `PATH` 和 `TILELANG_CACHE_DIR`。已有的 `CUDA_HOME` 的 nvcc 能运行就保留，除非它的 CUDA 大版本和 torch 的不同、而另有一个相同的（这时换掉并说明）。`PATH` 已有时保留其余各项、把 nvcc 的 bin 放到最前；没有时写 nvcc 的 bin、venv 的 bin 和存在的系统目录（`/usr/local/sbin` 到 `/bin`），不用调用者的 `PATH`（它会进训练和打分的进程；ojh 不展开变量）。先用这些新值跑一次第⑤步的 GPU 测试，通过了才写，写的正是测试用的值；测试失败就不写，报 failed；测试跑不了时（`--no-gpu-test`、没有可用的卡）照写，并给出警告。写法：用 pyyaml 读，逐行改（其他键、注释、被替换的键的行尾注释、CRLF 都保留），先备份成 `machine.yaml.bak-<时间>`；已经对了就不动；`env` 是内联写法（`env: {}` 除外）改不了时报 failed，并列出要手工设的值。⑤ 检查：import torch、transformers、fla、causal_conv1d、yaml（Hopper 上加 tilelang）；在一张没有别的进程的卡上、用机器配置的 `env`，对随机张量跑一次 fla 的 `chunk_gated_delta_rule`（joey-1 用的算子）前向加反向，以及 `causal_conv1d_fn`；`ojh doctor --no-network`。
-- GPU 测试的卡：调用方设了 `CUDA_VISIBLE_DEVICES` 就只用它（模块 agent 传 `resources.gpu_ids` 里一张没有计算进程的卡的 UUID，见 `SKILL.md`）；没设时脚本在所有卡里挑（机器配置排除的卡和空闲显存不够的除外），优先没有别的进程的，都有进程时也会用有进程的卡，也不看 `resources.gpu_ids` 和 ojh 的卡锁。
-- 安装都带 ojh 的 `-c constraints.txt`；用 uv（PATH、`$OJH_TOOLS_DIR/uv/uv`、`<ojh>/.tools/uv/uv`、`<机器配置所在目录>/tools/uv/uv`），没有时用 venv 里的 pip。
-- 缓存和临时文件（pip、uv、`TMPDIR`、triton、tilelang）放在 `--cache-root`，缺省是 `<机器配置所在目录>/cache`；日志写到 `<cache-root>/logs/install_env-<时间>.log`。
-- 每项打印 ok、missing 或 failed（skip、warn 只是说明），最后是 summary（改了什么、警告、失败）。有必需的一项 failed 时退出码 1；causal-conv1d 和 pytest 不是必需的，装不上只警告。
-- `--check`：不装不改，不跑 GPU 测试，不写日志，只打印缺什么、会做什么；什么都不用做时退出码 0，否则 1。
-- Hopper 检查有效的验证：`FLA_TILELANG=0 bash install_env.sh …` 关掉 fla 的 tilelang 后端（不用卸载），GPU 测试应当报 fla 的 Triton/Hopper 错误，退出码 1。
-- 第一次跑 GPU 测试要编译内核（H100 上约一两分钟）；从源码编译 causal-conv1d 要十分钟以上。
+- In the task: `--ojh` is `resources.onejev.python` without the trailing `/.venv/bin/python`, `--machine` is `resources.onejev.machine`, `--env-file` is `resources.onejev.env_file` (sourced first).
+- Six steps: ① When there is no `<ojh>/.venv`, run `setup.sh --machine <machine.yaml>` as ojh's README says; an existing venv is not rebuilt, and the versions of torch, triton, transformers and fla do not move (every install adds their current versions as constraints, and checks them afterwards). ② pyyaml, pytest. ③ numpy, scikit-learn and xgboost, which the compare module and data generation import: `modules/common/install_deps.sh --python <ojh>/.venv/bin/python` installs `modules/common/requirements.txt` and checks each one, with the versions of ① and ojh's `constraints.txt` as constraints (again without `constraints.txt` when that fails) and the same uv; not required: training does not need them and ③ Compare is a report, so a failure only warns (③ then hands back failed and is skipped, and the data generation steps that need them, dgen diagnose, smote, borderline and filter, refuse with an input error, so the data agent chooses another recipe), but an install that moved a protected version (torch, triton, transformers, fla) fails. ④ causal-conv1d 1.7.0: chooses a prebuilt wheel from the GitHub release by torch's major.minor, the CUDA major version, the C++ ABI (`torch._C._GLIBCXX_USE_CXX11_ABI`) and Python; when that does not work and the nvcc found has the same CUDA major version as torch, builds it from source; when neither works, only warns (training goes on with the slow PyTorch implementation). ⑤ With a GPU of compute capability ≥ 9.0 (Hopper), installs tilelang 0.1.15, finds nvcc (`CUDA_HOME`, `/usr/local/cuda*`, `nvidia-cuda-nvcc` in the venv; preferring one with the same CUDA version as torch), and writes `CUDA_HOME`, the full `PATH` and `TILELANG_CACHE_DIR` into the machine config's `env`. An existing `CUDA_HOME` whose nvcc runs is kept, unless its CUDA major version differs from torch's and another nvcc's matches (then it is replaced, and the output says so). An existing `PATH` keeps its other entries and gets nvcc's bin put first; without one, it writes nvcc's bin, the venv's bin and the system directories that exist (`/usr/local/sbin` to `/bin`), not the caller's `PATH` (it would go into the training and scoring processes; ojh does not expand variables). It first runs step ⑥'s GPU test with these new values and writes them only when the test passes, and what it writes are exactly the values tested; when the test fails it writes nothing and reports failed; when the test cannot run (`--no-gpu-test`, no usable GPU) it writes them anyway, with a warning. How it writes: it reads with pyyaml and edits line by line (other keys, comments, the end-of-line comments of replaced keys and CRLF are kept), after a backup as `machine.yaml.bak-<time>`; when it is already right, nothing changes; when `env` is written inline (except `env: {}`) and cannot be edited, it reports failed and lists the values to set by hand. ⑥ Check: imports torch, transformers, fla, causal_conv1d and yaml (plus tilelang on Hopper); on a GPU with no other process and with the machine config's `env`, runs fla's `chunk_gated_delta_rule` (the operator joey-1 uses) forward and backward on random tensors, and `causal_conv1d_fn`; `ojh doctor --no-network`.
+- The GPU for the GPU test: when the caller sets `CUDA_VISIBLE_DEVICES`, only that one is used (the module agent passes the UUID of a GPU in `resources.gpu_ids` with no compute process, see `SKILL.md`); when it is not set, the script picks among all GPUs (except those the machine config excludes and those without enough free memory), preferring ones with no other process, and when all have some it uses one with processes too; it does not look at `resources.gpu_ids` or at ojh's GPU locks.
+- Every install carries ojh's `-c constraints.txt`; it uses uv (PATH, `$OJH_TOOLS_DIR/uv/uv`, `<ojh>/.tools/uv/uv`, `<machine config directory>/tools/uv/uv`), or the venv's pip when there is no uv.
+- Caches and temporary files (pip, uv, `TMPDIR`, triton, tilelang) go under `--cache-root`, by default `<machine config directory>/cache`; the log goes to `<cache-root>/logs/install_env-<time>.log`.
+- Each item prints ok, missing or failed (skip and warn are only notes), and at the end a summary (what changed, warnings, failures). When a required item fails, the exit code is 1; causal-conv1d, pytest and step ③'s libraries are not required, and failing to install them only warns.
+- `--check`: installs and changes nothing, runs no GPU test, writes no log, and only prints what is missing and what it would do; exit code 0 when nothing needs doing, else 1.
+- To verify that the Hopper check works: `FLA_TILELANG=0 bash install_env.sh …` turns off fla's tilelang backend (no uninstall needed); the GPU test should then report fla's Triton/Hopper error, with exit code 1.
+- The first GPU test compiles kernels (about one or two minutes on an H100); building causal-conv1d from source takes ten minutes or more.
 
-## 运行
+## Running
 
-`trsi` 和训练命令在 ojh 的 `.venv` 里运行（要 pyyaml；候选的 `model.predict` 要 torch 和 ojh），框架本身不依赖它们。下面 `<py>` 是任务定义的 `resources.onejev.python`（ojh 的 `.venv/bin/python`），`<repo>` 是框架仓库根目录。
+`trsi` and the train command run in ojh's `.venv` (they need pyyaml; a candidate's `model.predict` needs torch and ojh); the framework itself does not depend on them. Below, `<py>` is the task definition's `resources.onejev.python` (ojh's `.venv/bin/python`), and `<repo>` is the framework repository root.
 
 ```bash
 export PYTHONPATH=<repo>/modules/train
 <py> -m trsi --help
-<py> -m trsi init --brief <输出目录>/brief.json          # 写 <输出目录>/trsi/run.yaml、exp.yaml，起点成为当前方案
-<py> -m trsi adopt <run.yaml> --candidate <best_candidate>  # 第 2 轮起：当前最佳版本的候选当作起点的一个种子，不重训
-<py> -m trsi launch <run.yaml> --start --seed 0 --gpus 3    # 或 launch <run.yaml> <候选.yaml> --seed 0 --gpus 3；立即返回
-<py> -m trsi watch <run.yaml> --marker <标记路径>            # 转到后台，写 <标记>.pid；试验都结束后写 ok
-<py> -m trsi collect <run.yaml> [--gpu 3]                   # 每个跑完的试验打包成 <输出目录>/cand-<试验>/
-<py> -m trsi next <run.yaml>                                # 按规则比较，打印下一步
-<py> -m trsi report <run.yaml> --search <输出目录>/search --ids <输出目录>/registered-<k>.json
+<py> -m trsi init --brief <outdir>/brief.json             # writes <outdir>/trsi/run.yaml and exp.yaml; the start becomes the incumbent
+<py> -m trsi adopt <run.yaml> --candidate <best_candidate>  # from round 2: the current best version's candidate as one of the start's seeds, not retrained
+<py> -m trsi launch <run.yaml> --start --seed 0 --gpus 3    # or launch <run.yaml> <candidate.yaml> --seed 0 --gpus 3; returns at once
+<py> -m trsi watch <run.yaml> --marker <marker_path>        # moves to the background, writes <marker>.pid; writes ok once all trials have ended
+<py> -m trsi collect <run.yaml> [--gpu 3]                   # packs every finished trial as <outdir>/cand-<trial>/
+<py> -m trsi next <run.yaml>                                # compares by rule, prints the next step
+<py> -m trsi report <run.yaml> --search <outdir>/search --ids <outdir>/registered-<k>.json
 ```
 
-- `run.yaml` 由 `init --brief` 按简报和任务定义生成，各键的来源见 `trsi/config.py` 开头，不手写。
-- 候选目录：`model/`（选中的 checkpoint；LoRA 是 ojh 合并后的模型；硬链接，跨盘时拷贝，所以 `ojh cleanup` 删了运行里的文件，候选照样完整）、`predict`（`model.predict`，用训练时写入的 `<py>` 运行 `predict.py`）、`predict.json`（打分设置）、`predictions_val.jsonl`、`manifest.json`（`rsi score` 的指标、`config`、`config_request`、`cost`、`code_version`）。打包后用 `rsi validate candidate` 检查。
-- 打分用的卡：`collect` 在打包每个试验前选（`harness.pick_scoring_card`）：在 `resources.gpu_ids` 里，nvidia-smi 列出的计算进程一个都没有（谁的都算），空闲显存不少于 max(机器配置的 `min_free_mib`, 模型目录大小 × 1.5)，配了 `lock_dir` 时 ojh 的卡锁 `<lock_dir>/<uuid>.lock` 能立即拿到（打分期间拿着）；`min_free_mib`、`lock_dir` 取试验 `run.lock.yaml` 的 `machine.gpu`，没有时取 run.yaml 的 `ojh.machine`。`--gpu <卡号>`（必须在 `gpu_ids` 里）合格就用它，否则打印原因、取空闲显存最多的合格卡；nvidia-smi 显示 `[N/A]` 的卡不合格。按 uuid 设 `CUDA_VISIBLE_DEVICES`。`model.predict` 显存不够（OOM）时换一张合格卡再打一次。用的卡记进试验结果和 `result` 事件的 `scoring_card`。
-- 打包失败（预测、打分或校验出错）的试验记为 unpacked：不比较、不重训，checkpoint 留在 ojh 的运行目录，下一次 `collect` 再打包；`next` 打印打包错误；`launch ... --force` 把它记为失败（卡时照记）后重训。
-- ojh 的 tmux 会话不在了、又超过 2 分钟（`harness.LOST_GRACE_S`）没有 `DONE`、运行目录里也没有文件变动：试验失败（ended without DONE），`watch`、`collect` 和训练命令都这样算；kill-session 之后 ojh 约 30 秒内才写 `DONE`，这段时间仍算在跑。
-- 候选 manifest 的 `config` 是 ojh 的 `run.lock.yaml`，但指向带标签数据的路径（`data` 的 `train`、`select`、`select_index`、`prepared_dir`、`source`，`eval_sets.*` 的 `train_labels`、`reference`，`split_file`）写成 null，sha256 照留。
-- 用不上的 checkpoint 由 `collect` 自动删（不问用户）：试验打包好、候选通过 `rsi validate` 之后，对它的 ojh 运行做 `ojh cleanup --confirm`（删 `deletion_candidates.json` 列出的没选中的保存点和合并模型；ojh 留着选中的）；`DONE` 说失败的试验，删掉运行里所有 checkpoint 目录（`ckpt-step*`、`adapter-step*`、`merged-step*`、`final`、`adapter`、`*.partial`，失败的运行 ojh 不列）。重跑的试验在记录的 `old_run_dirs` 里留着被换下的运行，它们的 `DONE` 出现后同样整个删掉（`launch --force` 在 launch 成功后马上删）。unpacked、还在跑、没有 `DONE` 的不删。删了记 `cleanup` 事件；ojh 留下的路径记在试验记录的 `cleanup_left`，只报一次；没删成只打印，下一次 `collect` 再删。
-- `--ids`：引擎在第一段交回登记后写的 `registered-<k>.json`（`[{"dir", "kind", "id"}]`，只取 candidate），可以给多个；也接受 JSON `{"cand-<试验>": "candidate-NNNN"}`。
-- `watch` 收到 SIGTERM（`rsi stop`）时重新读本次运行的试验，`tmux kill-session` 结束所有还在跑的 ojh 训练（包括 watch 启动之后才 launch 的），标记写 failed；后台 watch 出了别的错也写 failed 标记，traceback 在 `<标记>.log`。
-- 进度文件：`launch` 之后、`watch` 每次轮询、`collect` 打包每个试验前后，重写 run.yaml 的 `framework.progress_file`（简报的 `progress_file`，缺省 `<输出目录>/progress.json`；格式见框架的 `docs/interfaces/progress.md`）：在跑的训练和卡、`配置`、`GPU 小时`、`当前方案`，每个试验一行（状态从 ojh 运行目录的 `train-s<种子>.log` 读步数）。写失败只打到 stderr（后台 watch 的日志），从不让命令失败。
+- `run.yaml` is generated by `init --brief` from the brief and the task definition; where each key comes from is at the top of `trsi/config.py`; never write it by hand.
+- Candidate directory: `model/` (the chosen checkpoint; for LoRA, the model ojh merged; hard links, or copies across disks, so the candidate stays complete when `ojh cleanup` deletes the run's files), `predict` (`model.predict`, runs `predict.py` with the `<py>` written at training time), `predict.json` (scoring settings), `predictions_val.jsonl` (with the task's `policy` section: the rows with the decision policy applied, beside `predictions_val_raw.jsonl`, `policy.json` and `policy_apply.py`, which `predict.py` applies; models.md), `manifest.json` (the metrics of `rsi score`, `config`, `config_request`, `cost`, `code_version`). Checked with `rsi validate candidate` after packing.
+- The scoring GPU: `collect` chooses it before packing each trial (`harness.pick_scoring_card`): in `resources.gpu_ids`, with not a single compute process listed by nvidia-smi (anyone's counts), free GPU memory no less than max(the machine config's `min_free_mib`, the model directory's size × 1.5), and, when `lock_dir` is configured, ojh's GPU lock `<lock_dir>/<uuid>.lock` available at once (held while scoring); `min_free_mib` and `lock_dir` come from `machine.gpu` of the trial's `run.lock.yaml`, else from run.yaml's `ojh.machine`. `--gpu <gpu>` (must be in `gpu_ids`) is used when it qualifies; otherwise collect prints why and takes the qualifying GPU with the most free memory; a GPU nvidia-smi shows as `[N/A]` does not qualify. `CUDA_VISIBLE_DEVICES` is set by uuid. When `model.predict` runs out of GPU memory (OOM), it scores once more on another qualifying GPU. The GPU used is recorded in the trial result and in the `result` event's `scoring_card`.
+- A trial whose packing failed (a prediction, scoring or validation error) is recorded as unpacked: not compared and not retrained; its checkpoint stays in ojh's run directory and the next `collect` packs it again; `next` prints the packing error; `launch ... --force` records it as failed (GPU hours still count) and retrains it.
+- When ojh's tmux session is gone, there has been no `DONE` for over 2 minutes (`harness.LOST_GRACE_S`) and no file in the run directory has changed, the trial failed (ended without DONE); `watch`, `collect` and the train command all count it so; after kill-session ojh writes `DONE` only within about 30 seconds, and during that time the trial still counts as running.
+- The candidate manifest's `config` is ojh's `run.lock.yaml`, but the paths that point to labelled data (`data`'s `train`, `select`, `select_index`, `prepared_dir`, `source`; `eval_sets.*`'s `train_labels`, `reference`; `split_file`) are written as null; their sha256 are kept.
+- Checkpoints no longer needed are deleted by `collect` by itself (without asking the user): once a trial is packed and its candidate has passed `rsi validate`, it runs `ojh cleanup --confirm` on the trial's ojh run (deleting the unchosen checkpoints and merged models that `deletion_candidates.json` lists; ojh keeps the chosen one); for a trial whose `DONE` says failed, it deletes all checkpoint directories in the run (`ckpt-step*`, `adapter-step*`, `merged-step*`, `final`, `adapter`, `*.partial`; ojh lists none for a failed run). A rerun trial keeps its replaced runs in its record's `old_run_dirs`, and once their `DONE` appears they are deleted whole the same way (`launch --force` deletes right after the launch succeeds). Unpacked trials, running ones and those without `DONE` are not touched. Deletions are recorded as `cleanup` events; the paths ojh left are recorded in the trial record's `cleanup_left` and reported once; what could not be deleted is only printed, and the next `collect` deletes it.
+- `--ids`: the `registered-<k>.json` the engine writes after registering the first part of the hand-back (`[{"dir", "kind", "id"}]`, only candidates are taken); several may be given; JSON `{"cand-<trial>": "candidate-NNNN"}` is also accepted.
+- On SIGTERM (`rsi stop`), `watch` reads this run's trials again, ends every ojh training still running with `tmux kill-session` (those launched after watch started included), and writes the marker as failed; a background watch that hits any other error also writes a failed marker, with the traceback in `<marker>.log`.
+- Progress file: after `launch`, at every poll of `watch`, and before and after `collect` packs each trial, run.yaml's `framework.progress_file` is rewritten (the brief's `progress_file`, by default `<outdir>/progress.json`; format in the framework's `docs/interfaces/progress.md`): the trainings running and their GPUs, `configs`, `GPU hours`, `incumbent`, and one row per trial (the step count of its state read from `train-s<seed>.log` in ojh's run directory). A write failure only goes to stderr (the background watch's log) and never makes a command fail.
 
-训练命令（契约见 `SKILL.md`）：
+Train command (the contract is in `SKILL.md`):
 
 ```bash
 PYTHONPATH=<repo> <repo>/modules/train/train --task <task.json> --trainset <dir> --trainset-id <id> \
   --valset <dir> --valset-id <id> --config <config.json> --config-source default --round 1 \
-  --producer train --out <候选目录> --marker <完成标记>
+  --producer train --out <candidate_dir> --marker <marker_path>
 ```
 
-- `config.json`：`{"base", "recipe", "overrides", "seed", "max_steps"}`，都可省，默认 joey-1、目录里的默认配方（`recipe: null`）、不改、种子 0。
-- 用任何 `python3` 启动都可以：它会换到 `resources.onejev.python` 里重新运行。
-- 卡：`RSI_TRAIN_GPUS=0`（或 `0,1`）指定；不设时从 `resources.gpu_ids` 里取 nvidia-smi 显示空闲的卡。
-- 机器配置：`resources.onejev.machine`，没写时用 `RSI_ONEJEV_MACHINE`。
-- `RSI_TRAIN_POLL`：检查 ojh 训练是否结束的间隔秒数，默认 60。
-- `--producer` 只接受 `train`（数据模块不训练；旧候选里的 `data` 照常能读）。ojh 的实验名用 `train-<--out 实路径的 sha256 前 8 位>`，同一配置训到不同的 `--out` 不撞名。
-- 训练结束后先等 ojh 的 tmux 会话退出（最多 2 分钟：ojh 写 `DONE` 时还占着卡），再打包；打分首选它训练用的卡，和 `collect --gpu` 一样核对，不合格就换卡；一张合格的卡都没有时每 30 秒（`RSI_TRAIN_POLL` 更短时用它）再试，最多 10 分钟。收到 SIGTERM 或 SIGINT 时结束自己的 ojh 训练（`tmux kill-session`），标记写 failed；ojh 正在启动训练时收到的，等记下 tmux 会话再处理。
-- 开始、每次检查 ojh 训练、结束和失败时重写 `<--out 的父目录>/progress.json`；同一个目录里同时跑两个训练命令时后写的覆盖先写的。
-- 所有候选的 `code_version.sha256` 都是 `train` 这个文件的 sha256。改了 `trsi/` 就把 `train` 里的 `TRSI_VERSION` 和 `trsi/__init__.py` 的 `__version__` 一起改（不一致时训练命令拒绝运行）；ojh 或 OneJev 换版本时改 `OJH_COMMIT`、`ONEJEV_COMMIT`。
+- `config.json`: `{"base", "recipe", "overrides", "seed", "max_steps"}`, all optional, defaulting to joey-1, the directory's default recipe (`recipe: null`), no changes and seed 0.
+- It can be started with any `python3`: it reruns itself in `resources.onejev.python`.
+- GPUs: set with `RSI_TRAIN_GPUS=0` (or `0,1`); when not set, the GPUs in `resources.gpu_ids` that nvidia-smi shows as free are taken.
+- Machine config: `resources.onejev.machine`, else `RSI_ONEJEV_MACHINE`.
+- `RSI_TRAIN_POLL`: the interval in seconds for checking whether the ojh training has ended, default 60.
+- `--producer` accepts only `train` (the data module does not train; `data` in old candidates still reads as before). The ojh experiment name is `train-<the first 8 characters of the sha256 of --out's real path>`, so the same config trained to different `--out`s does not clash.
+- After training it first waits for ojh's tmux session to exit (at most 2 minutes: ojh still holds the GPU when it writes `DONE`), then packs; scoring prefers the GPU it trained on, checked as `collect --gpu` does, and switches GPUs when that one does not qualify; when no GPU qualifies, it tries again every 30 seconds (or every `RSI_TRAIN_POLL` when that is shorter), for at most 10 minutes. On SIGTERM or SIGINT it ends its own ojh training (`tmux kill-session`) and writes the marker as failed; a signal received while ojh is starting the training is handled once the tmux session is recorded.
+- At the start, at every check of the ojh training, at the end and on failure it rewrites `<the parent directory of --out>/progress.json`; when two train commands run in the same directory at once, the later write overwrites the earlier.
+- Every candidate's `code_version.sha256` is the sha256 of this `train` file. When `trsi/` changes, change `TRSI_VERSION` in `train` and `__version__` in `trsi/__init__.py` together (the train command refuses to run when they differ); when ojh or OneJev changes version, change `OJH_COMMIT` and `ONEJEV_COMMIT`.
 
-## 测试
+## Tests
 
-只要 CPU，不需要 ojh 和 GPU：
+CPU only; no ojh and no GPU needed:
 
 ```bash
 python3 -m venv /tmp/trsi-venv && /tmp/trsi-venv/bin/pip install pyyaml pytest
 cd <repo>/modules/train && /tmp/trsi-venv/bin/python -m pytest -q
 ```
 
-在 A100 上用 ojh 的 `.venv`（已有 pyyaml，`pip install pytest` 后）：`cd <repo>/modules/train && <py> -m pytest -q`。
+On the A100, with ojh's `.venv` (which has pyyaml; after `pip install pytest`): `cd <repo>/modules/train && <py> -m pytest -q`.
 
-测试用 `tests/fake_ojh.py` 代替 `ojh`，用 `tests/fake_scorer.py` 代替 `harness.score.score_checkpoint`（打包时设了 `TRSI_TEST_SCORER` 才把它写进 `predict.json`，`model.predict` 只看 `predict.json`），用 `tests/conftest.py` 写的假 `nvidia-smi`、`tmux`；打包用到的 `rsi score`、`rsi validate` 是框架的真命令。框架自己的测试（`<repo>/tests`）不包含这里。
+The tests use `tests/fake_ojh.py` in place of `ojh`, `tests/fake_scorer.py` in place of `harness.score.score_checkpoint` (packing writes it into `predict.json` only when `TRSI_TEST_SCORER` is set, and `model.predict` looks only at `predict.json`), and the fake `nvidia-smi` and `tmux` that `tests/conftest.py` writes; the `rsi score` and `rsi validate` that packing uses are the framework's real commands. The framework's own tests (`<repo>/tests`) do not include these.

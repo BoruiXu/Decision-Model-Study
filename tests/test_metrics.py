@@ -40,7 +40,8 @@ class TestMetrics(unittest.TestCase):
         self.ct = choice_task()  # labels allow, block, review
 
     def test_known_names_and_score_dispatch(self):
-        self.assertEqual(M.KNOWN_METRICS, ("accuracy", "log_loss", "macro_f1", "auc", "auprc", "brier"))
+        self.assertEqual(M.KNOWN_METRICS, ("accuracy", "log_loss", "macro_f1", "auc", "auprc", "brier", "f1",
+                                           "expected_cost"))
         self.assertEqual(M.KNOWN_BASELINES, ("majority", "group_prior"))
         self.assertEqual(sorted(M.METRICS), sorted(M.KNOWN_METRICS))
         self.assertEqual(sorted(M.BASELINES), sorted(M.KNOWN_BASELINES))
@@ -146,6 +147,28 @@ class TestMetrics(unittest.TestCase):
             self.assertTrue(any("%s is defined for binary tasks only" % name in e for e in errs), (name, errs))
             with self.assertRaises(ValueError):
                 M.score(name, [pred("a", {"allow": 1.0, "block": 0.0, "review": 0.0})], [lab("a", "allow", ct)], ct)
+
+    def test_f1_and_expected_cost(self):
+        t = self.bt
+        hard = ["yes", "yes", "no", "yes", "no", "no"]
+        decided = ["yes", "yes", "yes", "yes", "no", "no"]                  # tp 3, fp 1, fn 0
+        labels = [lab("r%d" % i, y, t) for i, y in enumerate(hard)]
+        # the decision counts, not the probabilities (a policy's threshold may say yes below one half)
+        preds = [pred("r%d" % i, {"yes": 0.4, "no": 0.6}, decision=d) for i, d in enumerate(decided)]
+        self.assertAlmostEqual(M.score("f1", preds, labels, t), 6 / 7)
+        self.assertEqual(M.f1(preds[4:], labels[4:], t), 0.0)               # no tp, fp nor fn
+        costs = binary_task()
+        costs["metrics"]["costs"] = {"yes": {"yes": 0, "no": 10}, "no": {"yes": 1, "no": 0}}
+        self.assertAlmostEqual(M.score("expected_cost", preds, labels, costs), (1 * 1 + 10 * 0) / 6)
+        with self.assertRaisesRegex(ValueError, "expected_cost needs metrics.costs"):
+            M.score("expected_cost", preds, labels, t)
+        self.assertEqual((M.HIGHER_IS_BETTER["f1"], M.HIGHER_IS_BETTER["expected_cost"]), (True, False))
+        with self.assertRaisesRegex(ValueError, "binary tasks only"):
+            M.score("f1", [pred("a", {"allow": 1.0, "block": 0.0, "review": 0.0})], [lab("a", "allow", self.ct)],
+                    self.ct)
+        d = M.paired_delta("expected_cost", preds, [dict(p, decision="no") for p in preds], labels, costs, None,
+                           100, 0, 0.9)
+        self.assertAlmostEqual(d["delta"], 1 / 6 - 30 / 6)                  # never yes: 3 misses at 10
 
     def test_predictions_must_match_the_label_ids(self):
         t = self.bt
@@ -301,7 +324,7 @@ class TestCiSettings(unittest.TestCase):
         self.assertTrue(any("guards[0]" in e and "log_loss" in e for e in errors), errors)
         # Unknown metrics keep the direction the task gives.
         t = binary_task()
-        t["metrics"]["primary"] = "expected_cost"
+        t["metrics"]["primary"] = "net_cost"
         t["metrics"]["higher_is_better"] = False
         t["promotion_rule"]["guards"] = []
         self.assertEqual(check_task(t), [])

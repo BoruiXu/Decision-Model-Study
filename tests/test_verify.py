@@ -279,24 +279,24 @@ class TestUnknownPrimary(VerifyCase):
     def test_unknown_primary_listed_once(self):
         # R46: an unknown primary is not verified: its metrics.candidate value always, its delta only when one
         # is expected (best_before set). Either way the note names it once.
-        self.task["metrics"]["primary"] = "expected_cost"
+        self.task["metrics"]["primary"] = "net_cost"
         self.task["metrics"]["higher_is_better"] = False
         self.first_round()
         self.assertEqual(unverified_names("evaluation", self.ws.manifest("evaluation-0001"), self.task),
-                         ["expected_cost"])
+                         ["net_cost"])
         self.ws.next_round()
         self.candidate()
         self.delivery(candidate_id="candidate-0002")
         src = self.eval_src(delivery_id="delivery-0002", candidate_id="candidate-0002", best_before=BEST_BEFORE)
         m = manifest(src)
-        self.assertIn("expected_cost", m["deltas"])
-        self.assertEqual(unverified_names("evaluation", m, self.task), ["expected_cost"])
+        self.assertIn("net_cost", m["deltas"])
+        self.assertEqual(unverified_names("evaluation", m, self.task), ["net_cost"])
         # Without best_before nothing about deltas is listed: with the primary absent from metrics.candidate and
         # metrics.best (not a valid evaluation, only to isolate the rule) the note is empty.
         m["best_before"], m["metrics"]["candidate"], m["metrics"]["best"] = None, {"log_loss": 0.1}, None
         self.assertEqual(unverified_names("evaluation", m, self.task), [])
         m["best_before"] = BEST_BEFORE
-        self.assertEqual(unverified_names("evaluation", m, self.task), ["expected_cost"])
+        self.assertEqual(unverified_names("evaluation", m, self.task), ["net_cost"])
 
 
 class TestScoreThenRegister(VerifyCase):

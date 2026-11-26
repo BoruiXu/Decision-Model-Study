@@ -1,68 +1,68 @@
-# 交付类产物：delivery、feedback
+# Delivery artifacts: delivery, feedback
 
-两类产物由 deliver 产出，目录里有 `manifest.json`，公共字段见 README.md。校验由 `rsi/artifacts.py` 的 `validate_artifact` 完成（额外字段之外不允许出现未列出的字段）。预测行和执行反馈行的格式见 README.md 的「决策样本行」。id 只检查是字符串，是否已登记在登记时核对。
+Both kinds are produced by deliver, and their directories hold a `manifest.json` with the common fields of README.md. Validation is done by `validate_artifact` in `rsi/artifacts.py`: the manifest is checked against the common fields plus the kind's extra fields (no fields that are not listed). The formats of prediction rows and execution feedback rows are in "Decision rows" of README.md. Ids are only checked to be strings; whether they are registered is checked at registration.
 
-## 预测接口
+## Prediction interface
 
-交付包对外提供同一个预测接口：
+The delivery package offers one prediction interface:
 
-- 输入：一个样本的 `state`（输入行的 `state`，格式由任务定义的 `input.format` 决定）。
-- 输出：`{"probs", "decision", "uncertainty"}`，其中 `probs` 是标签到概率的映射，`decision` 是一个标签，`uncertainty` 是 number 或 null。
-- 每次调用写一条执行反馈行，追加到 `trace`：字段 `id`、`state`（这次调用的输入，即输入行的 `state`；旧工作区的 trace 里叫 `input`，登记照样读）、`output`（`probs`、`decision`）、`model`、`latency_ms`、`timestamp`、`outcome`。`outcome` 在真实结果还不知道时为 null，知道后是一个标签。执行反馈行的 `id` 是这次调用的 id，格式由 deliver 自定（不必等于输入行的 id），在一份 `trace` 里不重复即可。
+- Input: one sample's `state` (the input row's `state`, formatted by the task definition's `input.format`).
+- Output: `{"probs", "decision", "uncertainty"}`, where `probs` maps labels to probabilities, `decision` is one label and `uncertainty` is a number or null.
+- Every call writes one execution feedback row, appended to `trace`: the fields `id`, `state` (this call's input, i.e. the input row's `state`; an old workspace's trace calls it `input`, which registration still reads), `output` (`probs`, `decision`), `model`, `latency_ms`, `timestamp`, `outcome`. `outcome` is null while the real outcome is unknown, and a label once it is known. The `id` of an execution feedback row is this call's id, in a format deliver chooses (it need not equal the input row's id), as long as it does not repeat within one `trace`.
 
-接口形式（命令行、函数、HTTP）由交付模块决定，写在 `package.entry`。交付包通常包着候选的预测入口 `model.predict`（见 models.md），但对外以 `package.entry` 为准。
+The form of the interface (command line, function, HTTP) is up to the deliver module and is written in `package.entry`. The delivery package usually wraps the candidate's prediction entry `model.predict` (see models.md), but to the outside `package.entry` is what counts.
 
 ## `delivery`
 
-把一个候选打包成可调用的服务。额外字段：
+Packages a candidate as a callable service. Extra fields:
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `kind` | 固定 `"delivery"` | 产物类别 |
-| `candidate_id` | string | 被交付的候选 |
-| `evalset_id` | string | `predictions_eval` 所在的评测集，必须是当前评测集 |
-| `valset_id` | string | `predictions_val` 所在的验证集，必须是候选的 `valset_id`（见「复现候选的验证集预测」） |
-| `testset_id` | string，可选 | 用到 testset 时必填 |
-| `package` | object | 交付包，见下 |
-| `runtime` | object | 运行指标，见下 |
+| `kind` | always `"delivery"` | Artifact kind |
+| `candidate_id` | string | The candidate delivered |
+| `evalset_id` | string | The evalset of `predictions_eval`; must be the current evalset |
+| `valset_id` | string | The valset of `predictions_val`; must be the candidate's `valset_id` (see "Reproducing the candidate's valset predictions") |
+| `testset_id` | string, optional | Required when the testset is used |
+| `package` | object | The delivery package, see below |
+| `runtime` | object | Runtime metrics, see below |
 
-`package` 的子字段：`location`（交付包位置，见下）；`entry`（调用入口，写明接口形式和调用方法）；`environment`（运行环境说明）。
+The sub-fields of `package`: `location` (where the delivery package is, see below); `entry` (the call entry, stating the interface's form and how to call it); `environment` (a description of the runtime environment).
 
-`runtime` 的子字段：
+The sub-fields of `runtime`:
 
-- `latency_ms_p50`、`latency_ms_p95`：预测接口每次调用的墙钟耗时（毫秒）在评测集输入上的中位数和 95 分位数，一次调用处理一个样本；加载模型的时间不算在内。
-- `cost_unit`：string，可选，成本的单位，例如 `usd`、`gpu_seconds`。
-- `cost_per_1k`：number 或 null，做 1000 次预测的成本，单位是 `cost_unit`；不知道时为 null。
-- `consistent_with_offline`：bool，含义固定为下面的复现检查：交付包在验证集输入上的预测与候选的 `predictions_val` 一致。
+- `latency_ms_p50`, `latency_ms_p95`: the median and 95th percentile, over the evalset inputs, of the wall-clock time (milliseconds) of each call of the prediction interface, one sample per call; the time to load the model is not counted.
+- `cost_unit`: string, optional, the unit of the cost, e.g. `usd`, `gpu_seconds`.
+- `cost_per_1k`: a number or null, the cost of 1000 predictions in `cost_unit`; null when unknown.
+- `consistent_with_offline`: bool, whose meaning is fixed as the reproduction check below: the delivery package's predictions on the valset inputs agree with the candidate's `predictions_val`.
 
-必备文件：`predictions_eval`（交付包在评测集 `inputs.jsonl` 上的预测）、`predictions_val`（交付包在验证集 `inputs.jsonl` 上的预测）；可选 `predictions_test`、`trace`，只有出现在 `files` 里才会校验。目录内检查：预测行合法；`runtime.consistent_with_offline` 为 false 时报错；`package.location` 合法（见下）；有 `predictions_test` 就必须有 `testset_id`；有 `trace` 时执行反馈行合法。
+Required files: `predictions_eval` (the delivery package's predictions on the evalset's `inputs.jsonl`) and `predictions_val` (the delivery package's predictions on the valset's `inputs.jsonl`); optional `predictions_test` and `trace`, validated only when they appear in `files`. Checks inside the directory: valid prediction rows; an error when `runtime.consistent_with_offline` is false; a valid `package.location` (see below); `testset_id` required with `predictions_test`; valid execution feedback rows when there is a `trace`.
 
-**交付包自包含。** `package.location` 只能是两种形式之一：
+**The delivery package is self-contained.** `package.location` may take only one of two forms:
 
-- 相对交付目录的路径（文件或目录），写法上不能跳出交付目录（不以 `..` 走出去），并且存在。登记时整个交付目录被复制进工作区，交付包随之进入 `<ws>/artifacts/<delivery id>/`，所以登记后的交付包不再依赖模块的工作目录。
-- `external:<名字>`：指公共字段 `external` 里的同名条目，它带有位置和 sha256，用于放不进目录的大包。本机上的条目（`location` 为 `/绝对路径`）必须是单个文件，例如打好的 tar 包，因为校验和登记要算它的 sha256；目录先打包再登记。远端条目（`主机:/路径`）不核对。
+- A path relative to the delivery directory (file or directory) that, as written, does not leave the delivery directory (does not go out through `..`) and exists. At registration the whole delivery directory is copied into the workspace, and the delivery package with it into `<ws>/artifacts/<delivery id>/`, so after registration the delivery package no longer depends on the module's working directory.
+- `external:<name>`: the entry of the same name in the common field `external`, which carries a location and a sha256, for a package too large for the directory. An entry on this machine (`location` `/absolute/path`) must be a single file, e.g. a tar archive, since validation and registration compute its sha256; pack a directory before registering it. A remote entry (`host:/path`) is not checked.
 
-绝对路径一律拒绝。交付目录里可以有符号链接（例如交付包里的 `python3 -m venv` 环境链接到系统的解释器）：登记时复制的是链接指向的内容，登记后的交付包里是实际的文件，不再依赖链接的目标。指向不存在的文件的链接一律拒绝。`rsi report` 列出的模型包是登记后的路径 `<ws>/artifacts/<id>/<location>`，或 `external` 条目的位置和 sha256。
+Absolute paths are always refused. The delivery directory may contain symlinks (e.g. a `python3 -m venv` environment in the delivery package linking to the system interpreter): registration copies what the link points to, and the registered delivery package holds the actual files and no longer depends on the link's target. A link to a file that does not exist is always refused. The model package `rsi report` lists is the registered path `<ws>/artifacts/<id>/<location>`, or the location and sha256 of the `external` entry.
 
-**复现候选的验证集预测。** deliver 拿到候选所用验证集的 `inputs.jsonl`（不带标签），用交付包的预测接口跑出 `predictions_val`，`valset_id` 写这个验证集。登记时核对：
+**Reproducing the candidate's valset predictions.** deliver gets the `inputs.jsonl` of the candidate's valset (without labels), runs `predictions_val` through the delivery package's prediction interface, and writes this valset in `valset_id`. Registration checks:
 
-- `valset_id` 已登记，并且等于候选的 `valset_id`（候选的 `predictions_val` 就在那个验证集上）。
-- `predictions_val` 恰好覆盖该验证集的 id。
-- 每一行与候选 `predictions_val` 的同 id 行一致：每个标签的概率相差不超过任务定义的 `delivery.reproduction_tolerance`（不写时 1e-6，见 task.md；`uncertainty` 不比），`decision` 相同。
-- 概率都在容差之内、只有 `decision` 不同的行（靠近决策边界的行）最多 floor(`delivery.max_decision_mismatch_rate` × 验证集行数) 行，不写时为 0 行；有这样的行并被放过时，`rsi register` 在输出行末尾加 `(decision mismatches: <行数>)`。决策不同而且有概率超出容差的行不算在放宽里，照常拒绝。
+- `valset_id` is registered and equals the candidate's `valset_id` (the candidate's `predictions_val` are on that valset).
+- `predictions_val` covers exactly that valset's ids.
+- Each row agrees with the row of the same id in the candidate's `predictions_val`: each label's probability differs by at most the task definition's `delivery.reproduction_tolerance` (1e-6 when not written, see task.md; `uncertainty` is not compared), and `decision` is the same.
+- Rows whose probabilities are all within the tolerance and only `decision` differs (rows near the decision boundary) may number at most floor(`delivery.max_decision_mismatch_rate` × the valset's row count), 0 rows when not written; when there are such rows and they are let through, `rsi register` appends `(decision mismatches: <rows>)` to its output line. Rows whose decision differs and some probability is outside the tolerance are not covered by this loosening and are refused as usual.
 
-`runtime.consistent_with_offline` 指的就是这项检查。复现不成立时，即使标志写 true 也拒绝登记，错误信息给出不一致的行数和前几行的差别。这样交付包确实是那个候选，评测集上的成绩才能算在候选头上。
+`runtime.consistent_with_offline` refers to exactly this check. When the reproduction fails, registration refuses even if the flag says true, the error giving the number of rows that disagree and the differences of the first few. So the delivery package really is that candidate, and its results on the evalset can be credited to the candidate.
 
-登记时另外核对：`candidate_id` 已登记且通过了训练门（`train_gate.passed` 为 true，否则拒绝并写明训练门没过）；`evalset_id` 是当前评测集，`predictions_eval` 恰好覆盖它的 id；有 `predictions_test` 时 `testset_id` 是当前 testset、预测恰好覆盖它的 id，并且本轮有一次未用过的 `use_testset` 审批。
+Registration also checks: `candidate_id` is registered and passed the train gate (`train_gate.passed` true; otherwise refused, saying the train gate was not passed); `evalset_id` is the current evalset, and `predictions_eval` covers exactly its ids; with `predictions_test`, `testset_id` is the current testset, the predictions cover exactly its ids, and this round has a `use_testset` approval not yet used.
 
 ## `feedback`
 
-线上或试运行收集的执行反馈。额外字段：
+Execution feedback collected online or in a trial run. Extra fields:
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `kind` | 固定 `"feedback"` | 产物类别 |
-| `delivery_id` | string | 反馈来自哪个 delivery |
-| `candidate_id` | string | 反馈来自哪个候选 |
+| `kind` | always `"feedback"` | Artifact kind |
+| `delivery_id` | string | The delivery the feedback comes from |
+| `candidate_id` | string | The candidate the feedback comes from |
 
-`delivery_id` 和 `candidate_id` 至少要有一个。必备文件：`trace`。目录内检查：每行是合法的执行反馈行（`outcome` 必须是标签或 null）。
+At least one of `delivery_id` and `candidate_id` must be given. Required file: `trace`. Checks inside the directory: every row is a valid execution feedback row (`outcome` must be a label or null).

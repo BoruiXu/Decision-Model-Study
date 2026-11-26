@@ -1,6 +1,7 @@
-"""install_env.sh --check against a fake ojh repo (a venv whose python is this interpreter without site-packages (-S)
-plus fake torch/transformers/fla packages, a fake Hopper nvidia-smi and a fake CUDA 12.8 nvcc; no network, no GPU,
-nothing installed or edited), and the machine config edit of install_env.py."""
+"""install_env.sh against a fake ojh repo (a venv whose python is this interpreter without site-packages (-S)
+plus fake torch/transformers/fla packages, a fake Hopper nvidia-smi and a fake CUDA 12.8 nvcc; no network, no GPU):
+--check, which installs or edits nothing; an install whose compare libraries fail (a fake uv), which only warns; the
+machine config edit of install_env.py; and install_deps.sh --check."""
 import os
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from conftest import MODULE
 
 SCRIPT = MODULE / "install_env.sh"
 HELPER = MODULE / "install_env.py"
+DEPS = MODULE.parent / "common" / "install_deps.sh"
 SYSTEM_PATH = ":".join(d for d in ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
                        if os.path.isdir(d))
 DIST = {"torch": "2.8.0+cu128", "triton": "3.4.0", "transformers": "5.19.0", "flash-linear-attention": "0.5.2"}
@@ -30,8 +32,9 @@ def executable(path, text):
     path.chmod(0o755)
 
 
-def test_check_prints_the_plan_and_changes_nothing(tmp_path):
-    tmp = tmp_path.resolve()
+def fake_ojh(tmp, gpu=True):
+    """(ojh repo, site-packages, fake bin dir, CUDA home, machine.yaml, environment) of a fake ojh install under tmp;
+    gpu False: nvidia-smi finds no GPU."""
     ojh, site, fakebin, cuda = tmp / "ojh", tmp / "site", tmp / "bin", tmp / "cuda-12.8"
     for rel, text in MODULES.items():
         (site / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -47,16 +50,22 @@ def test_check_prints_the_plan_and_changes_nothing(tmp_path):
                'exec %s -S "$@"\n' % (site, sys.executable))
     executable(ojh / ".venv" / "bin" / "ojh", "#!/bin/sh\necho '[ ok ] python'\necho 'no blocking problem'\n")
     executable(fakebin / "nvidia-smi", '#!/bin/sh\ncase "$1" in --query-gpu=*) '
-               'echo "0, GPU-fake0, NVIDIA H100 PCIe, 9.0, 10, 81559" ;; esac\n')
+               'echo "0, GPU-fake0, NVIDIA H100 PCIe, 9.0, 10, 81559" ;; esac\n' if gpu else "#!/bin/sh\n")
     executable(cuda / "bin" / "nvcc", "#!/bin/sh\necho 'Cuda compilation tools, release 12.8, V12.8.93'\n")
     machine = tmp / "ojh-home" / "machine.yaml"
     machine.parent.mkdir()
     machine.write_text('# fake machine config\npython: %s/.venv/bin/python\nenv:\n  HF_HUB_OFFLINE: "1"  # keep\n'
                        % ojh)
-    before = machine.read_bytes()
     env = {k: v for k, v in os.environ.items() if k not in ("OJH_TOOLS_DIR", "CUDA_PATH", "CUDA_VISIBLE_DEVICES")}
     env.update(PATH="%s:%s" % (fakebin, os.environ["PATH"]), CUDA_HOME=str(cuda), http_proxy="http://127.0.0.1:9",
                https_proxy="http://127.0.0.1:9")
+    return ojh, site, fakebin, cuda, machine, env
+
+
+def test_check_prints_the_plan_and_changes_nothing(tmp_path):
+    tmp = tmp_path.resolve()
+    ojh, site, fakebin, cuda, machine, env = fake_ojh(tmp)
+    before = machine.read_bytes()
 
     out = subprocess.run(["bash", str(SCRIPT), "--ojh", str(ojh), "--machine", str(machine), "--check"], env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=120)
@@ -73,6 +82,8 @@ def test_check_prints_the_plan_and_changes_nothing(tmp_path):
             "would    install pytest (with constraints.txt)",
             "from the prebuilt wheel %s (https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/%s)"
             % (wheel, wheel.replace("+", "%2B")),
+            "missing scikit-learn",
+            "would    install modules/common/requirements.txt (install_deps.sh; not required: training does not",
             "would    install tilelang==0.1.15",
             "would set CUDA_HOME: None -> %s" % cuda,
             "would set PATH: None -> %s/bin:%s/.venv/bin:%s\n" % (cuda, ojh, SYSTEM_PATH),   # never the caller's
@@ -86,6 +97,26 @@ def test_check_prints_the_plan_and_changes_nothing(tmp_path):
     assert machine.read_bytes() == before
     assert sorted(p.name for p in machine.parent.iterdir()) == ["machine.yaml"]   # no backup, no cache dir
     assert not (tmp / "setup-ran").exists()
+
+
+def test_the_compare_libraries_never_block_training(tmp_path):
+    # Step 3 (install_deps.sh) failing only warns (training does not need them; ③ Compare is a report), unless the
+    # install moved a protected version such as torch's.
+    tmp = tmp_path.resolve()
+    ojh, site, fakebin, cuda, machine, env = fake_ojh(tmp, gpu=False)
+    executable(fakebin / "uv", '#!/bin/sh\ncase "$*" in --version) echo "uv 0.0.0" ;;\n'
+               '  *" -r "*) [ "$FAKE_UV" = move-torch ] || exit 1\n'
+               '    rm -rf %s/torch-*.dist-info; mkdir %s/torch-9.9.9.dist-info\n'
+               '    printf "Metadata-Version: 2.1\\nName: torch\\nVersion: 9.9.9\\n" \\\n'
+               '      > %s/torch-9.9.9.dist-info/METADATA ;;\nesac\n' % (site, site, site))
+    for fake_uv, expected in (("fail", "warn     numpy, scikit-learn, xgboost not installed (install_deps.sh exit 1"),
+                              ("move-torch", "failed   torch changed from 2.8.0+cu128 to 9.9.9 by: install_deps.sh")):
+        text = subprocess.run(["bash", str(SCRIPT), "--ojh", str(ojh), "--machine", str(machine), "--no-gpu-test"],
+                              env=dict(env, FAKE_UV=fake_uv), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=120).stdout
+        assert expected in text, "%r not in:\n%s" % (expected, text)
+        failed = text.split("\n  failed:\n")[-1] if "\n  failed:\n" in text else ""
+        assert ("install_deps.sh" in failed) == (fake_uv == "move-torch"), text
 
 
 def test_machine_env_edit_applies_once_keeps_comments_and_crlf(tmp_path):
@@ -123,3 +154,33 @@ def test_machine_env_edit_applies_once_keeps_comments_and_crlf(tmp_path):
     crlf = (tmp_path / "crlf" / "machine.yaml").read_bytes()
     assert crlf.count(b"\r\n") == crlf.count(b"\n") and b"lock_dir: /locks\r\n" in crlf
     assert "# full PATH" in (tmp_path / "path" / "machine.yaml").read_text()   # a replaced key keeps its comment
+
+
+def fake_python(tmp, missing=()):
+    """A python (this interpreter without site-packages) that has numpy, scikit-learn, xgboost and pyyaml at the
+    versions requirements.txt asks for, but for the import names in `missing`."""
+    site = tmp / "deps-site"
+    for name, mod, version in (("numpy", "numpy", "2.2.6"), ("scikit_learn", "sklearn", "1.9.1"),
+                               ("xgboost", "xgboost", "3.2.0"), ("PyYAML", "yaml", "6.0.2")):
+        if mod in missing:
+            continue
+        (site / mod).mkdir(parents=True)
+        (site / mod / "__init__.py").write_text("__version__ = %r\n" % version)
+        info = site / ("%s-%s.dist-info" % (name, version))
+        info.mkdir()
+        (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n" % (name, version))
+    fake = tmp / "fake-python"
+    executable(fake, '#!/bin/sh\nPYTHONPATH=%s exec %s -S "$@"\n' % (site, sys.executable))
+    return str(fake)
+
+
+def run(args):
+    return subprocess.run(["bash"] + [str(a) for a in args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True, timeout=60)
+
+
+def test_install_deps_check_reports_what_is_missing(tmp_path):
+    fake = fake_python(tmp_path, missing={"sklearn"})        # a script that fails `import sklearn`
+    p = run([DEPS, "--python", fake, "--check"])
+    assert p.returncode == 1 and "missing scikit-learn" in p.stdout
+    assert "ok pyyaml 6.0.2" in p.stdout                     # requirements.txt's pyyaml, imported as yaml

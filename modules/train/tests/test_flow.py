@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 import fake_ojh
-from conftest import MM, REPO, age, wait_for
+from conftest import EL, MM, REPO, age, wait_for
 from rsi.progress import read_progress
 from trsi import archive, harness, progress
 from trsi.cli import spent
@@ -256,20 +256,23 @@ def test_progress_rows_and_facts(env, monkeypatch):
     assert code == 0, err
     path = env.out / "progress.json"
     p = json.loads(path.read_text())
-    assert [f["label"] for f in p["facts"]] == ["配置", "GPU 小时", "当前方案"]
+    assert [f["label"] for f in p["facts"]] == ["configs", "GPU hours", "incumbent"]
     (tid, rec), = archive.trials(load_run(env.run)).items()
     (row,) = p["table"]["rows"]
-    assert row[:5] == [tid, "起点", 0, "训练 5/32 步 · 剩约 12 分", "2"]
-    assert "1 个训练在跑" in p["summary"]
+    assert row[:5] == [tid, "start", 0, "training step 5/32 · about 12 min left", "2"]
+    assert p["summary"] == "training 1 trial (GPU 2)"
+    assert (progress._count(3, "trial"), progress._gpus(["0", "4, 6"])) == ("3 trials", "GPUs 0, 4, 6")
     assert read_progress(str(path))["problems"] == []
     monkeypatch.delenv("FAKE_OJH_PENDING")
     fake_ojh.finish_pending(rec["run_dir"])
     launched = progress._epoch(archive.events(load_run(env.run), "launch")[-1]["t"])
     os.utime(Path(rec["run_dir"]) / "DONE", (launched + 360, launched + 360))   # trained 6 minutes
     assert env.trsi("collect", env.run)[0] == 0
-    (row,) = json.loads(path.read_text())["table"]["rows"]
-    assert row[3] == "完成" and isinstance(row[6], float)
-    assert row[5] == "6 分"        # to when ojh wrote DONE, not to when collect packed it
+    p = json.loads(path.read_text())
+    (row,) = p["table"]["rows"]
+    assert row[3] == "done" and isinstance(row[6], float)
+    assert p["summary"] == "nothing training: 1 done"
+    assert row[5] == "6 min"        # to when ojh wrote DONE, not to when collect packed it
 
 
 def test_progress_failure_never_stops_the_watch(env, monkeypatch):
@@ -296,3 +299,42 @@ def test_progress_failure_never_stops_the_watch(env, monkeypatch):
         marker = env.out / "trsi" / "watch-2.marker"
         code = env.trsi("watch", env.run, "--marker", marker, "--foreground", "--poll", 0.01)[0]
     assert code == 0 and marker.read_text().splitlines()[0] == "ok"
+
+
+def test_candidate_carries_its_policy(env, tmp_path, monkeypatch):
+    # The task's policy section: the train command fits a decision policy on the valset predictions, keeps the raw
+    # ones, and model.predict applies the policy, so its output is the candidate's predictions_val byte for byte. Two
+    # policies, each always accepted (min_lo -1): platt on log_loss (new probabilities), and a max_f1 threshold on
+    # low scores (positives below one half: decisions that are not the most probable label).
+    for k, v in (("RSI_TRAIN_GPUS", "1"), ("RSI_TRAIN_POLL", "0.05"), ("FAKE_TMUX_GONE", "1")):
+        monkeypatch.setenv(k, v)
+    (tmp_path / "c.json").write_text(json.dumps({"base": "elephant-1", "recipe": EL, "seed": 0}))
+    for name, policy, shift in (("platt", {"objective": "log_loss", "calibrations": ["platt"], "min_lo": -1}, "0"),
+                                ("f1", {"objective": "f1", "calibrations": ["none"], "min_lo": -1}, "2")):
+        monkeypatch.setenv("FAKE_SCORER_SHIFT", shift)
+        env.write_task(policy=policy)
+        cand, marker = tmp_path / name, tmp_path / f"{name}.marker"
+        p = subprocess.run(env.train_argv(tmp_path / "c.json", cand, marker), capture_output=True, text=True,
+                           env={**os.environ, "PYTHONPATH": str(REPO)})
+        assert p.returncode == 0 and marker.read_text().splitlines() == ["ok"], p.stderr
+        for f in ("policy.json", "policy_report.json", "policy_apply.py", "predictions_val_raw.jsonl"):
+            assert (cand / f).exists()
+        policy = json.loads((cand / "policy.json").read_text())
+        assert policy["accepted"], policy["reason"]
+        assert (cand / "predictions_val.jsonl").read_bytes() != (cand / "predictions_val_raw.jsonl").read_bytes()
+        m = json.loads((cand / "manifest.json").read_text())
+        assert (m["files"]["policy"], m["files"]["policy_report"]) == ({"path": "policy.json"},
+                                                                       {"path": "policy_report.json"})
+        assert m["files"]["predictions_val_raw"]["rows"] == 100
+        assert env.rsi("validate", "candidate", cand, "--task", env.task_json).returncode == 0
+        sc = env.rsi("score", "--task", env.task_json, "--labels", env.valset / "rows.jsonl", "--predictions",
+                     cand / "predictions_val.jsonl")
+        assert json.loads(sc.stdout)["metrics"] == m["metrics_val"]      # what registration recomputes
+        p = subprocess.run([str(cand / "predict"), "--inputs", str(env.valset / "inputs.jsonl"), "--out",
+                            str(tmp_path / "p.jsonl")], capture_output=True, text=True, cwd=tmp_path)
+        assert p.returncode == 0, p.stderr
+        assert (tmp_path / "p.jsonl").read_bytes() == (cand / "predictions_val.jsonl").read_bytes()
+        assert not (cand / "__pycache__").exists()                       # the candidate directory is left as packed
+    assert policy["calibration"]["method"] == "none" and policy["decision"]["threshold"] < 0.5
+    rows = [json.loads(x) for x in (cand / "predictions_val.jsonl").read_text().splitlines()]
+    assert any(r["decision"] == "yes" and r["probs"]["yes"] < 0.5 for r in rows)   # a threshold decision

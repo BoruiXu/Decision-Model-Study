@@ -1,10 +1,15 @@
 """Data quality: the profile of a list of rows, the trainset quality gate and cleaning (check --write).
 
-dset computes four checks of the task's quality_checks itself (spec §6): min_rows, min_positive_rows (binary tasks),
-max_duplicate_rate (the share of rows whose input an earlier row has) and max_conflict_rate (the share of rows whose
-input has more than one hard label). A min_ check passes at value >= threshold, a max_ check at value <= threshold. The
-module agent computes any other name of quality_checks and hands it over (--checks: [{name, value, threshold,
-passed}]); a name of the task's that neither computes is an error.
+dset computes five checks of the task's quality_checks itself (spec §6): min_rows, min_positive_rows (binary tasks),
+max_duplicate_rate (the share of rows whose input an earlier row has), max_conflict_rate (the share of rows whose
+input has more than one hard label) and max_synthetic_share (the share of rows dgen generated: meta.source starting
+with "dgen:"). A min_ check passes at value >= threshold, a max_ check at value <= threshold. The module agent computes
+any other name of quality_checks and hands it over (--checks: [{name, value, threshold, passed}]); a name of the
+task's that neither computes is an error.
+
+A prompt variant (rsi.rows.is_variant) rewrites its seed's prompt and adds no data: the five checks are computed on the
+other rows, a variant is no duplicate of its seed, and clean keeps a variant right after its seed while the seed stays
+unchanged.
 """
 import copy
 import math
@@ -15,7 +20,8 @@ from rsi.metrics import hard_label
 
 from . import DsetError
 
-COMPUTED = ("min_rows", "min_positive_rows", "max_duplicate_rate", "max_conflict_rate")
+COMPUTED = ("min_rows", "min_positive_rows", "max_duplicate_rate", "max_conflict_rate", "max_synthetic_share")
+SYNTHETIC = "dgen:"  # the meta.source prefix of the rows dgen generated
 CHECK_KEYS = ("name", "value", "threshold", "passed")
 
 
@@ -29,10 +35,13 @@ def label_counts(rows, task):
 
 
 def _by_input(rows, task):
-    """input fingerprint -> [the hard labels of its rows (a set), its rows], in first-seen order."""
+    """input fingerprint -> [the hard labels of its rows (a set), its rows], in first-seen order; prompt variants (each
+    a rewrite of its seed, maybe with its very state) are left out."""
     labels = task["decision"]["labels"]
     out = {}
     for r in rows:
+        if R.is_variant(r):
+            continue
         entry = out.setdefault(R.input_fingerprint(R.state_of(r)), [set(), []])
         entry[0].add(hard_label(r["target"], labels))
         entry[1].append(r)
@@ -49,11 +58,38 @@ def profile(rows, task):
             "conflicting_inputs": len(conflicting), "conflicting_rows": sum(len(rs) for rs in conflicting)}
 
 
+def _source(row):
+    meta = row.get("meta")
+    source = meta.get("source") if isinstance(meta, dict) else None
+    return source if isinstance(source, str) else None
+
+
+def synthetic_share(rows):
+    """The share of the rows whose meta.source starts with "dgen:" (0.0 for no rows)."""
+    n = sum(1 for r in rows if (_source(r) or "").startswith(SYNTHETIC))
+    return n / float(len(rows)) if rows else 0.0
+
+
+def by_source(rows, task):
+    """{"<source prefix>|<label_source>|<hard label>": rows}, sorted by key: the source prefix is meta.source up to its
+    first ":" ("dgen" for "dgen:smote")."""
+    labels = task["decision"]["labels"]
+    out = {}
+    for r in rows:
+        meta = r["meta"]
+        key = "%s|%s|%s" % ((_source(r) or "").split(":", 1)[0], meta.get("label_source"),
+                            hard_label(r["target"], labels))
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
 def _computed(rows, task):
+    rows = [r for r in rows if not R.is_variant(r)]
     p = profile(rows, task)
     n = p["rows"]
     out = {"min_rows": n, "max_duplicate_rate": p["duplicate_inputs"] / float(n) if n else 0.0,
-           "max_conflict_rate": p["conflicting_rows"] / float(n) if n else 0.0}
+           "max_conflict_rate": p["conflicting_rows"] / float(n) if n else 0.0,
+           "max_synthetic_share": synthetic_share(rows)}
     d = task["decision"]
     if d["type"] == "binary":
         out["min_positive_rows"] = p["label_counts"][d["positive"]]
@@ -114,7 +150,7 @@ def clean(rows, task, mode):
     """check --write: drop: the rows of an input with more than one hard label all go, of any other input only its
     first row stays; merge: the rows of each input become its first row with the target their n_obs-weighted mean (the
     labels any of them names, in the task's order) and n_obs their sum. Rows keep the order of their input's first
-    row."""
+    row; a prompt variant follows its seed while the seed stays unchanged (_with_variants)."""
     labels = task["decision"]["labels"]
     out = []
     for found, rs in _by_input(rows, task).values():
@@ -133,4 +169,22 @@ def clean(rows, task, mode):
                              for label in named)
         row["meta"]["n_obs"] = total
         out.append(row)
+    return _with_variants(out, rows)
+
+
+def _with_variants(kept, rows):
+    """`kept` (cleaned rows), each followed by the prompt variants of `rows` whose seed it is, unchanged: a variant of a
+    seed that was dropped or merged goes too."""
+    variants = {}
+    for r in rows:
+        if R.is_variant(r):
+            variants.setdefault(r["meta"]["extra"].get("variant_of"), []).append(r)
+    if not variants:
+        return kept
+    seeds = dict((id(r), r) for r in rows if not R.is_variant(r))
+    out = []
+    for r in kept:
+        out.append(r)
+        if id(r) in seeds:  # the row itself, not a merged copy
+            out += variants.get(r.get("id"), [])
     return out

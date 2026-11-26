@@ -21,9 +21,9 @@ def iso(dt):
 
 class TestFormat(unittest.TestCase):
     def test_format_duration_and_start(self):
-        cases = {0: "不到 1 分钟", 59: "不到 1 分钟", 60: "1 分钟", 3599: "59 分钟", 3600: "1 小时",
-                 3660: "1 小时 1 分", 7380: "2 小时 3 分", 86399: "23 小时 59 分", 86400: "1 天 0 小时",
-                 90061: "1 天 1 小时"}
+        cases = {0: "under a minute", 59: "under a minute", 60: "1 minute", 3599: "59 minutes", 3600: "1 hour",
+                 3660: "1 hour 1 minute", 7380: "2 hours 3 minutes", 86399: "23 hours 59 minutes",
+                 86400: "1 day 0 hours", 90061: "1 day 1 hour", 180000: "2 days 2 hours"}
         for s, text in cases.items():
             self.assertEqual(T.format_duration(s), text)
         now = datetime.datetime(2026, 11, 22, 15, 0, 0)  # naive: local
@@ -87,7 +87,15 @@ class TestWindows(TimingCase):
         w = T.round_windows(ws)
         self.assertEqual(w[2]["start"], ws.state["rounds"]["1"]["decision"]["at"])
         self.assertTrue(w[2]["approx"])
-        self.assertIn("约", T.elapsed_text(ws, datetime.datetime.now()))
+        later = datetime.datetime.now() + datetime.timedelta(hours=1)
+        self.assertIn("running for about 1 hour", T.elapsed_text(ws, later))
+        self.assertNotIn("about", T.elapsed_text(ws, datetime.datetime.now()))  # never "about under a minute"
+        # The live labels still say the start is approximated, so the page script adds "about" after a minute.
+        page = TD.pages(self.ws)[TD.ROUNDS]
+        head = page.split("</header>")[0]
+        self.assertRegex(head, r'<span class="chip time" data-start="[^"]+" data-prefix="running for " '
+                               r'data-suffix="[^"]*" data-approx="1">running for under a minute')
+        self.assertIn('data-approx="1">under a minute so far<', TD.round_block(page, 2).split("</summary>")[0])
 
     def test_elapsed_text(self):
         ws = Workspace(self.ws)
@@ -95,11 +103,12 @@ class TestWindows(TimingCase):
         local = start.astimezone().replace(tzinfo=None)
         now = local + datetime.timedelta(hours=2, minutes=13)
         text = T.elapsed_text(ws, now)
-        self.assertTrue(text.startswith("已运行 2 小时 13 分（"), text)
-        self.assertRegex(text, r"（\d\d:\d\d 开始）$" if now.date() == local.date() else r"（\d\d-\d\d \d\d:\d\d 开始）$")
+        self.assertTrue(text.startswith("running for 2 hours 13 minutes ("), text)
+        self.assertRegex(text, r"\(started \d\d:\d\d\)$" if now.date() == local.date()
+                         else r"\(started \d\d-\d\d \d\d:\d\d\)$")
         later = local + datetime.timedelta(days=2, hours=1)
         text = T.elapsed_text(ws, later)
-        self.assertIn("2 天", text)
+        self.assertIn("2 days", text)
         self.assertRegex(text, r"\d\d-\d\d \d\d:\d\d")
         ws.stop("alice", "done")  # stopped: the whole run
         def fn(s):
@@ -107,27 +116,28 @@ class TestWindows(TimingCase):
             s["stopped"]["at"] = "2026-11-22T03:48:30Z"
         self.edit_state(fn)
         ws = Workspace(self.ws)
-        self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "共运行 2 小时 48 分")
+        self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "total time: 2 hours 48 minutes")
 
 
 class TestReport(TimingCase):
     def test_report_shows_durations(self):
         ws = self.two_rounds()
         text = report_markdown(ws)
-        self.assertIn("- 已运行：", text)
+        self.assertIn("- Elapsed: ", text)
         rows = [l for l in text.splitlines() if l.startswith("| 2 |")]
-        self.assertNotIn("进行中", rows[0])  # round 2 is decided: "已 N 分钟", as on the rounds page
-        self.assertRegex(rows[0], r"\| 已 [^|]*分")
+        self.assertNotIn("in progress", rows[0])  # round 2 is decided: "N minutes so far", as on the rounds page
+        self.assertRegex(rows[0], r"\| [^|]*minute[^|]* so far \|$")
         ws.stop("alice", "enough")
         text = report_markdown(Workspace(self.ws))
-        self.assertIn("- 总用时：", text)
-        self.assertNotIn("- 已运行：", text)
-        head = [l for l in text.splitlines() if l.startswith("| 轮次")][0]
-        self.assertIn("用时", head)
-        self.assertNotIn("进行中", text)
+        self.assertIn("- Total time: ", text)
+        self.assertNotIn("- Elapsed: ", text)
+        head = [l for l in text.splitlines() if l.startswith("| Round")][0]
+        self.assertIn("Elapsed", head)
+        self.assertNotIn("in progress", text)
         self.strip_opened()
-        self.assertIn("约", report_markdown(Workspace(self.ws)))
-        # 总用时 counts from the first `rsi run` (its first action in run.jsonl), not from `rsi init` hours before; so
+        self.edit_state(lambda s: s["stopped"].update(at=iso(datetime.datetime.now() + datetime.timedelta(hours=1))))
+        self.assertIn("- Total time: about 1 hour", report_markdown(Workspace(self.ws)))
+        # The total time counts from the first `rsi run` (its first action in run.jsonl), not from `rsi init` hours before; so
         # does round 1's time.
         self.edit_state(lambda s: (s["rounds"]["1"].update(opened_at="2026-11-22T01:00:00Z"),
                                    s["rounds"]["2"].update(opened_at="2026-11-22T09:00:00Z"),
@@ -135,13 +145,13 @@ class TestReport(TimingCase):
         with open(os.path.join(self.ws, "work", "run.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps({"at": "2026-11-22T08:20:00Z", "event": "action", "step": 1}) + "\n")
         text = report_markdown(Workspace(self.ws))
-        self.assertIn("- 总用时：1 小时 5 分（", text)
-        self.assertRegex([l for l in text.splitlines() if l.startswith("| 1 |")][0], r"\| 40 分钟 \|$")
+        self.assertIn("- Total time: 1 hour 5 minutes (", text)
+        self.assertRegex([l for l in text.splitlines() if l.startswith("| 1 |")][0], r"\| 40 minutes \|$")
         # Final review B-1: the pages count the same way (top bar and round 1's chip).
         ws = Workspace(self.ws)
-        self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "共运行 1 小时 5 分")
+        self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "total time: 1 hour 5 minutes")
         self.assertEqual(T.round_windows(ws)[1]["start"], "2026-11-22T08:20:00Z")
-        self.assertIn("40 分钟", TD.round_block(TD.pages(self.ws)[TD.ROUNDS], 1).split("</summary>")[0])
+        self.assertIn("40 minutes", TD.round_block(TD.pages(self.ws)[TD.ROUNDS], 1).split("</summary>")[0])
 
 
 class TestReportClock(TimingCase):
@@ -151,11 +161,11 @@ class TestReportClock(TimingCase):
         now = start.astimezone().replace(tzinfo=None) + datetime.timedelta(hours=2, minutes=13)
         text = report_markdown(ws, now)
         self.assertEqual(text, report_markdown(ws, now))
-        self.assertIn("- 已运行：2 小时 13 分（", text)
-        self.assertIn("进行中 · 已 2 小时 13 分", text)
+        self.assertIn("- Elapsed: 2 hours 13 minutes (", text)
+        self.assertIn("in progress for 2 hours 13 minutes", text)
         Workspace(self.ws).stop("alice", "done")  # the stopped line: local time, full format
         text = report_markdown(Workspace(self.ws))
-        line = [l for l in text.splitlines() if l.startswith("- 已停止")][0]
+        line = [l for l in text.splitlines() if l.startswith("- Stopped")][0]
         self.assertNotRegex(line, r"\dT\d\d:\d\d:\d\dZ")
         self.assertRegex(line, r"\d{4}-\d\d-\d\d \d\d:\d\d")
 
@@ -166,36 +176,36 @@ class TestReportClock(TimingCase):
                 s["stopped"]["at"] = bad
             self.edit_state(fn)
             ws = Workspace(self.ws)
-            self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "共运行 未知")
-            self.assertIn("- 总用时：未知", report_markdown(ws))
+            self.assertEqual(T.elapsed_text(ws, datetime.datetime.now()), "total time: unknown")
+            self.assertIn("- Total time: unknown", report_markdown(ws))
             for rel, html in TD.pages(self.ws).items():
                 self.assertNotIn('data-start="', html, rel)
-            self.assertIn("未知", TD.round_block(TD.pages(self.ws)[TD.ROUNDS], 1).split("</summary>")[0])
+            self.assertIn("unknown", TD.round_block(TD.pages(self.ws)[TD.ROUNDS], 1).split("</summary>")[0])
 
 
 class TestPages(TimingCase):
     def test_header_shows_elapsed(self):
         page = self.overview()
-        self.assertIn("已运行", page)
+        self.assertIn("running for", page)
         self.assertIn('data-start="', page.split("</header>")[0])
         Workspace(self.ws).stop("alice", "done")
         pgs = TD.pages(self.ws)
         for rel, html in pgs.items():
             self.assertNotIn('data-start="', html, rel)
-        self.assertIn("共运行", pgs[TD.OVERVIEW])
+        self.assertIn("total time: ", pgs[TD.OVERVIEW])
 
     def test_rounds_page_durations(self):
         s = TD.round_block(TD.pages(self.ws)[TD.ROUNDS], 1).split("</summary>")[0]  # an undecided open round
-        self.assertEqual(s.count("进行中"), 1, s)
-        self.assertRegex(s, r">已 [^<]*分")
+        self.assertEqual(s.count("in progress"), 1, s)
+        self.assertRegex(s, r'data-suffix=" so far"[^>]*>[^<]*minute[^<]* so far<')
         self.two_rounds()
         page = TD.pages(self.ws)[TD.ROUNDS]
         s1 = TD.round_block(page, 1).split("</summary>")[0]
         s2 = TD.round_block(page, 2).split("</summary>")[0]
-        self.assertTrue("分钟" in s1 or "不到 1 分钟" in s1, s1)
+        self.assertRegex(s1, r">(under a minute|\d+ minutes?)<")
         self.assertNotIn("data-start", s1)
-        self.assertNotIn("进行中", s2)  # round 2 is decided: its time says 已 N 分钟 (M12)
-        self.assertRegex(s2, r">已 [^<]*分")
+        self.assertNotIn("in progress", s2)  # round 2 is decided: its time says N minutes so far (M12)
+        self.assertRegex(s2, r">[^<]*minute[^<]* so far<")
         self.assertIn("data-start=", s2)
 
 

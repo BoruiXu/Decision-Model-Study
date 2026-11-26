@@ -18,13 +18,19 @@
   },
   "input": {
     "format": "messages",
-    "description": "A single user message."
+    "description": "A single user message.",
+    "verbatim": [
+      "messages[].content"
+    ]
+  },
+  "features": {
+    "constraints": []
   },
   "data": {
     "sources": [
       {
         "path": "/data/txn-review/transaction-log-export",
-        "about": "交易日志导出：每笔交易一行（JSONL），带人工复核的处理结果"
+        "about": "Transaction log export: one transaction per line (JSONL), with the outcome of the human review"
       }
     ],
     "label_sources": [
@@ -61,6 +67,17 @@
       }
     ]
   },
+  "policy": {
+    "objective": "log_loss"
+  },
+  "compare": {
+    "baselines": [
+      "lr",
+      "zero_shot",
+      "few_shot"
+    ],
+    "seed": 0
+  },
   "stop": {
     "target": 0.9,
     "max_rounds": 6,
@@ -70,7 +87,8 @@
   "budget": {
     "compute_hours": 24,
     "annotation_items": 500,
-    "api_cost": 50
+    "api_cost": 50,
+    "agent_cost": null
   },
   "resources": {
     "gpus": 1,
@@ -84,7 +102,8 @@
   "quality_checks": {
     "min_rows": 2000,
     "max_near_dup_rate": 0.01,
-    "min_label_agreement": 0.8
+    "min_label_agreement": 0.8,
+    "max_synthetic_share": 0.3
   },
   "approvals": [
     "task_change",

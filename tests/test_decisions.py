@@ -69,7 +69,7 @@ class TestDefaults(TF.FlowCase):
                 self.assertEqual((a["point"], a["dispatch_id"]), (F.TRAIN_GATE_FAILED, did))
                 choice, why = self.default(a)
                 self.assertEqual((choice, a["default"]), (want, want))
-                self.assertIn({"train": "再搜一次", "ask": "上限"}[want], why)
+                self.assertIn({"train": "another search", "ask": "at the cap"}[want], why)
 
     def test_train_gate_failed_asks_after_a_record_only_return(self):
         # F17: train's latest launch registered only an experiment record (trsi said STOP): another return would only
@@ -79,7 +79,7 @@ class TestDefaults(TF.FlowCase):
             {"dir": "record", "kind": "record", "id": "record-0001", "launch": 2}])
         choice, why = DP.default_choice(Workspace(self.ws), F.TRAIN_GATE_FAILED, {"dispatch_id": "d-0001"})
         self.assertEqual(choice, "ask")
-        self.assertIn("实验记录", why)
+        self.assertIn("experiment records", why)
 
     def test_quality_gate_failed(self):
         self.fresh(TF.b_quality_gate_failed)  # no dispatch record to send it back to
@@ -133,10 +133,44 @@ class TestDefaults(TF.FlowCase):
                          ["resume", "new_session", "stop"])
 
 
+class TestSkipCompare(TF.CompareCase):
+    def ws_failed_compare(self, returns=0):
+        """A workspace at ③ whose compare dispatch failed after `returns` returns."""
+        self.ws_passed_candidate({"baselines": ["lr"]})
+        did = self.add_dispatch("compare", "failed", purpose="compare", returns=returns)
+        ws = Workspace(self.ws)
+        return ws, ws.dispatch(did)
+
+    def test_a_failed_compare_is_skipped_at_the_cap(self):
+        ws, d = self.ws_failed_compare(returns=2)                     # flow.max_returns default 2
+        a = F.next_action(ws)
+        self.assertEqual((a["point"], a["default"]), ("handback_failed", "skip"))
+        self.assertEqual(a["options"], ["resume", "skip", "ask"])
+        self.assertEqual(DP.exit_options(ws, a["point"], d), ["resume", "skip", "new_session", "close_round", "stop"])
+        DP.apply(fixtures.FakeEngine(ws), ws, a)
+        d = Workspace(ws.root).dispatch(d["id"])
+        self.assertEqual((d["status"], d["closed"]), ("done", "skipped: ③ Compare is report only"))
+        self.assertEqual(F.next_action(Workspace(ws.root))["module"], "deliver")
+        # Capped by flow.max_continues, it is skipped too: ③ never stops the run to ask.
+        ws, d = self.ws_failed_compare()
+        ws.update_dispatch(d["id"], capped="max_continues")
+        self.assertEqual(F.next_action(ws)["default"], "skip")
+        # Asked about a done dispatch (baselines only, its followup spent, at the cap), the user's skip closes it at once.
+        ws, d = self.ws_compare_dispatch_registered(["baseline"])
+        ws.update_dispatch(d["id"], launch_mode="followup", returns=2)
+        a = F.next_action(ws)
+        DP.carry_out(fixtures.FakeEngine(ws), ws, a, {"choice": "ask", "by": "agent", "reason": "the user decides"})
+        self.assertIn("skip", Workspace(ws.root).waiting()["options"])
+        self.assertIn("closed as skipped", DP.answer(Workspace(ws.root), "skip", "alice", "no comparison")["effect"])
+        d = Workspace(ws.root).dispatch(d["id"])
+        self.assertEqual((d["status"], d["closed"]), ("done", "skipped: ③ Compare is report only"))
+        self.assertEqual(F.next_action(Workspace(ws.root))["module"], "deliver")
+
+
 # ---- the engine with decisions, answers and approvals ----------------------------------------------
 
 class DecisionCase(TE.EngineCase):
-    def answer(self, option, quote="照这个办", by="alice"):
+    def answer(self, option, quote="do it this way", by="alice"):
         return DP.answer(Workspace(self.ws), option, by, quote)
 
     def waiting(self):
@@ -154,14 +188,14 @@ class DecisionCase(TE.EngineCase):
     def train_fails(self, **flow):
         """A one-round task whose train module hands back status failed, with no returns allowed: the run asks."""
         self.use_task(TE.task_def(max_returns=0, **flow), "ws-tf")
-        self.behave("train", fail="显存不够，训练没跑完")
+        self.behave("train", fail="out of GPU memory, the training did not finish")
         status, reason = self.status()
         self.assertEqual(status, "waiting_user")
         w = self.waiting()
         self.assertEqual((w["kind"], w["what"], w["ref"], w["options"]), ("question", F.HANDBACK_FAILED, "d-0002", EXITS))
-        self.assertIn("显存不够", w["question"])
+        self.assertIn("out of GPU memory", w["question"])
         for option in EXITS:
-            self.assertIn(option + "：", w["question"])  # every option says what it does
+            self.assertIn(option + ": ", w["question"])  # every option says what it does
         self.assertEqual(self.decisions(), [(F.HANDBACK_FAILED, "ask", "code")])
         return reason
 
@@ -193,13 +227,13 @@ class TestAgentDecisions(DecisionCase):
     def test_agent_asks_the_user(self):
         self.agent_task("ws-a1")
         self.behave("data", trainset="quality_fail")
-        self.behave("decide", **{F.QUALITY_GATE_FAILED: {"choice": "ask", "reason": "重复率太高，要人看一下"}})
+        self.behave("decide", **{F.QUALITY_GATE_FAILED: {"choice": "ask", "reason": "too many duplicates, have a look"}})
         status, reason = self.status()
         self.assertEqual(status, "waiting_user")
         ws = Workspace(self.ws)
         d = ws.decisions()[0]
         self.assertEqual((d["point"], d["choice"], d["by"]), (F.QUALITY_GATE_FAILED, "ask", "agent"))
-        self.assertIn("重复率太高", d["reason"])
+        self.assertIn("too many duplicates", d["reason"])
         w = ws.waiting()
         self.assertEqual((w["what"], w["ref"], w["options"]), (F.QUALITY_GATE_FAILED, "d-0001", EXITS))
         req = self.requests()
@@ -216,16 +250,19 @@ class TestAgentDecisions(DecisionCase):
         # The agent sends the trials back to train's session, with its reason.
         self.agent_task("ws-a2")
         self.behave("train", gate_fail=True)
-        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "train", "reason": "换一组配置再搜"}})
+        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "train", "reason": "search again with other configs",
+                                                       "cost_usd": 0.5}})
         self.assertMilestoneAsk(self.run_engine())
         self.assertEqual(self.decisions(), [(F.TRAIN_GATE_FAILED, "train", "agent")])
         ws = Workspace(self.ws)
+        self.assertEqual(ws.used("agent_usd"), 0.5)  # the decision agent's session, counted once
+        self.assertEqual([e["cost_usd"] for e in self.events("decision_agent")], [0.5])
         self.assertEqual([d["module"] for d in ws.dispatches()], ["data", "train", "deliver", "judge"])
         self.assertEqual(ws.dispatch("d-0002")["returns"], 1)
-        self.assertIn("换一组配置再搜", self.calls("d-0002")[2]["feedback"])
+        self.assertIn("search again with other configs", self.calls("d-0002")[2]["feedback"])
 
     def test_invalid_agent_answers_fall_back_to_the_code_default(self):
-        for i, answer in enumerate(({"raw": "我觉得应该重做"}, {"choice": "train", "reason": "x"},
+        for i, answer in enumerate(({"raw": "I think it should be redone"}, {"choice": "train", "reason": "x"},
                                     {"choice": "resume_data", "reason": ""})):
             with self.subTest(answer):
                 self.agent_task("ws-bad%d" % i)
@@ -243,7 +280,7 @@ class TestAgentDecisions(DecisionCase):
         self.agent_task("ws-a5", max_returns=1)
         self.behave("data", trainset="quality_fail")
         self.behave("train", gate_fail=True)
-        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "data", "reason": "再补数据"}})
+        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "data", "reason": "more data"}})
         self.assertMilestoneAsk(self.run_engine())
         self.assertEqual(self.decisions(), [(F.QUALITY_GATE_FAILED, "resume_data", "agent"),
                                             (F.TRAIN_GATE_FAILED, "train", "code")])
@@ -299,13 +336,13 @@ class TestRefused(DecisionCase):
         self.assertEqual((w["what"], w["ref"], w["options"]), (F.HANDBACK_REFUSED, "d-0001", EXITS))
         self.assertIn("overlaps the current evalset", w["question"])
         self.assertEqual(Workspace(self.ws).dispatch("d-0001")["status"], "failed")
-        self.answer("resume", "trainset 换一批和评测集不重叠的行")
+        self.answer("resume", "trainset: take rows that do not overlap the evalset")
         self.assertMilestoneAsk(self.run_engine())
         self.assertEqual(self.decisions()[:2], [(F.HANDBACK_REFUSED, "ask", "code"),
                                                 (F.HANDBACK_REFUSED, "resume", "alice")])
         calls = self.calls("d-0001")
         self.assertEqual(calls[1]["session"], calls[0]["session"])
-        self.assertIn("trainset 换一批和评测集不重叠的行", calls[1]["feedback"])
+        self.assertIn("trainset: take rows that do not overlap the evalset", calls[1]["feedback"])
         self.assertIn("overlaps the current evalset", calls[1]["feedback"])
         self.assertEqual(Workspace(self.ws).dispatch("d-0001")["returns"], 1)
 
@@ -313,8 +350,8 @@ class TestRefused(DecisionCase):
 class TestExits(DecisionCase):
     def test_resume_sends_the_users_words_to_the_same_session(self):
         self.train_fails()
-        rec = self.answer("resume", "把 batch 改小再跑")
-        self.assertEqual((rec["by"], rec["quote"], rec["dispatch_id"]), ("alice", "把 batch 改小再跑", "d-0002"))
+        rec = self.answer("resume", "run again with a smaller batch")
+        self.assertEqual((rec["by"], rec["quote"], rec["dispatch_id"]), ("alice", "run again with a smaller batch", "d-0002"))
         self.assertIsNone(self.waiting())
         # The flow still meets the same decision; the answer, not the earlier ask, is what the engine carries out.
         self.assertEqual(F.next_action(Workspace(self.ws))["point"], F.HANDBACK_FAILED)
@@ -325,13 +362,13 @@ class TestExits(DecisionCase):
         self.assertEqual((d["status"], d["returns"]), ("done", 1))
         calls = self.calls("d-0002")  # the failed launch, the return, the search's second part
         self.assertEqual([c["session"] for c in calls], [d["session"]] * 3)
-        self.assertIn("把 batch 改小再跑", calls[1]["feedback"])
-        self.assertIn("显存不够", calls[1]["feedback"])
+        self.assertIn("run again with a smaller batch", calls[1]["feedback"])
+        self.assertIn("out of GPU memory", calls[1]["feedback"])
         self.assertTrue(self.events("answer"))
 
     def test_new_session_closes_the_failed_dispatch(self):
         self.train_fails()
-        self.answer("new_session", "换个会话从头来")
+        self.answer("new_session", "start over in a new session")
         self.status()
         ws = Workspace(self.ws)
         old, new = ws.dispatch("d-0002"), ws.dispatch("d-0003")
@@ -341,18 +378,18 @@ class TestExits(DecisionCase):
         self.assertNotEqual(new["session"], old["session"])
         call = self.calls("d-0003")[0]
         self.assertEqual(call["feedback_file"], "feedback-1.md")
-        self.assertIn("换个会话从头来", call["feedback"])
-        self.assertIn("显存不够", call["feedback"])
+        self.assertIn("start over in a new session", call["feedback"])
+        self.assertIn("out of GPU memory", call["feedback"])
         # The mock fails again in its new directory: the question is now about the new dispatch.
         self.assertEqual(self.waiting()["ref"], "d-0003")
 
     def test_close_round(self):
         self.train_fails()
-        self.answer("close_round", "这一轮不做了")
+        self.answer("close_round", "drop this round")
         ws = Workspace(self.ws)
         decision = ws.state["rounds"]["1"]["decision"]
         self.assertEqual((decision["decision"], decision["evaluation_id"]), ("keep", None))
-        self.assertIn("这一轮不做了", decision["reason"])
+        self.assertIn("drop this round", decision["reason"])
         self.assertEqual(ws.dispatch("d-0002")["status"], "done")
         self.assertIsNone(ws.waiting())
         status, reason = self.status()  # one round: the stop check stops, no version to release
@@ -365,7 +402,7 @@ class TestExits(DecisionCase):
         pid, w = TE.failed_check_in(self, "ws-ft")
         with mock.patch.object(Workspace, "close_round", side_effect=RsiError("boom")):
             with self.assertRaises(RsiError):
-                DP.answer(Workspace(self.ws), "close_round", "alice", "这一轮不做了", ref=w["id"])
+                DP.answer(Workspace(self.ws), "close_round", "alice", "drop this round", ref=w["id"])
         self.assertTrue(TE.alive(pid))
         self.assertEqual(Workspace(self.ws).dispatch("d-0002")["status"], "failed")
 
@@ -382,18 +419,18 @@ class TestExits(DecisionCase):
         w = self.waiting()
         self.assertEqual((w["what"], w["ref"], w["options"]),
                          (F.TRAIN_GATE_FAILED, "d-0002", ["train", "data", "new_session", "close_round", "stop"]))
-        self.assertIn("new_session：新派一个 rsi-train 会话", w["question"])
+        self.assertIn("new_session: dispatch a new rsi-train session", w["question"])
 
     def test_train_gate_answer_dispatches_with_the_choice_purpose(self):
         self.gate_cap()
-        self.answer("data", "训练集太小，补数据")
+        self.answer("data", "the trainset is too small, add data")
         self.status()
         ws = Workspace(self.ws)
         d = ws.dispatch("d-0003")
         self.assertEqual((d["module"], d["purpose"]), ("data", F.CHOICE_PURPOSE["data"]))
         call = self.calls("d-0003")[0]
         self.assertEqual(call["purpose"], "trainset")
-        self.assertIn("训练集太小，补数据", call["feedback"])
+        self.assertIn("the trainset is too small, add data", call["feedback"])
         self.assertEqual(ws.current("trainset"), "trainset-0002")
         # The new trainset changed the state, so the gate's next failure is a new question.
         self.assertEqual(self.decisions()[1:], [(F.TRAIN_GATE_FAILED, "data", "alice"),
@@ -402,7 +439,7 @@ class TestExits(DecisionCase):
 
     def test_train_gate_answer_train_goes_back_to_the_same_session(self):
         self.gate_cap()
-        self.answer("train", "学习率降一半")
+        self.answer("train", "halve the learning rate")
         self.assertEqual(self.status()[0], "waiting_user")
         ws = Workspace(self.ws)
         d = ws.dispatch("d-0002")
@@ -410,7 +447,7 @@ class TestExits(DecisionCase):
         self.assertEqual(ws.passed_candidates(), ["candidate-0002"])
         calls = self.calls("d-0002")
         self.assertEqual(calls[2]["session"], calls[0]["session"])
-        self.assertIn("学习率降一半", calls[2]["feedback"])
+        self.assertIn("halve the learning rate", calls[2]["feedback"])
         # Each search's second part is a followup of the session and no return, so it is asked for although no
         # returns are allowed; the run goes on to the milestone question.
         self.assertEqual((d["followups"], d["launch_mode"]), (2, "followup"))
@@ -420,7 +457,7 @@ class TestExits(DecisionCase):
     def test_answer_given_before_other_progress_is_asked_again(self):
         # The answer belongs to the state it was given in: after other progress the question comes back.
         self.train_fails()
-        self.answer("resume", "再试一次")
+        self.answer("resume", "try once more")
         src = fixtures.make_artifact("record", os.path.join(self.root, "rec"), self.task, artifacts=["trainset-0001"])
         Workspace(self.ws).register("record", src)
         self.assertEqual(self.status()[0], "waiting_user")
@@ -460,15 +497,15 @@ class TestAnswer(DecisionCase):
         # The stop exit, answered from the command line: the run stops and the failed dispatch is closed.
         self.train_fails()
         r = subprocess.run([sys.executable, "-m", "rsi", "answer", self.ws, "stop", "--by", "alice", "--quote",
-                            "停吧"], cwd=REPO, capture_output=True, text=True, env=dict(os.environ, RSI_NO_BROWSER="1"))
+                            "stop it"], cwd=REPO, capture_output=True, text=True, env=dict(os.environ, RSI_NO_BROWSER="1"))
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(r.stdout.strip().splitlines()), 1)
         self.assertIn("stop", r.stdout)
         ws = Workspace(self.ws)
-        self.assertEqual((ws.state["stopped"]["reason"], ws.state["stopped"]["by"]), ("user requested: 停吧", "alice"))
+        self.assertEqual((ws.state["stopped"]["reason"], ws.state["stopped"]["by"]), ("user requested: stop it", "alice"))
         self.assertEqual(ws.dispatch("d-0002")["status"], "done")
         last = self.log()[-1]
-        self.assertEqual((last["event"], last["choice"], last["by"], last["quote"]), ("answer", "stop", "alice", "停吧"))
+        self.assertEqual((last["event"], last["choice"], last["by"], last["quote"]), ("answer", "stop", "alice", "stop it"))
         self.assertEqual(self.status()[0], "done")
         r = subprocess.run([sys.executable, "-m", "rsi", "answer", self.ws, "stop", "--by", "alice", "--quote", "x"],
                            cwd=REPO, capture_output=True, text=True, env=dict(os.environ, RSI_NO_BROWSER="1"))
@@ -490,7 +527,7 @@ class TestApprovals(DecisionCase):
         self.plan_task()
         judge = Workspace(self.ws).dispatch("d-0004")
         self.assertEqual((judge["module"], judge["returns"], judge["followups"]), ("judge", 0, 1))  # its plan part
-        rec = self.answer("revise", "计划里加上短消息的切片")
+        rec = self.answer("revise", "add a slice for short messages to the plan")
         self.assertEqual((rec["point"], rec["choice"], rec["ref"], rec["dispatch_id"]),
                          ("plan", "revise", "plan-0001", "d-0004"))
         self.assertIsNone(self.waiting())
@@ -504,12 +541,12 @@ class TestApprovals(DecisionCase):
         self.assertTrue(F.may_return(ws, "judge"))
         calls = self.calls("d-0004")
         self.assertEqual([c["session"] for c in calls], [judge["session"]] * 3)
-        self.assertIn("计划里加上短消息的切片", calls[2]["feedback"])
+        self.assertIn("add a slice for short messages to the plan", calls[2]["feedback"])
         self.assertIn("plan-0001", calls[2]["feedback"])
-        self.answer("approve", "这版可以")
+        self.answer("approve", "this version is fine")
         ws = Workspace(self.ws)
         a = ws.state["approvals"][-1]
-        self.assertEqual((a["what"], a["ref"], a["by"], a["quote"]), ("plan", "plan-0002", "alice", "这版可以"))
+        self.assertEqual((a["what"], a["ref"], a["by"], a["quote"]), ("plan", "plan-0002", "alice", "this version is fine"))
         self.assertEqual(self.decisions()[-2:], [("plan", "revise", "alice"), ("plan", "approve", "alice")])
         self.status(max_steps=1)
         self.assertEqual(Workspace(self.ws).state["round"], 2)
@@ -518,11 +555,12 @@ class TestApprovals(DecisionCase):
         self.plan_task()
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["approve", self.ws, "over_budget", "--by", "alice", "--quote", "可以超"]), 0)
+            self.assertEqual(cli.main(["approve", self.ws, "over_budget", "--by", "alice", "--quote",
+                                       "going over is fine"]), 0)
         self.assertEqual(self.waiting()["what"], "plan")  # another item: the plan question stays
         with contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["approve", self.ws, "plan", "--ref", "plan-0001", "--by", "alice", "--quote",
-                                       "同意"]), 0)
+                                       "agreed"]), 0)
         self.assertIsNone(self.waiting())
         self.assertEqual(self.decisions()[-1], ("plan", "approve", "alice"))
         self.assertTrue([r for r in self.events("approve") if r["what"] == "plan" and r["answered"]])
@@ -530,12 +568,12 @@ class TestApprovals(DecisionCase):
 
     def test_milestone_yes_records_each_use_testset_approval_before_its_registration(self):
         self.assertMilestoneAsk(self.run_engine())
-        self.answer("yes", "用封存的 test 验一下")
+        self.answer("yes", "check it on the sealed testset")
         status, reason = self.status()
         self.assertEqual(status, "done", reason)
         ws = Workspace(self.ws)
         approvals = [a for a in ws.state["approvals"] if a["what"] == "use_testset"]
-        self.assertEqual([(a["by"], a["quote"]) for a in approvals], [("alice", "用封存的 test 验一下")] * 2)
+        self.assertEqual([(a["by"], a["quote"]) for a in approvals], [("alice", "check it on the sealed testset")] * 2)
         self.assertEqual([a["used_by"] for a in approvals], ["delivery-0002", "evaluation-0002"])
         order = [(r["event"], r.get("what") or r.get("id")) for r in self.log() if r["event"] in ("approval", "register")]
         self.assertEqual(order[-4:], [("approval", "use_testset"), ("register", "delivery-0002"),
@@ -557,20 +595,20 @@ class TestApprovalAsks(TF.FlowCase):
                     a = F.next_action(ws)
                     self.assertEqual((a["type"], a["what"], a["options"]), ("ask", what, options))
                     for word in options:
-                        self.assertIn(word + "：", a["question"])
+                        self.assertIn(word + ": ", a["question"])
                     ws.set_waiting(dict((k, a[k]) for k in ("kind", "what", "ref", "question", "options")))
-                    DP.answer(Workspace(self.ws), option, "alice", "按我说的办")
+                    DP.answer(Workspace(self.ws), option, "alice", "do as I say")
                     ws = Workspace(self.ws)
                     self.assertIsNone(ws.waiting())
                     if option == "stop":
-                        self.assertEqual(ws.state["stopped"]["reason"], "user requested: 按我说的办")
+                        self.assertEqual(ws.state["stopped"]["reason"], "user requested: do as I say")
                         self.assertEqual(F.next_action(ws)["type"], "report")
                     elif option == "close_round":  # no new evalset: the round is closed, the judge writes the plan
-                        self.assertIn("按我说的办", ws.state["rounds"][str(ws.state["round"])]["decision"]["reason"])
+                        self.assertIn("do as I say", ws.state["rounds"][str(ws.state["round"])]["decision"]["reason"])
                         self.assertEqual(self.action()["purpose"], "plan")
                     else:
                         self.assertTrue(ws.has_approval(what))
-                        self.assertEqual(ws.state["approvals"][-1]["quote"], "按我说的办")
+                        self.assertEqual(ws.state["approvals"][-1]["quote"], "do as I say")
                         self.assertNotEqual(F.next_action(ws)["type"], "ask")
                     self.assertEqual(ws.decisions()[-1]["choice"], option)
 
@@ -579,10 +617,10 @@ class TestApprovalAsks(TF.FlowCase):
         a = self.action()
         self.assertEqual((a["what"], a["options"]), ("plan", ["approve", "revise"]))
         Workspace(self.ws).set_waiting(dict((k, a[k]) for k in ("kind", "what", "ref", "question", "options")))
-        rec = DP.answer(Workspace(self.ws), "revise", "alice", "目标写具体一点")
+        rec = DP.answer(Workspace(self.ws), "revise", "alice", "make the goals more specific")
         self.assertIsNone(rec["dispatch_id"])
         a = self.assertAction({"type": "dispatch", "module": "judge", "purpose": "plan", "step": "write_plan"})
-        self.assertIn("目标写具体一点", a["reason"])
+        self.assertIn("make the goals more specific", a["reason"])
         self.add_dispatch("judge", "done", purpose="plan")  # it came back without a new plan: asked again
         self.assertAction({"type": "ask", "what": "plan", "ref": "plan-0001"})
 
@@ -598,18 +636,18 @@ class TestTextsAndAttribution(TF.FlowCase):
         TF.b_train_gate_failed_after_search(self)  # patience 2, max_rounds 5
         ws = Workspace(self.ws)
         self.assertFalse(ws.stop_check_if_closed()[0])
-        old = "close_round：关闭第 1 轮（没有评测，记 keep），接着 rsi-judge 写计划"
+        old = "close_round: close round 1 (no evaluation, recorded as keep), then rsi-judge writes the plan"
         self.assertEqual(self.close_text(ws), old)
         self.assertIn(old, DP.question(ws, self.action(), {"by": "code"})["question"])
         self.edit_state(lambda s: s.__setitem__("no_promotion_streak", 1))  # closing round 1 reaches patience 2
         ws = Workspace(self.ws)
         stop, why = ws.stop_check_if_closed()
         self.assertTrue(stop)
-        text = "close_round：关闭第 %d 轮（没有评测，记 keep），然后运行停止（%s）" % (1, why)
+        text = "close_round: close round %d (no evaluation, recorded as keep), then the run stops (%s)" % (1, why)
         self.assertEqual(self.close_text(ws), text)
         q = DP.question(ws, self.action(), {"by": "code"})["question"]
         self.assertIn(text, q)
-        self.assertNotIn("写计划", q)
+        self.assertNotIn("writes the plan", q)
 
     def test_train_gate_failed_names_the_latest_train_dispatch(self):
         self.sets()
@@ -643,16 +681,16 @@ class TestContinuations(DecisionCase):
         self.assertIn("max_continues", w["question"])
         d = Workspace(self.ws).dispatch("d-0002")
         self.assertEqual((d["status"], d["capped"], d["continued"]), ("failed", "max_continues", 1))
-        self.answer("resume", "接着收结果")
+        self.answer("resume", "go on collecting the results")
         self.assertMilestoneAsk(self.run_engine())
         d = Workspace(self.ws).dispatch("d-0002")
         self.assertEqual((d["returns"], d["continued"], d.get("capped")), (1, 1, None))
-        self.assertIn("接着收结果", self.calls("d-0002")[2]["feedback"])
+        self.assertIn("go on collecting the results", self.calls("d-0002")[2]["feedback"])
 
 
 # ---- fix round 1 (R12): a stop mid-step, new_session's purpose, questions, question ids, stale questions ---
 
-def stop_from_elsewhere(ws_path, quote="先停"):
+def stop_from_elsewhere(ws_path, quote="stop for now"):
     """`rsi stop` from another process (the user, while `rsi run` works)."""
     r = subprocess.run([sys.executable, "-m", "rsi", "stop", ws_path, "--by", "bob", "--quote", quote], cwd=REPO,
                        capture_output=True, text=True, env=dict(os.environ, RSI_NO_BROWSER="1"))
@@ -671,7 +709,7 @@ class TestStopMidStep(DecisionCase):
     def test_stop_while_the_decision_agent_thinks(self):
         # Whatever the agent answers (its default resume_data, or ask), the run was stopped meanwhile: nothing is
         # sent back, no question is set, the run reports.
-        for answer in (None, {"choice": "ask", "reason": "问人"}):
+        for answer in (None, {"choice": "ask", "reason": "ask someone"}):
             with self.subTest(answer):
                 t = TE.task_def()
                 t["decisions"] = {F.QUALITY_GATE_FAILED: "agent"}
@@ -717,7 +755,7 @@ class TestStopMidStep(DecisionCase):
         def register(ws, kind, src):
             if kind == "candidate" and not fired:
                 fired.append(1)
-                Workspace(ws_path).stop("bob", "停下")
+                Workspace(ws_path).stop("bob", "stop here")
             return orig(ws, kind, src)
 
         with mock.patch.object(Workspace, "register", register):
@@ -726,7 +764,7 @@ class TestStopMidStep(DecisionCase):
         ws = Workspace(self.ws)
         d = ws.dispatch("d-0002")
         self.assertEqual((d["status"], d["refused"], d["returns"]), ("done", [], 0))
-        self.assertIn("没有登记", d["closed"])
+        self.assertIn("not registered from the hand-back", d["closed"])
         self.assertEqual(ws.decisions(), [])  # no handback_refused
         self.assertEqual(len(self.calls("d-0002")), 1)
 
@@ -743,7 +781,7 @@ class TestStopMidStep(DecisionCase):
         self.assertStoppedCleanly(status)
         d = Workspace(self.ws).dispatch("d-0002")
         self.assertEqual(d["status"], "done")
-        self.assertIn("没有启动", d["closed"])
+        self.assertIn("never launched", d["closed"])
         self.assertEqual(self.calls("d-0002"), [])  # never launched
 
     def test_stop_during_the_launches_of_one_write(self):
@@ -768,20 +806,20 @@ class TestStopMidStep(DecisionCase):
         ws = Workspace(self.ws)
         first, second = ws.dispatch("d-0001"), ws.dispatch("d-0002")
         self.assertEqual(self.calls("d-0002"), [])
-        self.assertIn("agent 已终止", first["closed"])
+        self.assertIn("agent terminated", first["closed"])
         self.assertIsNotNone(first["launched_at"])
         self.assertEqual(first["launches"], 1)
-        self.assertIn("没有启动", second["closed"])
+        self.assertIn("never launched", second["closed"])
         self.assertEqual((second["status"], second["launched_at"], second["launches"]), ("done", None, 0))
         self.assertEqual([e["kind"] for e in ws.entries()], ["task"])  # nothing registered
 
     def test_resume_on_a_stopped_run_starts_nothing(self):
         self.train_fails()
-        Workspace(self.ws).stop("bob", "停")
+        Workspace(self.ws).stop("bob", "stop")
         eng = engine.Engine(self.ws, MockRunner(MOCKS), pages=False)
         ws = Workspace(self.ws)
         with self.assertRaises(W.StoppedError):
-            eng.resume(ws, ws.dispatch("d-0002"), "再试")
+            eng.resume(ws, ws.dispatch("d-0002"), "try again")
         d = Workspace(self.ws).dispatch("d-0002")
         self.assertEqual((d["status"], d["returns"], d["launches"]), ("done", 0, 1))
         self.assertEqual(len(self.calls("d-0002")), 1)
@@ -794,7 +832,7 @@ class TestFreshPurpose(TF.FlowCase):
         d = ws.dispatch("d-0001")
         self.assertEqual(DP.fresh_purpose(ws, "write_plan", d), "plan")
         q = DP.question(ws, self.action(), {"by": "code"})
-        self.assertIn("rsi-judge 会话（目的 plan）", q["question"])
+        self.assertIn("rsi-judge session (purpose plan)", q["question"])
         self.use_task(fixtures.binary_task(), self.unique())
         TF.b_quality_gate_failed_from_dispatch(self)  # round 1: three sets in, the trainset failed
         ws = Workspace(self.ws)
@@ -812,37 +850,37 @@ class TestR12Answers(DecisionCase):
         # The hand-back would be refused (its trainset overlaps the evalset), but it asks a question: nothing is
         # registered, so nothing is refused, until the answer; the answer goes back to the same session, whose new
         # hand-back (a changed trainset) is registered.
-        self.behave("data", trainset="overlap", questions=["要不要多造短消息？"])
+        self.behave("data", trainset="overlap", questions=["Make more short messages?"])
         self.assertEqual(self.status()[0], "waiting_user")
         ws = Workspace(self.ws)
         w, d = ws.waiting(), ws.dispatch("d-0001")
         self.assertEqual((w["what"], w["ref"], w["options"], d["status"], d["launches"]),
-                         ("handback", "d-0001", ["已回答"], "handed_back", 1))
+                         ("handback", "d-0001", ["answered"], "handed_back", 1))
         self.assertEqual((ws.decisions(), d.get("refused"), [e["kind"] for e in ws.entries()]), ([], None, ["task"]))
-        rec = self.answer("已回答", "要，多造短消息")
+        rec = self.answer("answered", "yes, make more short messages")
         self.assertEqual((rec["point"], rec["dispatch_id"], rec["launches"]), ("handback", "d-0001", 1))
         self.assertMilestoneAsk(self.run_engine())
-        self.assertEqual(self.decisions()[:1], [("handback", "已回答", "alice")])
+        self.assertEqual(self.decisions()[:1], [("handback", "answered", "alice")])
         self.assertNotIn(F.HANDBACK_REFUSED, [x[0] for x in self.decisions()])
         feedback = self.calls("d-0001")[1]["feedback"]
-        for word in ("要不要多造短消息？", "要，多造短消息", "还没有登记"):
+        for word in ("Make more short messages?", "yes, make more short messages", "registered yet"):
             self.assertIn(word, feedback)
         ws = Workspace(self.ws)
         self.assertEqual(ws.entry(ws.current("trainset"))["source"], self.outfile("d-0001", "trainset-2"))
 
     def test_answer_goes_back_to_the_asking_session_not_to_other_dispatches(self):
         self.use_task(TE.task_def(max_returns=0), "ws-br")
-        self.behave("data", questions=["训练集要不要去重？"])
+        self.behave("data", questions=["Deduplicate the trainset?"])
         self.behave("train", gate_fail=True)
         self.assertEqual(self.status()[0], "waiting_user")
-        self.answer("已回答", "要去重")
+        self.answer("answered", "yes, deduplicate")
         self.assertEqual(self.status()[0], "waiting_user")
         self.assertEqual(self.waiting()["what"], F.TRAIN_GATE_FAILED)
-        self.assertIn("要去重", self.calls("d-0001")[1]["feedback"])
-        self.answer("data", "补一批数据")
+        self.assertIn("yes, deduplicate", self.calls("d-0001")[1]["feedback"])
+        self.answer("data", "add a batch of data")
         self.status()
         with open(self.outfile("d-0003", "brief.md"), encoding="utf-8") as f:
-            self.assertNotIn("要去重", f.read())  # delivered once, to the session that asked
+            self.assertNotIn("yes, deduplicate", f.read())  # delivered once, to the session that asked
         rec = [x for x in Workspace(self.ws).decisions() if x["point"] == "handback"][0]
         self.assertEqual(rec["delivered_to"], ["d-0001 launch 2"])
 
@@ -858,7 +896,7 @@ class TestR12Answers(DecisionCase):
         self.assertIn("not the question waiting now", str(e.exception))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.assertEqual(cli.main(["answer", self.ws, "resume", "--ref", qid, "--by", "alice", "--quote", "再来"]), 0)
+            self.assertEqual(cli.main(["answer", self.ws, "resume", "--ref", qid, "--by", "alice", "--quote", "again"]), 0)
         self.assertEqual(Workspace(self.ws).decisions()[-1]["question_id"], qid)
         nxt = Workspace(self.ws).set_waiting({"kind": "question", "question": "q", "options": ["x"]})
         self.assertNotEqual(nxt["id"], qid)
@@ -869,9 +907,9 @@ class TestR12Answers(DecisionCase):
         ws = Workspace(self.ws)
         self.assertTrue(F.stale_waiting(ws, ws.waiting()))
         self.use_task(TE.task_def(max_returns=0), "ws-closed-round")  # the round closed by hand instead
-        self.behave("train", fail="显存不够，训练没跑完")
+        self.behave("train", fail="out of GPU memory, the training did not finish")
         self.assertEqual(self.status()[0], "waiting_user")
-        Workspace(self.ws).close_round("关掉，换个思路")
+        Workspace(self.ws).close_round("close it, try another idea")
         ws = Workspace(self.ws)
         self.assertTrue(F.stale_waiting(ws, ws.waiting()))
         self.assertNotEqual(F.next_action(ws)["type"], "ask")
@@ -892,11 +930,12 @@ class TestR12Answers(DecisionCase):
                 else:
                     self.assertEqual(self.status(max_steps=16)[0], "max_steps")
                     self.assertEqual(self.actions()[-1], "promote")
-                Workspace(self.ws).approve("use_testset", "alice", "用 test 验一下")
+                Workspace(self.ws).approve("use_testset", "alice", "check it on the testset")
                 self.assertEqual(self.status()[0], "done")
                 approvals = [a for a in Workspace(self.ws).state["approvals"] if a["what"] == "use_testset"]
                 self.assertEqual([(a["quote"], a["used_by"]) for a in approvals],
-                                 [("用 test 验一下", "delivery-0002"), ("用 test 验一下", "evaluation-0002")])
+                                 [("check it on the testset", "delivery-0002"),
+                                  ("check it on the testset", "evaluation-0002")])
 
     def test_closing_or_replacing_clears_capped(self):
         for option in ("new_session", "close_round"):
@@ -908,7 +947,7 @@ class TestR12Answers(DecisionCase):
                     f.write("ok\n")
                 self.assertEqual(self.status()[0], "waiting_user")
                 self.assertEqual(Workspace(self.ws).dispatch("d-0002")["capped"], "max_continues")
-                self.answer(option, "答")
+                self.answer(option, "answer")
                 self.status()
                 d = Workspace(self.ws).dispatch("d-0002")
                 self.assertEqual((d["status"], d.get("capped")), ("done", None))
@@ -923,7 +962,7 @@ class TestR12Answers(DecisionCase):
             return orig(ws)
 
         with mock.patch.object(Workspace, "save_state", save):
-            self.answer("resume", "再来")
+            self.answer("resume", "again")
         self.assertEqual(seen, ["answer"])  # already in run.jsonl when STATE is saved
         ws = Workspace(self.ws)
         ws.set_waiting({"kind": "question", "question": "q", "options": ["x"]})
@@ -981,7 +1020,7 @@ class TestStopStopsAgents(DecisionCase):
         ws = Workspace(self.ws)
         d = ws.dispatch("d-0001")
         self.assertEqual(d["status"], "done")
-        self.assertIn("agent 已终止", d["closed"])
+        self.assertIn("agent terminated", d["closed"])
         from rsi import dashboard as D
         self.assertEqual(D.running_agents(ws), [])
         self.assertEqual([x for x in ws.dispatches() if x["status"] == "running"], [])
@@ -989,11 +1028,11 @@ class TestStopStopsAgents(DecisionCase):
     def test_stop_while_rsi_run_waits_stops_the_agent(self):
         p, pid = self.start_run()
         t0 = time.time()
-        stop_from_elsewhere(self.ws, "停")
+        stop_from_elsewhere(self.ws, "stop")
         out, err = p.communicate(timeout=30)
         self.assertEqual(p.returncode, 0, err)  # done, with the report
         self.assertLess(time.time() - t0, 10)  # promptly, not after the agent's 30 s
-        self.assertIn("运行已结束", out)
+        self.assertIn("The run has ended", out)
         self.assertGone(pid)
         self.assertClosedAndNotShown()
         self.assertIn("agent_stopped", [r["event"] for r in self.log()])
@@ -1005,7 +1044,7 @@ class TestStopStopsAgents(DecisionCase):
         p.send_signal(signal.SIGKILL)
         p.communicate()
         self.assertTrue(pid_alive(pid))  # the agent outlives the killed `rsi run`
-        stop_from_elsewhere(self.ws, "停")
+        stop_from_elsewhere(self.ws, "stop")
         r = subprocess.run([sys.executable, "-m", "rsi", "run", self.ws, "--runner", "claude"], cwd=REPO,
                            capture_output=True, text=True, timeout=60, env=dict(os.environ, RSI_NO_BROWSER="1"))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1018,14 +1057,14 @@ class TestStopStopsAgents(DecisionCase):
         # Stopped and reported already, yet a record still says running (left by an earlier run): done closes it.
         ws = Workspace(self.ws)
         ws.add_dispatches([{"module": "data", "purpose": "sets", "outdir": "work/round-1/data", "runner": "mock"}])
-        ws.stop("bob", "停")
+        ws.stop("bob", "stop")
         with open(os.path.join(self.ws, "REPORT.md"), "w", encoding="utf-8") as f:
-            f.write("# 报告\n")
+            f.write("# Report\n")
         self.assertEqual(self.status()[0], "done")
         self.assertEqual(self.actions(), ["done"])
         d = Workspace(self.ws).dispatch("d-0001")
         self.assertEqual(d["status"], "done")
-        self.assertIn("运行已停止", d["closed"])
+        self.assertIn("run stopped", d["closed"])
 
     def test_decision_agent_is_stopped_with_the_run(self):
         from rsi.runners.base import pid_alive
@@ -1069,21 +1108,21 @@ class TestR15Engine(DecisionCase):
             with self.subTest(option):
                 w = self.search_cap(option)
                 if option == "resume":
-                    self.answer("resume", "把 search 写出来")
+                    self.answer("resume", "write the search")
                     self.assertMilestoneAsk(self.run_engine())
                     d = Workspace(self.ws).dispatch("d-0002")
                     self.assertEqual((d["returns"], d["followups"]), (1, 1))
-                    self.assertIn("把 search 写出来", self.calls("d-0002")[2]["feedback"])
+                    self.assertIn("write the search", self.calls("d-0002")[2]["feedback"])
                     self.assertIn("search", [e["kind"] for e in Workspace(self.ws).entries()])
                     self.assertNotEqual(Workspace(self.ws).state["waiting"]["id"], w["id"])
                 else:
-                    self.answer("new_session", "换个会话写 search")
+                    self.answer("new_session", "write the search in a new session")
                     self.status()
                     ws = Workspace(self.ws)
                     new = [d for d in ws.dispatches() if d["module"] == "train"][-1]
                     self.assertNotEqual(new["id"], "d-0002")
                     self.assertEqual(new["purpose"], "train")
-                    self.assertIn("换个会话写 search", self.calls(new["id"])[0]["feedback"])
+                    self.assertIn("write the search in a new session", self.calls(new["id"])[0]["feedback"])
 
     def test_resume_rebuilds_the_brief(self):
         # train is sent back after data made a new trainset: its brief names the new one and the candidate it
@@ -1091,16 +1130,16 @@ class TestR15Engine(DecisionCase):
         self.use_task(TE.task_def(max_returns=0), "ws-rb")
         self.behave("train", gate_fail=True)
         self.assertEqual(self.status()[0], "waiting_user")
-        self.answer("data", "补数据")
+        self.answer("data", "add data")
         self.assertEqual(self.status()[0], "waiting_user")
-        self.answer("train", "用新训练集再训")
+        self.answer("train", "train again on the new trainset")
         self.status()
         ws = Workspace(self.ws)
         with open(self.outfile("d-0002", "brief.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f)["ids"]["trainset"], "trainset-0002")
         self.assertTrue(os.path.isfile(self.outfile("d-0002", "brief-1.md")))
         feedback = self.calls("d-0002")[2]["feedback"]
-        self.assertIn("简报有变化", feedback)
+        self.assertIn("The brief has changed", feedback)
         self.assertIn("trainset-0001 → trainset-0002", feedback)
         cand = [e["id"] for e in ws.entries("candidate") if e["source"].startswith(self.outfile("d-0002", ""))][-1]
         self.assertEqual(ws.manifest(cand)["trainset_id"], "trainset-0002")
@@ -1109,25 +1148,25 @@ class TestR15Engine(DecisionCase):
         t = TE.task_def(max_rounds=2)
         t["approvals"].append("plan")
         self.use_task(t, "ws-ad")
-        self.behave("data", questions=["要不要多造短消息？"])
+        self.behave("data", questions=["Make more short messages?"])
         self.assertEqual(self.status()[0], "waiting_user")
-        self.answer("已回答", "要，多造短消息")
+        self.answer("answered", "yes, make more short messages")
         self.assertEqual(self.status()[0], "waiting_user")  # at the plan approval
         ws = Workspace(self.ws)
         self.assertEqual(ws.waiting()["what"], "plan")
         # The answer went back to the asking data session with its next launch, once.
-        self.assertIn("要，多造短消息", self.calls("d-0001")[1]["feedback"])
+        self.assertIn("yes, make more short messages", self.calls("d-0001")[1]["feedback"])
         rec = [d for d in ws.decisions() if d["point"] == "handback"][0]
         self.assertEqual(rec["delivered_to"], ["d-0001 launch 2"])
         with open(self.outfile("d-0004", "brief.md"), encoding="utf-8") as f:  # the judge's plan brief (rebuilt)
-            self.assertIn("要，多造短消息", f.read())
+            self.assertIn("yes, make more short messages", f.read())
         # A data dispatch made later (any round, the same purpose) does not get it again.
         nd = engine.Engine(self.ws, MockRunner(MOCKS), pages=False)
         ws.add_dispatches([{"module": "data", "purpose": "sets", "outdir": "work/round-1/data-x", "launches": 1}])
         d = Workspace(self.ws).dispatches()[-1]
         nd.prepare(Workspace(self.ws), d)
         with open(os.path.join(self.ws, d["outdir"], "brief.md"), encoding="utf-8") as f:
-            self.assertNotIn("要，多造短消息", f.read())
+            self.assertNotIn("yes, make more short messages", f.read())
         self.assertEqual(DP.pending_answers(Workspace(self.ws), dict(d, id="d-9999")), [])
 
     def test_answer_reaches_the_module_in_a_later_round(self):
@@ -1135,14 +1174,14 @@ class TestR15Engine(DecisionCase):
         # and purpose, in any round; not one made for another purpose.
         ws = Workspace(self.ws)
         ws.add_dispatches([{"module": "data", "purpose": "trainset", "outdir": "work/round-1/data", "status": "done"}])
-        ws.add_decision({"point": "handback", "choice": "已回答", "by": "alice", "quote": "用中文数据",
+        ws.add_decision({"point": "handback", "choice": "answered", "by": "alice", "quote": "use the newer data",
                          "question": "q?", "question_id": "q-0001", "dispatch_id": "d-0001", "launches": 1})
         ws.state["round"] = 2
         ws.state["rounds"]["2"] = dict(ws.state["rounds"]["1"], artifacts=[])
         ws.save_state()
         ws = Workspace(self.ws)
         later = {"id": "d-0002", "module": "data", "round": 2, "purpose": "trainset"}
-        self.assertEqual([x["quote"] for x in DP.pending_answers(ws, later)], ["用中文数据"])
+        self.assertEqual([x["quote"] for x in DP.pending_answers(ws, later)], ["use the newer data"])
         self.assertEqual(DP.pending_answers(ws, dict(later, purpose="refresh")), [])
         self.assertEqual(DP.pending_answers(ws, dict(later, module="train")), [])
 
@@ -1153,7 +1192,7 @@ class TestR15Engine(DecisionCase):
         t["decisions"] = {F.TRAIN_GATE_FAILED: "agent"}
         self.use_task(t, "ws-mf")
         self.behave("train", gate_fail=True)
-        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "data", "reason": "补数据"}})
+        self.behave("decide", **{F.TRAIN_GATE_FAILED: {"choice": "data", "reason": "add data"}})
         orig, seen = engine.Engine.made_feedback, []
 
         def flaky(eng, ws, d):
@@ -1169,7 +1208,7 @@ class TestR15Engine(DecisionCase):
         self.assertMilestoneAsk(self.run_engine())
         call = self.calls(seen[0])[0]
         self.assertEqual(call["feedback_file"], "feedback-1.md")
-        self.assertIn("为什么派你", call["feedback"])
+        self.assertIn("Why you were dispatched", call["feedback"])
 
     def test_registration_cut_off_before_state_is_repaired(self):
         orig, fired = Workspace.save_state, []
@@ -1200,13 +1239,13 @@ class TestR15Engine(DecisionCase):
         with open(os.path.join(out, "handback.json"), "w", encoding="utf-8") as f:
             json.dump({"status": "ok", "artifacts": ["testset", "rec"], "marker": None, "notes": "n",
                        "questions": []}, f)
-        Workspace(self.ws).stop("bob", "停")
+        Workspace(self.ws).stop("bob", "stop")
         self.assertEqual(self.status(runner=ManualRunner())[0], "done")
         ws = Workspace(self.ws)
         self.assertEqual([e["kind"] for e in ws.entries()], ["task", "record"])
         d = ws.dispatch("d-0001")
         self.assertEqual(d["status"], "done")
-        self.assertIn("实验记录 record-0001", d["closed"])
+        self.assertIn("experiment records from the hand-back: record-0001", d["closed"])
 
     def test_program_match_with_spaces(self):
         from rsi.runners.base import pid_alive
@@ -1236,17 +1275,17 @@ class TestR15Pages(TF.FlowCase):
         self.candidate(2)
         a = self.action()
         self.assertEqual((a["type"], a["module"]), ("dispatch", "deliver"))
-        self.assertIn("最后一次评测（已用 1 / 2 次）", a["reason"])
+        self.assertIn("last evaluation (uses 1 / 2)", a["reason"])
         import test_dashboard as TDB
-        self.assertIn("最后一次评测", TDB.section(TDB.pages(self.ws)[TDB.OVERVIEW], "now"))
+        self.assertIn("last evaluation", TDB.section(TDB.pages(self.ws)[TDB.OVERVIEW], "now"))
 
     def test_refresh_card_says_the_data_refresh_comes_next(self):
         TF.b_evalset_used_up(self)
         import test_dashboard as TDB
         now = TDB.section(TDB.pages(self.ws)[TDB.OVERVIEW], "now")
-        self.assertIn("刷新评测集", now)
-        self.assertNotIn("③ 交付：派 rsi-deliver", now)
-        self.assertIn("引擎还没有记下这个问题", now)  # the flow asks; rsi run has not recorded it yet
+        self.assertIn("refresh the evalset", now)
+        self.assertNotIn("④ Deliver: Dispatch rsi-deliver", now)
+        self.assertIn("The engine has not recorded this question yet", now)  # the flow asks; rsi run has not recorded it yet
         self.assertIn("answer %s close_round" % self.ws, now)
 
     def test_closed_round_judge_node_names_the_milestone_evaluation(self):
@@ -1271,7 +1310,7 @@ class TestR15Pages(TF.FlowCase):
         ws = Workspace(self.ws)
         node = D.flow_states(ws, D.module_progress(ws))["judge"]
         self.assertEqual(node["state"], "done")
-        self.assertIn("里程碑评测", node["text"])
+        self.assertIn("milestone", node["text"])
 
     def test_events_follow_the_run_log_order(self):
         e = TE.EngineCase("run_engine")
@@ -1281,8 +1320,8 @@ class TestR15Pages(TF.FlowCase):
         import test_dashboard as TDB
         page = TDB.pages(e.ws)[TDB.EVENTS]
         # Newest first: train's candidate was registered after rsi-train was dispatched, in the same second or not.
-        self.assertLess(page.index("candidate-0001"), page.index("派出 rsi-train"))
-        self.assertLess(page.index("派出 rsi-train"), page.index("trainset-0001"))
+        self.assertLess(page.index("candidate-0001"), page.index("Dispatched rsi-train"))
+        self.assertLess(page.index("Dispatched rsi-train"), page.index("trainset-0001"))
 
 
 # ---- the STATE lock ---------------------------------------------------------------------------------

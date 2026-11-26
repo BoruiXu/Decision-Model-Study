@@ -6,6 +6,8 @@ It raises when FAKE_SCORER_FAIL (comma-separated) names "<scheme key>#<seed>" of
 environment, fixed by unsetting it), and prints CUDA's out-of-memory error and exits 1 when CUDA_VISIBLE_DEVICES is
 FAKE_SCORER_OOM_CARD. Rows must carry a target (model.predict fills a uniform one for input rows).
 Every call appends {"model_dir", "base_dir", "device", "cuda", "kw"} to FAKE_SCORER_CALLS when that is set.
+FAKE_SCORER_SHIFT (a number) is subtracted from every row's logit: the ranking stays, the probabilities drop (positives
+scored below one half).
 """
 import json
 import math
@@ -33,6 +35,7 @@ def score_checkpoint(model_dir, rows, *, base_dir=None, device="cuda:0", **kw):
         text = " ".join(x["content"] for x in r["state"]["messages"])
         y = 1 if "label=yes" in text else 0
         z = float(m["quality"]) * (2 * y - 1) + random.Random(f"{m['key']}|{m['seed']}|{r['id']}").gauss(0, 1)
+        z -= float(os.environ.get("FAKE_SCORER_SHIFT") or 0)
         p = 1 / (1 + math.exp(-z))
         out[r["id"]] = {"id": r["id"], "labels": ["yes", "no"], "probs": [p, 1 - p],
                         "target": [float(target.get(lab, 0)) for lab in labels]}

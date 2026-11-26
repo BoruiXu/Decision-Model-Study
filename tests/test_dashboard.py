@@ -2,6 +2,7 @@
 run waits for, the workflow diagram, the overview and the three secondary pages."""
 import builtins
 import datetime
+import html
 import json
 import os
 import re
@@ -19,12 +20,12 @@ from rsi.workspace import Workspace
 # Row ids (q<i>) of the data sets; they never overlap.
 TEST_IDS, EVAL_IDS, VAL_IDS, TRAIN_IDS = range(10, 14), range(20, 24), range(0, 4), range(40, 44)
 ALLOWED = {"STATE.json", "registry.jsonl", "manifest.json", "task.json", "REPORT.md", "notes.md", "run.jsonl",
-           "run.lock",  # run.lock: the pid of the `rsi run` that works now (P9: "● 运行中" only then)
+           "run.lock",  # run.lock: the pid of the `rsi run` that works now (P9: "● running" only then)
            "gpus.json", "progress.json", "handback.json"}  # the live panels (handback-<n>.json too: HANDBACK_COPY)
 HANDBACK_COPY = re.compile(r"^handback-\d+(-\d+)?\.json$")
 OVERVIEW, ROUNDS, EVENTS, REPORT = ("dashboard.html", "dashboard/rounds.html", "dashboard/events.html",
                                     "dashboard/report.html")
-TABS = ("概览", "轮次与产物", "事件记录", "运行报告")
+TABS = ("Overview", "Rounds &amp; artifacts", "Events", "Run report")
 FAIL = {"passed": False, "detail": "below the majority baseline"}
 
 
@@ -131,7 +132,7 @@ class DashboardCase(unittest.TestCase):
         return trials, search
 
     def search_over(self, cands, rnd=1):
-        """A search of the training-tuning module (producer train) over the registered candidates `cands` (the first
+        """A search of the train module (producer train) over the registered candidates `cands` (the first
         the default; the best by the validation primary metric); return its id."""
         ws = Workspace(self.ws)
         primary = self.task["metrics"]["primary"]
@@ -254,9 +255,9 @@ class TestModuleProgress(DashboardCase):
         self.assertEqual(D.module_progress(Workspace(self.ws))["data"]["state"], "running")
 
     def test_a_dispatchs_unregistered_hand_back_is_what_its_handback_lists(self):
-        # Final review B-5: with dispatch records, 交回未登记 lists the subdirectories the hand-back names (the task
-        # fill task/ too), not drafts such as a resumed sets' redo/; the task fill is no artifact of ① 数据's
-        # row on the rounds page (it shows under 任务接入).
+        # Final review B-5: with dispatch records, "handed back, not registered" lists the subdirectories the hand-back
+        # names (the task fill task/ too), not drafts such as a resumed sets' redo/; the task fill is no artifact of
+        # ① Data's row on the rounds page (it shows under Task intake).
         ws = Workspace(self.ws)
         out = os.path.join(self.ws, "work", "round-1", "data")
         ws.add_dispatches([{"module": "data", "purpose": "sets", "outdir": "work/round-1/data",
@@ -290,7 +291,7 @@ class TestWaitingFor(DashboardCase):
         cand = self.candidate()
         w = self.waiting()
         self.assertIn("rsi-deliver", w)
-        self.assertIn("（本轮通过训练门的候选：%s）" % cand, w)
+        self.assertIn(" (the round's candidate that passed the train gate: %s)" % cand, w)
         dlv = self.delivery(cand)
         self.assertIn("rsi-judge", self.waiting())
         ev = self.evaluation(cand, dlv)
@@ -298,16 +299,16 @@ class TestWaitingFor(DashboardCase):
         Workspace(self.ws).promote(ev)
         w = self.waiting()
         self.assertIn("rsi-judge", w)
-        self.assertIn("计划", w)
+        self.assertIn("plan", w)
         plan = self.plan(ev)
         w = self.waiting()
-        self.assertIn("批准计划", w)
+        self.assertIn("approve plan", w)
         self.assertIn(plan, w)
         Workspace(self.ws).approve("plan", "alice", "go ahead", plan)
         self.assertIn("rsi next", self.waiting())
         Workspace(self.ws).stop("alice", "enough for now")
         w = self.waiting()
-        self.assertTrue(w.startswith("已停止："), w)
+        self.assertTrue(w.startswith("Stopped: "), w)
         self.assertIn("enough for now", w)
 
     def test_waiting_for_module_output(self):
@@ -315,12 +316,12 @@ class TestWaitingFor(DashboardCase):
         os.makedirs(os.path.join(self.ws, "work", "round-1", "train"))
         w = self.waiting()
         self.assertIn("rsi-train", w)
-        self.assertIn("交回", w)
+        self.assertIn("hand back", w)
         fixtures.make_artifact("candidate", os.path.join(self.ws, "work", "round-1", "train", "cand"), self.task,
                                ids=VAL_IDS, train_ids=TRAIN_IDS)
         w = self.waiting()
         self.assertIn("rsi-train", w)
-        self.assertIn("登记", w)
+        self.assertIn("registration", w)
         self.assertIn("cand", w)
 
     def test_waiting_for_deliver_names_few_candidates(self):
@@ -331,8 +332,9 @@ class TestWaitingFor(DashboardCase):
         cand = self.candidate()
         w = self.waiting()
         self.assertIn("rsi-deliver", w)
-        self.assertIn("本轮通过训练门的候选 13 个：%s、%s、%s 等" % (cand, trials[0], trials[1]), w)
-        self.assertIn("按验证集主指标选最好的送评", w)
+        self.assertIn("13 candidates of the round passed the train gate: %s, %s, %s and others" % (cand, trials[0],
+                                                                                                  trials[1]), w)
+        self.assertIn("the best by the valset primary metric goes to evaluation", w)
         self.assertEqual(len(re.findall(r"candidate-\d{4}", w)), 3, w)
         p = pages(self.ws)
         self.assertEqual(len(re.findall(r"candidate-\d{4}", section(p[OVERVIEW], "now"))), 3)
@@ -341,14 +343,15 @@ class TestWaitingFor(DashboardCase):
 
 
 class TestFlow(DashboardCase):
-    def test_four_stage_nodes(self):
-        st = self.assertFlow(task="done", data="current", train="todo", deliver="todo", judge="todo", check="todo",
-                             stop="todo")
-        self.assertEqual(set(st), {"task", "data", "train", "deliver", "judge", "check", "stop"})
-        page = self.overview()
-        for name in ("① 数据", "② 训练调优", "③ 交付", "④ 评测与决策"):
-            self.assertIn(name, page)
-        for stale in ("③ 调优", "④ 交付", "⑤", "rsi-tune", "② 训练 / ③ 调优"):
+    def test_five_stages_with_compare_off_without_a_compare_section(self):
+        st = self.assertFlow(task="done", data="current", train="todo", compare="skip", deliver="todo", judge="todo",
+                             check="todo", stop="todo")
+        self.assertEqual(set(st), {"task", "data", "train", "compare", "deliver", "judge", "check", "stop"})
+        with open(D.write_dashboard(Workspace(self.ws)), encoding="utf-8") as f:
+            page = f.read()
+        for label in ("① Data", "② Train & tune", "③ Compare (off)", "④ Deliver", "⑤ Judge & decide"):
+            self.assertIn(html.escape(label), page)
+        for stale in ("③ Tune", "③ Deliver", "④ Judge", "rsi-tune", "② Train / ③ Tune"):
             self.assertNotIn(stale, page)
 
     def test_flow_states_follow_the_round(self):
@@ -357,11 +360,11 @@ class TestFlow(DashboardCase):
         self.assertFlow(data="done", train="current")
         cand = self.candidate()
         st = self.assertFlow(data="done", train="done", deliver="current")
-        self.assertEqual(st["train"]["text"], "✓ 训练门通过 · 1 个试验")
+        self.assertEqual(st["train"]["text"], "✓ gate passed · 1 trial")
         out = os.path.join(self.ws, "work", "round-1", "deliver")
         os.makedirs(out)  # rsi-deliver dispatched, nothing handed back yet
         st = self.assertFlow(deliver="current", judge="todo")
-        self.assertIn("运行中", st["deliver"]["text"])
+        self.assertIn("running", st["deliver"]["text"])
         src = fixtures.make_artifact("delivery", os.path.join(out, "delivery"), self.task, round=1, ids=EVAL_IDS,
                                      val_ids=VAL_IDS, candidate_id=cand)
         dlv = Workspace(self.ws).register("delivery", src)
@@ -380,21 +383,21 @@ class TestFlow(DashboardCase):
         st = self.assertFlow(task="done", data="done", train="done", deliver="done", judge="done", check="done",
                              stop="current")
         self.assertRegex(st["stop"]["text"], r"\d\d:\d\d")
-        self.assertIn("停止", st["stop"]["text"])
+        self.assertIn("stopped", st["stop"]["text"])
 
     def test_flow_failed_gate(self):
         self.sets()
         self.reg("candidate", ids=VAL_IDS, wrong=VAL_IDS, train_ids=TRAIN_IDS, train_gate=FAIL)
         st = self.assertFlow(train="fail")  # attempts left: ② again
-        self.assertEqual(st["train"]["text"], "门没过 · 可重派")
-        self.assertIn("回到 rsi-train 再搜一次", self.waiting())
+        self.assertEqual(st["train"]["text"], "gate failed · redispatch")
+        self.assertIn("go back to rsi-train for another search", self.waiting())
         r1 = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("训练门没过", r1)
+        self.assertIn("train gate failed", r1)
         self.assertIn('class="bad"', r1)
-        self.assertNotIn("次尝试已用完", r1)
+        self.assertNotIn("has used up its", r1)
         # Any candidate of ② through the gate (here an old workspace's tune trial) makes ② done.
         self.reg("candidate", ids=VAL_IDS, train_ids=TRAIN_IDS, producer="tune", config_source="tune", notes="trial")
-        self.assertEqual(self.assertFlow(train="done")["train"]["text"], "✓ 训练门通过 · 2 个试验")
+        self.assertEqual(self.assertFlow(train="done")["train"]["text"], "✓ gate passed · 2 trials")
 
     def test_flow_attempts_used_up(self):
         # Nothing to deliver; ④ is still to come (the judge writes the closed round's plan). The rounds page and
@@ -404,12 +407,12 @@ class TestFlow(DashboardCase):
         self.sets()
         self.failed_search()
         st = self.assertFlow(train="fail", deliver="skip", judge="todo", check="current")
-        self.assertEqual(st["train"]["text"], "门没过")
+        self.assertEqual(st["train"]["text"], "gate failed")
         ws = Workspace(self.ws)
         r1 = round_block(pages(ws)[ROUNDS], 1)
         self.assertIn('<p class="warn">', r1)
         self.assertIn("rsi close-round", r1)
-        self.assertIn("次尝试已用完", self.waiting())
+        self.assertIn("Round 1 has used up its 1 attempt", self.waiting())
         self.assertIn("rsi close-round", self.waiting())
         self.assertEqual([], D.pending_questions(ws, D.module_progress(ws)))
         ws.close_round("no candidate passed")
@@ -429,10 +432,10 @@ class TestFlow(DashboardCase):
                                      wrong=VAL_IDS, train_ids=TRAIN_IDS, train_gate=FAIL)
         Workspace(self.ws).register("candidate", src)
         st = self.assertFlow(train="current")
-        self.assertEqual(st["train"]["text"], "● 进行中")
+        self.assertEqual(st["train"]["text"], "● in progress")
         Workspace(self.ws).close_round("no candidate passed")
         st = self.assertFlow(train="todo", check="done")
-        self.assertEqual(st["train"]["text"], "本轮已判定，未完成")
+        self.assertEqual(st["train"]["text"], "decided, unfinished")
 
     def test_flow_entry_after_data(self):
         # Round 2 enters at train: data is not passed through, even with a refreshed evalset.
@@ -442,7 +445,7 @@ class TestFlow(DashboardCase):
         self.plan(self.promoted_round())
         self.assertEqual(Workspace(self.ws).next_round(), (2, "train"))
         st = self.assertFlow(data="skip", train="current")
-        self.assertEqual(st["data"]["text"], "本轮不经过")
+        self.assertEqual(st["data"]["text"], "skipped this round")
         Workspace(self.ws).approve("refresh_sets", "alice", "new evalset")
         self.reg("evalset", 2, ids=range(30, 34))
         self.assertFlow(data="skip")
@@ -451,11 +454,11 @@ class TestFlow(DashboardCase):
         self.sets()
         os.makedirs(os.path.join(self.ws, "work", "round-1", "train"))
         st = self.assertFlow(train="current")
-        self.assertIn("运行中", st["train"]["text"])
+        self.assertIn("running", st["train"]["text"])
         Workspace(self.ws).stop("alice", "stop now")
         st = self.assertFlow(train="skip", stop="current")
-        self.assertIn("停止时未交回", st["train"]["text"])
-        self.assertNotIn("运行中", st["train"]["text"])
+        self.assertIn("not handed back at stop", st["train"]["text"])
+        self.assertNotIn("running", st["train"]["text"])
 
 
 class TestOverview(DashboardCase):
@@ -471,7 +474,7 @@ class TestOverview(DashboardCase):
         p = pages(self.ws)
         for sec in ("flow", "best", "stop", "now"):
             self.assertIn('id="%s"' % sec, p[OVERVIEW])
-        overview = p[OVERVIEW].replace(section(p[OVERVIEW], "recent"), "")  # 最近事件 quotes the events page
+        overview = p[OVERVIEW].replace(section(p[OVERVIEW], "recent"), "")  # Recent events quotes the events page
         self.assertNotIn("record-0001", overview)
         for t in trials:
             self.assertNotIn(t, overview)
@@ -485,13 +488,13 @@ class TestOverview(DashboardCase):
         ws = Workspace(self.ws)
         self.assertTrue(ws.stop_check()[0])
         items = D.pending_questions(ws, D.module_progress(ws))
-        self.assertTrue(any("里程碑" in i["text"] for i in items), items)
-        self.assertFalse(any("批准计划" in i["text"] or plan in i["text"] for i in items), items)
-        self.assertIn("里程碑", self.waiting())
+        self.assertTrue(any("Milestone release" in i["text"] for i in items), items)
+        self.assertFalse(any("Approve plan" in i["text"] or plan in i["text"] for i in items), items)
+        self.assertIn("Milestone release", self.waiting())
         self.assertFlow(check="wait")
 
     def test_best_card(self):
-        self.assertIn("还没有版本", section(self.overview(), "best"))
+        self.assertIn("No version yet", section(self.overview(), "best"))
         self.promoted_round()
         best = section(self.overview(), "best")
         self.assertIn("V1", best)
@@ -502,7 +505,7 @@ class TestOverview(DashboardCase):
         self.use_task(task, "ws-target-reached")
         self.promoted_round()  # auc 1 reaches the target 0.8
         best = section(self.overview(), "best")
-        self.assertIn("距目标", best)
+        self.assertIn("Toward the target", best)
         self.assertNotIn("meter hot", best)
         self.assertIn('style="width:100%"', best)
         self.use_task(fixtures.binary_task(), "ws-two-versions")
@@ -512,73 +515,75 @@ class TestOverview(DashboardCase):
         self.assertIn('<svg class="spark"', best)
         # Unknown numbers: a lower-is-better metric rsi does not know, no target, no budget.
         task = fixtures.binary_task()
-        task["metrics"]["primary"] = "expected_cost"
+        task["metrics"]["primary"] = "net_cost"
         task["metrics"]["higher_is_better"] = False
         task["budget"]["compute_hours"] = None
         task["stop"]["target"] = None
         self.use_task(task, "ws-unknown")
         page = self.overview()  # no version yet: the best value is unknown
-        self.assertIn("还没有版本", section(page, "best"))
-        self.assertIn("目标未设", section(page, "best"))
+        self.assertIn("No version yet", section(page, "best"))
+        self.assertIn("no target set", section(page, "best"))
         self.promoted_round()
         page = self.overview()
         best = section(page, "best")
-        self.assertIn("expected_cost", best)
+        self.assertIn("net_cost", best)
         self.assertIn("0.85", best)
-        self.assertIn("目标未设", best)  # the null target
-        self.assertNotIn("距目标", best)
-        self.assertIn("无上限", section(page, "stop"))  # the null budget
+        self.assertIn("no target set", best)  # the null target
+        self.assertNotIn("Toward the target", best)
+        self.assertIn("no limit", section(page, "stop"))  # the null budget
 
     def test_stop_card(self):
         stop = section(self.overview(), "stop")
-        for label in ("已完成轮数", "连续未升级", "本轮尝试", "评测集使用", "算力"):
+        for label in ("Rounds completed", "Rounds without promotion", "Attempts this round", "Evalset uses",
+                      "GPU hours"):
             self.assertIn(label, stop)
         self.assertIsNone(self.task["budget"]["compute_hours"])
-        self.assertIn("无上限", stop)
-        self.assertNotIn("停止检查", stop)  # no raw check-stop sentence
+        self.assertIn("no limit", stop)
+        self.assertNotIn("Stop check", stop)  # no raw check-stop sentence
         self.assertNotIn("no stop condition", stop)
-        self.assertNotIn("停止条件已满足", stop)
+        self.assertNotIn("stop condition is met", stop)
         task = fixtures.binary_task()
         task["budget"]["compute_hours"] = 10
         self.use_task(task, "ws-budget")
-        self.assertNotIn("无上限", section(self.overview(), "stop"))
+        self.assertNotIn("no limit", section(self.overview(), "stop"))
         task = fixtures.binary_task()
         task["stop"]["target"] = 0.8
         self.use_task(task, "ws-stop-met")
         self.promoted_round()
         stop = section(self.overview(), "stop")
-        self.assertIn("停止条件已满足", stop)
+        self.assertIn("stop condition is met", stop)
         self.assertNotIn("reached target", stop)
         Workspace(self.ws).stop("alice", "stop now")
         stop = section(self.overview(), "stop")
-        self.assertNotIn("停止条件已满足", stop)
+        self.assertNotIn("stop condition is met", stop)
         self.assertNotIn("stop now", stop)  # the reason is in the now card, not repeated here
 
     def test_now_card(self):
         self.sets()
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "下一步：② 训练调优")
-        self.assertTrue(detail.startswith("派 rsi-train（"), detail)  # the action, muted
-        self.assertIn("已用尝试 0 / 3", detail)
-        self.assertRegex(section(self.overview(), "now"), r"自 \d{4}-\d\d-\d\d \d\d:\d\d:\d\d 起")
+        self.assertEqual(lead, "Next: ② Train &amp; tune")
+        self.assertTrue(detail.startswith("Dispatch rsi-train ("), detail)  # the action, muted
+        self.assertIn("attempts used 0 / 3", detail)
+        self.assertRegex(section(self.overview(), "now"), r"since \d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
         os.makedirs(os.path.join(self.ws, "work", "round-1", "train"))
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "② 训练调优：rsi-train 运行中")
-        self.assertIn("输出目录自", detail)  # the sentence names when the module started, once
+        self.assertEqual(lead, "② Train &amp; tune: rsi-train running")
+        self.assertIn("output directory since", detail)  # the sentence names when the module started, once
         self.assertEqual(len(re.findall(r"\d\d:\d\d:\d\d", section(self.overview(), "now"))), 1)
-        Workspace(self.ws).stop("alice", "stop now")
+        Workspace(self.ws).stop("alice", "Stop the run.")  # a quote ending in a full stop: no ".." after it
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "已停止：user requested: stop now")
-        self.assertEqual(detail, "运行 rsi run 写运行报告。")  # no link to an empty report page; rsi run writes it
+        self.assertEqual(lead, "Stopped: user requested: Stop the run")
+        self.assertEqual(detail, "Run rsi run to write the run report.")  # no link to an empty report page; rsi run writes it
+        self.assertEqual(self.waiting(), "Stopped: user requested: Stop the run. Run rsi run to write the run report.")
         self.assertNotIn("dashboard/report.html", section(self.overview(), "now"))
         with open(os.path.join(self.ws, "REPORT.md"), "w", encoding="utf-8") as f:
-            f.write("# 报告\n")
+            f.write("# Report\n")
         self.assertIn('href="dashboard/report.html"', self.now_parts()[1])
         # A plan to approve, then attempts used up.
         self.plan_task("ws-now-plan")
         plan = self.plan(self.promoted_round())
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "等你批准计划 %s" % plan)
+        self.assertEqual(lead, "Waiting for the user to approve plan %s" % plan)
         self.assertIn("rsi answer", detail)  # the same answer command as every question; rsi approve the alternative
         now = section(self.overview(), "now")
         self.assertIn("answer %s approve" % self.ws, now)
@@ -586,14 +591,14 @@ class TestOverview(DashboardCase):
         self.assertNotIn(section(self.overview(), "ask").split("<li>")[1].split("<")[0], detail)  # not the banner
         row = decision_row(round_block(pages(self.ws)[ROUNDS], 1))  # the rounds page: not approved yet
         self.assertIn(plan, row)
-        self.assertIn("未批准", row)
+        self.assertIn("not approved", row)
         self.task["stop"]["max_attempts_per_round"] = 1
         self.use_task(self.task, "ws-now-close")
         self.sets()
         self.failed_search()
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "等关闭本轮（rsi close-round）")
-        self.assertIn("rsi run 关闭本轮（rsi close-round 的效果）", detail)  # rsi run does it, not the operator
+        self.assertEqual(lead, "Waiting for the round to be closed (rsi close-round)")
+        self.assertIn("rsi run closes the round (as rsi close-round does)", detail)  # rsi run does it, not the operator
 
 
 class TestSecondaryPages(DashboardCase):
@@ -615,11 +620,11 @@ class TestSecondaryPages(DashboardCase):
         self.assertLess(r1.index(trial), r1.index("</details>", nested))
         self.assertIn('href="../artifacts/candidate-0001/manifest.json"', page)
         row = decision_row(r1)
-        self.assertIn("升级 V1", row)
+        self.assertIn("promote V1", row)
         self.assertIn("plan-0001", row)
-        self.assertIn("已批准", row)
-        self.assertNotIn("未批准", row)
-        self.assertIn("升级 V2", decision_row(round_block(rounds, 2)))
+        self.assertIn(" (approved)", row)
+        self.assertNotIn("not approved", row)
+        self.assertIn("promote V2", decision_row(round_block(rounds, 2)))
 
     def test_events_page(self):
         self.plan_task("ws-events")
@@ -632,28 +637,28 @@ class TestSecondaryPages(DashboardCase):
         Workspace(self.ws).approve("plan", "alice", "go ahead", plan)
         events = section(pages(self.ws)[EVENTS], "events")
         self.assertLess(events.index("evaluation-0001"), events.index("task-0001"))  # newest first
-        self.assertIn("登记 %d 个试验候选" % (1 + len(trials)), events)  # train's candidate and the tune trials
+        self.assertIn("Registered %d trial candidates" % (1 + len(trials)), events)  # train's candidate and the tune trials
         self.assertIn(cand, events)
         self.assertIn(trials[-1], events)
         self.assertNotIn(trials[0], events)  # one line for the run of trials
-        self.assertIn("批准 plan", events)
-        self.assertIn("第 1 轮判定", events)
+        self.assertIn("Approved plan", events)
+        self.assertIn("Round 1 decided", events)
         self.assertIn('href="../artifacts/evaluation-0001/manifest.json"', events)
 
     def test_report_page(self):
-        self.assertIn("还没有运行报告", section(pages(self.ws)[REPORT], "report"))
+        self.assertIn("No run report yet", section(pages(self.ws)[REPORT], "report"))
         from rsi.report import write_report
         self.promoted_round()
         path = os.path.join(self.ws, "REPORT.md")
         write_report(Workspace(self.ws), path)
         with open(path, "a", encoding="utf-8") as f:
-            f.write("\n<b>x</b> & 结论\n")
+            f.write("\n<b>x</b> & conclusion\n")
         page = pages(self.ws)[REPORT]
         report = section(page, "report")
         self.assertIn("<table>", report)
         self.assertIn("<h2>", report)
         self.assertFalse([line for line in page.splitlines() if line.startswith("|")])
-        self.assertIn("&lt;b&gt;x&lt;/b&gt; &amp; 结论", report)
+        self.assertIn("&lt;b&gt;x&lt;/b&gt; &amp; conclusion", report)
         self.assertNotIn("<b>x</b>", page)
         self.assertIn('href="../REPORT.md"', page)
 
@@ -689,7 +694,7 @@ class TestProgressTruth(DashboardCase):
         ws = Workspace(self.ws)
         self.assertEqual(D.module_progress(ws)["deliver"]["state"], "unregistered")
         w, flow = self.waiting_and_flow()
-        self.assertIn("登记", w)
+        self.assertIn("regist", w)
         self.assertEqual(flow["deliver"]["state"], "current")
         dlv = self.delivery(cand)  # registered from elsewhere afterwards
         ws = Workspace(self.ws)
@@ -698,11 +703,11 @@ class TestProgressTruth(DashboardCase):
         self.assertEqual(p["pending"], [])
         self.assertEqual(p["superseded"], {"delivery-a": dlv})
         w, flow = self.waiting_and_flow()
-        self.assertNotIn("登记", w)
+        self.assertNotIn("regist", w)
         self.assertEqual(flow["deliver"]["state"], "done")
         block = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("已被 %s 取代" % dlv, block)
-        self.assertNotIn("交回未登记", block)
+        self.assertIn("superseded by %s" % dlv, block)
+        self.assertNotIn("handed back, not registered", block)
 
     def test_refused_handback_without_later_registration_stays_pending(self):
         self.sets()
@@ -710,14 +715,14 @@ class TestProgressTruth(DashboardCase):
         self.pending_delivery(cand)
         self.reg("candidate", ids=VAL_IDS, wrong=(0,), train_ids=TRAIN_IDS)  # another kind: no supersede
         self.assertEqual(D.module_progress(Workspace(self.ws))["deliver"]["state"], "unregistered")
-        self.assertIn("登记", self.waiting())
+        self.assertIn("regist", self.waiting())
         # A delivery registered BEFORE the refused directory was written does not supersede it either.
         self.delivery(cand)
         self.pending_delivery(cand, "delivery-b", "deliver-2", age=-3600)
         p = D.module_progress(Workspace(self.ws))["deliver"]
         self.assertEqual(p["state"], "unregistered")
         self.assertIn("delivery-b", p["pending"])
-        self.assertIn("交回未登记", round_block(pages(self.ws)[ROUNDS], 1))
+        self.assertIn("handed back, not registered", round_block(pages(self.ws)[ROUNDS], 1))
 
     def milestone_round(self):
         """A promoted round whose stop check says stop (target met), V1 best; return the candidate."""
@@ -745,20 +750,20 @@ class TestProgressTruth(DashboardCase):
         self.assertIn("rsi next", w + " " + "".join(q["text"] for q in self.questions()))  # question time
         Workspace(self.ws).approve("use_testset", "alice", "run the test inputs")
         w, flow = self.waiting_and_flow()
-        self.assertIn("里程碑发布进行中", w)
+        self.assertIn("Milestone release in progress", w)
         self.assertIn("rsi-deliver", w)
         self.assertNotIn("rsi next", w)
         self.assertEqual(flow["check"]["state"], "current")
-        self.assertIn("里程碑发布中", flow["check"]["text"])
+        self.assertIn("milestone release", flow["check"]["text"])
         page = self.overview()
-        self.assertIn("里程碑发布进行中", section(page, "now"))
+        self.assertIn("Milestone release in progress", section(page, "now"))
         self.assertNotIn("rsi next", section(page, "now"))
         self.milestone_delivery(cand)
         w, flow = self.waiting_and_flow()
-        self.assertIn("里程碑发布进行中", w)
+        self.assertIn("Milestone release in progress", w)
         self.assertIn("rsi-judge", w)
         self.assertNotIn("rsi next", w)
-        self.assertIn("里程碑发布中", flow["check"]["text"])
+        self.assertIn("milestone release", flow["check"]["text"])
         Workspace(self.ws).approve("use_testset", "alice", "run the test inputs")
         self.reg("evaluation", 1, ids=EVAL_IDS, train_ids=TRAIN_IDS, delivery_id="delivery-0002",
                  candidate_id=cand, evalset_id="evalset-0001", uses_testset=True, test_ids=TEST_IDS,
@@ -766,14 +771,14 @@ class TestProgressTruth(DashboardCase):
                  recommendation={"decision": "keep", "reason": "milestone release"})
         w, flow = self.waiting_and_flow()
         self.assertIn("rsi next", w)
-        self.assertIn("停止条件已满足", w)
-        self.assertNotIn("里程碑发布进行中", w)
-        self.assertNotIn("里程碑发布中", flow["check"]["text"])
-        self.assertIn("升级 V1 · 里程碑评测", flow["judge"]["text"])  # M19, the round's verdict stays
-        self.assertNotIn("先问用户是否做里程碑发布", w)
+        self.assertIn("stop condition is met", w)
+        self.assertNotIn("Milestone release in progress", w)
+        self.assertNotIn("milestone release", flow["check"]["text"])
+        self.assertIn("promote V1 · milestone", flow["judge"]["text"])  # M19, the round's verdict stays
+        self.assertNotIn("first asks the user whether to make a milestone release", w)
 
     def test_trials_without_search_wait_for_the_search(self):
-        # S4: a train dispatch registered its search's trials: the search comes before ③.
+        # S4: a train dispatch registered its search's trials: the search comes before ④ (③ is off).
         self.sets()
         out = "work/round-1/train"
         os.makedirs(os.path.join(self.ws, out))
@@ -783,8 +788,8 @@ class TestProgressTruth(DashboardCase):
                                      train_ids=TRAIN_IDS)
         trial = Workspace(self.ws).register("candidate", src)
         w, flow = self.waiting_and_flow()
-        self.assertIn("rsi-train 写 search", w)
-        self.assertNotIn("③ 交付", w)
+        self.assertIn("rsi-train to write the search", w)
+        self.assertNotIn("④ Deliver", w)
         self.assertNotEqual(flow["deliver"]["state"], "current")
         self.assertIn("rsi-train", section(self.overview(), "now"))
         self.search_over([trial])
@@ -802,16 +807,16 @@ class TestProgressTruth(DashboardCase):
         with open(path, "w", encoding="utf-8") as f:
             f.write("".join(json.dumps(r) + "\n" for r in rows))
         events = section(pages(self.ws)[EVENTS], "events")
-        names = re.findall(r"登记(测试集|评测集|验证集|训练集)", events)
-        self.assertEqual(names, ["训练集", "验证集", "评测集", "测试集"])
+        names = re.findall(r"Registered (testset|evalset|valset|trainset)", events)
+        self.assertEqual(names, ["trainset", "valset", "evalset", "testset"])
 
     def test_decided_current_round_is_not_running(self):
         # M12
         self.promoted_round()
         head = round_block(pages(self.ws)[ROUNDS], 1).split("</summary>")[0]
-        self.assertIn("升级 V1", head)
-        self.assertNotIn("进行中", head)
-        self.assertRegex(head, r">已 [^<]*分")
+        self.assertIn("promote V1", head)
+        self.assertNotIn("in progress", head)
+        self.assertRegex(head, r">[^<]*minute[^<]* so far<")
 
     def test_data_node_counts_current_sets_only(self):
         # M13
@@ -823,7 +828,7 @@ class TestProgressTruth(DashboardCase):
                                                        "passed": False}]})
         self.reg("trainset", ids=TRAIN_IDS)
         _w, flow = self.waiting_and_flow()
-        self.assertEqual(flow["data"]["text"], "✓ 4 个集合")
+        self.assertEqual(flow["data"]["text"], "✓ 4 sets")
 
     def test_redelivery_of_best_does_not_finish_step_four(self):
         # M16: after a refresh the best version needs a re-delivery on the new evalset; that re-delivery (an earlier
@@ -831,18 +836,18 @@ class TestProgressTruth(DashboardCase):
         self.refresh_task("ws-refresh-step4")
         Workspace(self.ws).approve("refresh_sets", "alice", "refresh it")
         self.assertIsNotNone(Workspace(self.ws).best_delivery_on_current_evalset())
-        self.assertNotIn("重新交付", self.waiting())
+        self.assertNotIn("re-deliver", self.waiting())
         self.reg("evalset", 2, ids=range(60, 64))  # refreshed evalset: V1 has no delivery on it
         self.assertIsNone(Workspace(self.ws).best_delivery_on_current_evalset())
         w, flow = self.waiting_and_flow()
         self.assertIn("rsi-deliver", w)
-        self.assertIn("重新交付", w)
+        self.assertIn("re-deliver", w)
         self.assertIn("V1", w)
         best_cand = Workspace(self.ws).version("V1")["candidate_id"]
         self.reg("delivery", 2, ids=range(60, 64), val_ids=VAL_IDS, candidate_id=best_cand, evalset_id="evalset-0002")  # re-delivery of V1
         w, flow = self.waiting_and_flow()
         self.assertIn("rsi-deliver", w)
-        self.assertNotIn("重新交付", w)
+        self.assertNotIn("re-deliver", w)
         self.assertNotIn("rsi-judge", w)
         self.assertEqual(flow["deliver"]["state"], "current")
         self.assertEqual(flow["judge"]["state"], "todo")
@@ -890,10 +895,10 @@ class TestProgressTruth(DashboardCase):
         self.assertIsNone(Workspace(self.ws).best_delivery_on_current_evalset())
         w, flow = self.waiting_and_flow()
         self.assertIn("rsi-deliver", w)
-        self.assertIn("重新交付", w)
+        self.assertIn("re-deliver", w)
         self.assertNotIn("rsi-judge", w)
         self.assertEqual(flow["deliver"]["state"], "current")
-        self.assertIn("待重新交付最佳版本", flow["deliver"]["text"])
+        self.assertIn("re-deliver best version", flow["deliver"]["text"])
 
     def test_attempts_meter_is_hot_only_without_a_passing_candidate(self):
         # M17: the first search passes, a second one adds trials (attempts 2 / 3 here)
@@ -902,16 +907,16 @@ class TestProgressTruth(DashboardCase):
         self.tune_trials(n=2)
         ws = Workspace(self.ws)
         self.assertEqual((len(ws.attempts()), ws.attempt_limit()), (2, 3))
-        self.assertNotIn("hot", self.meter("本轮尝试"))
+        self.assertNotIn("hot", self.meter("Attempts this round"))
         self.search_over([self.reg("candidate", ids=VAL_IDS, wrong=(1,), train_ids=TRAIN_IDS)])  # third, passing
         self.assertEqual(len(Workspace(self.ws).attempts()), 3)
-        self.assertNotIn("hot", self.meter("本轮尝试"))
+        self.assertNotIn("hot", self.meter("Attempts this round"))
         task = fixtures.binary_task()
         task["stop"]["max_attempts_per_round"] = 1
         self.use_task(task, "ws-hot")
         self.sets()
         self.failed_search()
-        self.assertIn("hot", self.meter("本轮尝试"))
+        self.assertIn("hot", self.meter("Attempts this round"))
 
     def meter(self, label):
         stop = section(self.overview(), "stop")
@@ -924,7 +929,7 @@ class TestPages(DashboardCase):
         p = pages(self.ws, now=datetime.datetime(2026, 11, 22, 9, 30, 15))
         self.assertEqual(set(p), set(D.PAGES))
         for rel, text in p.items():
-            self.assertIn("更新于 2026-11-22 09:30:15", text, rel)  # the given generation time
+            self.assertIn("Updated 2026-11-22 09:30:15", text, rel)  # the given generation time
         for rel in (ROUNDS, EVENTS, REPORT):
             self.assertIn('href="dashboard/%s"' % rel.split("/")[1], p[OVERVIEW])
             self.assertIn('href="../dashboard.html"', p[rel])
@@ -948,7 +953,7 @@ class TestPages(DashboardCase):
         self.sets()
         self.chain()
         with open(os.path.join(self.ws, "REPORT.md"), "w", encoding="utf-8") as f:
-            f.write("# 报告\n")
+            f.write("# Report\n")
         # Module output in work/ is listed, never read.
         out = fixtures.make_artifact("candidate", os.path.join(self.ws, "work", "round-1", "train", "cand"),
                                      self.task, ids=VAL_IDS)
@@ -1073,20 +1078,20 @@ class TestQuestions(DashboardCase):
         page = p[OVERVIEW]
         self.assertIn('id="ask"', page)
         self.assertLess(page.index('id="ask"'), page.index('id="flow"'))
-        self.assertIn("⏸ 等你在 Claude 里回答", page)
+        self.assertIn("⏸ Waiting for the user to answer in Claude", page)
         self.assertIn(plan, section(page, "ask"))
         for rel, text in p.items():
-            self.assertRegex(text, r"<title>⏸ 需要你回答", rel)
-            self.assertIn("⏸ 等你回答", text)  # the status label of the top bar
-        self.write_notes("## 待用户回答\n- 笔记问题\n")  # STATE's questions come before the notes' ones
+            self.assertRegex(text, r"<title>⏸ Waiting for the user", rel)
+            self.assertIn("⏸ waiting for the user", text)  # the status label of the top bar
+        self.write_notes("## Questions for the user\n- a question in the notes\n")  # STATE's questions come first
         self.assertEqual([i["source"] for i in self.questions()], ["state", "notes"])
-        self.write_notes("## 待用户回答\n")
+        self.write_notes("## Questions for the user\n")
         Workspace(self.ws).approve("plan", "alice", "go ahead", plan)
         self.assertEqual(self.questions(), [])
         page = self.overview()
         self.assertNotIn('id="ask"', page)
         self.assertNotIn("⏸", re.search(r"<title>.*?</title>", page).group(0))
-        self.assertIn('<span class="chip idle">等待 rsi run</span>', page)  # "● 运行中" only while rsi run works
+        self.assertIn('<span class="chip idle">waiting for rsi run</span>', page)  # "● running" only while rsi run works
 
     def target_task(self, name):
         task = fixtures.binary_task()
@@ -1105,13 +1110,13 @@ class TestQuestions(DashboardCase):
         ws.save_state()
         items = self.state_items()
         self.assertEqual(len(items), 1)
-        self.assertIn("里程碑", items[0]["text"])
+        self.assertIn("Milestone release", items[0]["text"])
         page = pages(ws)[OVERVIEW]
-        self.assertIn("里程碑", section(page, "ask"))
+        self.assertIn("Milestone release", section(page, "ask"))
         w = self.waiting()
-        self.assertIn("等用户回答", w)
-        self.assertNotIn("派 rsi-", w)
-        self.assertIn("等你在 Claude 里回答上方的问题（1 条）", section(page, "now"))
+        self.assertIn("Waiting for the user", w)
+        self.assertNotIn("Dispatch rsi-", w)
+        self.assertIn("Waiting for the user to answer the question above in Claude", section(page, "now"))
         self.assertFlow(check="wait")
         # The user says yes: the use_testset approval ends the question.
         Workspace(self.ws).approve("use_testset", "alice", "run the test inputs")
@@ -1125,7 +1130,7 @@ class TestQuestions(DashboardCase):
         self.assertEqual(self.state_items(), [])
         page = self.overview()
         self.assertNotIn('id="ask"', page)
-        self.assertIn("■ 已停止", page)
+        self.assertIn('<span class="chip stop">■ stopped</span>', page)
 
     def test_no_milestone_question_without_version(self):
         # A round closed without a candidate leaves no version. max_rounds 1 makes the stop check say stop,
@@ -1167,7 +1172,7 @@ class TestQuestions(DashboardCase):
                 self.assertFlow(train="fail")  # (the node does not show the wait yet: Task 3)
                 Workspace(self.ws).approve("over_budget", "alice", "go over budget")
                 self.assertEqual(self.state_items(), [])
-                self.assertNotIn("等用户回答", self.waiting())
+                self.assertNotIn("Waiting for the user", self.waiting())
             else:
                 self.assertFlow(train="fail")
 
@@ -1193,12 +1198,12 @@ class TestQuestions(DashboardCase):
         self.assertEqual(len(items), 1)
         self.assertIn("refresh_sets", items[0]["text"])
         self.assertEqual(items[0]["since"], D._utc_iso(Workspace(self.ws).entry(ev)["registered_at"]))
-        self.assertIn("自 ", section(self.overview(), "ask"))
+        self.assertIn("(since ", section(self.overview(), "ask"))
         w = self.waiting()
-        self.assertIn("等用户回答", w)
-        self.assertNotIn("派 rsi-deliver", w)
+        self.assertIn("Waiting for the user", w)
+        self.assertNotIn("Dispatch rsi-deliver", w)
         st = self.assertFlow(deliver="wait")  # delivering waits for the user
-        self.assertEqual(st["deliver"]["text"], "⏸ 等你批准")
+        self.assertEqual(st["deliver"]["text"], "⏸ waiting for approval")
         Workspace(self.ws).approve("refresh_sets", "alice", "refresh it")
         self.assertEqual(self.state_items(), [])
         self.assertIn("rsi-data", self.waiting())  # rsi.flow: the new evalset comes first, then ③
@@ -1213,12 +1218,13 @@ class TestQuestions(DashboardCase):
         self.assertEqual(self.state_items(), [])
         w = self.waiting()
         self.assertIn("rsi-judge", w)
-        self.assertNotIn("批准计划", w)
+        self.assertNotIn("approve plan", w.lower())
 
     def test_notes_that_ask_nothing(self):
         self.assertEqual(self.questions(), [])  # no notes.md
-        for text in ("# 笔记\n- 只是笔记\n## 其他\n- 不是问题\n", "# 笔记\n## 待用户回答\n\n   \n## 其他\n- x\n",
-                     "## 待用户回答 （旧）\n- 不算\n"):  # no section, an empty one, another heading
+        for text in ("# Notes\n- just a note\n## Other\n- not a question\n",
+                     "# Notes\n## Questions for the user\n\n   \n## Other\n- x\n",
+                     "## Questions for the user (old)\n- does not count\n"):  # no section, an empty one, another heading
             self.write_notes(text)
             self.assertEqual(self.questions(), [], text)
         os.remove(os.path.join(self.ws, "work", "notes.md"))
@@ -1227,7 +1233,7 @@ class TestQuestions(DashboardCase):
         self.assertEqual(self.questions(), [])
         self.assertIn('id="now"', self.overview())
         os.rmdir(os.path.join(self.ws, "work", "notes.md"))
-        self.write_notes("## 待用户回答\n- x\n")
+        self.write_notes("## Questions for the user\n- x\n")
         os.chmod(os.path.join(self.ws, "work", "notes.md"), 0)
         self.addCleanup(os.chmod, os.path.join(self.ws, "work", "notes.md"), 0o644)
         self.assertEqual(self.questions(), [])  # unreadable (or readable when running as root)
@@ -1239,46 +1245,49 @@ class TestQuestions(DashboardCase):
             f.write(text)
 
     def test_notes_questions(self):
-        self.write_notes("# 笔记\nrepo root: /x\n\n## 待用户回答\n- 质量门没过，要重做还是放宽？\n"
-                         "* <删除> 旧候选？\n\n## 其他\n- 不是问题\n")
+        self.write_notes("# Notes\nrepo root: /x\n\n## Questions for the user\n- The quality gate failed: redo or relax it?\n"
+                         "* <delete> the old candidates?\n\n## Other\n- not a question\n")
         q = self.questions()
         self.assertEqual([i["text"] for i in q if i["source"] == "notes"],
-                         ["质量门没过，要重做还是放宽？", "<删除> 旧候选？"])
+                         ["The quality gate failed: redo or relax it?", "<delete> the old candidates?"])
         self.assertIsNotNone(q[-1]["since"])
         for rel, text in pages(self.ws).items():
-            self.assertNotIn("不是问题", text, rel)
-            self.assertNotIn("<删除>", text, rel)
-        self.assertIn("&lt;删除&gt; 旧候选？", section(self.overview(), "ask"))
+            self.assertNotIn("not a question", text, rel)
+            self.assertNotIn("<delete>", text, rel)
+        self.assertIn("&lt;delete&gt; the old candidates?", section(self.overview(), "ask"))
 
     def test_notes_question_pauses_the_overview(self):
         self.sets()
-        self.write_notes("## 待用户回答\n- 训练用哪台机器？\n")
+        self.write_notes("## Questions for the user\n- Which machine should train?\n")
         page = self.overview()
         now = section(page, "now")
         lead = re.search(r'<div class="wait-now">(.*?)</div>', now).group(1)
         detail = re.search(r'<div class="detail">(.*?)</div>', now).group(1)
-        self.assertEqual(lead, "等你在 Claude 里回答上方的问题（1 条）")
-        self.assertIn("派 rsi-train", detail)  # the step sentence moves to the detail
+        self.assertEqual(lead, "Waiting for the user to answer the question above in Claude")
+        self.assertIn("Dispatch rsi-train", detail)  # the step sentence moves to the detail
+        self.write_notes("## Questions for the user\n- Which machine should train?\n- Keep seed 1?\n- Retry?\n")
+        self.assertEqual(self.now_parts()[0], "Waiting for the user to answer the 3 questions above in Claude")
+        self.write_notes("## Questions for the user\n- Which machine should train?\n")
         st = self.assertFlow(train="wait", data="done")
-        self.assertEqual(st["train"]["text"], "⏸ 等你回答")
-        self.assertIn('<span class="chip ask">⏸ 等你回答</span>', page)
+        self.assertEqual(st["train"]["text"], "⏸ waiting for the user")
+        self.assertIn('<span class="chip ask">⏸ waiting for the user</span>', page)
         os.makedirs(os.path.join(self.ws, "work", "round-1", "train"))
         st = self.assertFlow(train="wait")
-        self.assertEqual(st["train"]["text"], "⏸ 运行中 · 等你回答")
-        self.write_notes("## 待用户回答\n")
+        self.assertEqual(st["train"]["text"], "⏸ running · awaiting user")
+        self.write_notes("## Questions for the user\n")
         st = self.assertFlow(train="current")
-        self.assertIn("运行中", st["train"]["text"])
+        self.assertIn("running", st["train"]["text"])
 
     def test_stopped_label_and_title(self):
         Workspace(self.ws).stop("alice", "stop now")
         page = self.overview()
-        self.assertIn('<span class="chip stop">■ 已停止</span>', page)
+        self.assertIn('<span class="chip stop">■ stopped</span>', page)
         self.assertNotIn("⏸", re.search(r"<title>.*?</title>", page).group(0))
-        self.write_notes("## 待用户回答\n- 要删掉旧候选吗？\n")
+        self.write_notes("## Questions for the user\n- Delete the old candidates?\n")
         for rel, text in pages(self.ws).items():
-            self.assertIn('<span class="chip ask">⏸ 等你回答（已停止）</span>', text, rel)
-            self.assertRegex(text, r"<title>⏸ 需要你回答", rel)
-            self.assertNotIn("■ 已停止", text, rel)
+            self.assertIn('<span class="chip ask">⏸ waiting for the user (stopped)</span>', text, rel)
+            self.assertRegex(text, r"<title>⏸ Waiting for the user", rel)
+            self.assertNotIn('<span class="chip stop">■ stopped</span>', text, rel)
         self.assertFlow(stop="current", check="done")  # a stopped run waits in no step
 
 
@@ -1313,7 +1322,7 @@ class TestEngineState(EngineStateCase):
         self.assertEqual([a["module"] for a in agents], ["train", "tune"])
         self.assertEqual(agents[0]["session"], SESSION)
         now = section(self.overview(), "now")
-        self.assertIn("现在在等什么", now)
+        self.assertIn("What the run waits for", now)
         self.assertIn("rsi-train", now)
         self.assertIn("rsi-tune", now)
         self.assertIn("3f2a9c1e", now)
@@ -1324,7 +1333,7 @@ class TestEngineState(EngineStateCase):
             tzinfo=datetime.timezone.utc).astimezone()
         self.assertIn(started.strftime("%H:%M"), now)
         st = self.assertFlow(train="current")
-        self.assertIn("● 运行中", st["train"]["text"])
+        self.assertIn("● running", st["train"]["text"])
 
     def test_old_tune_records_show_under_training_tuning(self):
         # An old workspace's tune dispatch, trials, search and record: all under ② (rsi.dashboard.stage_of). Its
@@ -1339,18 +1348,18 @@ class TestEngineState(EngineStateCase):
         self.assertNotIn("tune", p)
         self.assertEqual(p["train"]["state"], "running")
         self.assertEqual(D.flow_states(ws, p)["train"]["state"], "current")
-        self.assertEqual(self.now_parts()[0], "② 训练调优：rsi-tune 运行中，rsi-train 待启动")
+        self.assertEqual(self.now_parts()[0], "② Train &amp; tune: rsi-tune running; rsi-train not launched yet")
         block = round_block(pages(ws)[ROUNDS], 1)
-        self.assertIn("rsi-tune 进行中", block)
-        self.assertIn("2 个试验候选", block)
+        self.assertIn("rsi-tune in progress", block)
+        self.assertIn("2 trial candidates", block)
         self.assertIn(search_id, block)
-        self.assertNotIn("其他", block)
-        self.assertIn("登记 2 个试验候选", pages(ws)[EVENTS])
+        self.assertNotIn('<div class="name">Other</div>', block)
+        self.assertIn("Registered 2 trial candidates", pages(ws)[EVENTS])
         from rsi.report import RECORD_SECTIONS, report_markdown
         md = report_markdown(ws)
-        self.assertIn("### ② 训练调优", md)
-        self.assertLess(md.index("### ② 训练调优"), md.index(record_id))
-        for title, modules in RECORD_SECTIONS[:4]:  # the report's sections are the pages' stages
+        self.assertIn("### ② Train & tune", md)
+        self.assertLess(md.index("### ② Train & tune"), md.index(record_id))
+        for title, modules in RECORD_SECTIONS[:5]:  # the report's sections are the pages' stages
             for m in modules:
                 self.assertEqual(D.STEP_NAMES[D.stage_of(m)], title, m)
 
@@ -1362,7 +1371,7 @@ class TestEngineState(EngineStateCase):
         self.assertEqual(D.running_agents(ws), [])
         self.assertEqual([a["id"] for a in D.waiting_long_jobs(ws)], ["d-0001"])
         now = section(self.overview(), "now")
-        self.assertIn("长任务等待标记", now)
+        self.assertIn("long job waiting for its marker", now)
         self.use_task(fixtures.binary_task(), "ws-finished")
         self.sets()
         self.dispatch("train", status="handed_back")
@@ -1391,21 +1400,21 @@ class TestEngineState(EngineStateCase):
         self.assertNotIn("rsi answer", section(self.overview(), "now"))  # no question, no answer command
         did = self.dispatch("train", status="failed")  # the question is about an open failure (not stale)
         w = Workspace(self.ws).set_waiting({"kind": "question", "what": "handback_failed", "ref": did,
-                                            "question": "交回被拒 <b>x</b>，选一个做法", "options": ["resume", "stop"]})
+                                            "question": "Hand-back refused <b>x</b>: pick a way on", "options": ["resume", "stop"]})
         page = self.overview()
         now = section(page, "now")
-        self.assertIn("交回被拒 &lt;b&gt;x&lt;/b&gt;", now)
+        self.assertIn("Hand-back refused &lt;b&gt;x&lt;/b&gt;", now)
         self.assertNotIn("<b>x</b>", page)
         from rsi.briefs import rsi_command
         for opt in ("resume", "stop"):  # the full command, naming the question it answers
             self.assertIn("%s answer %s %s --ref %s --by " % (rsi_command(), self.ws, opt, w["id"]), now)
         self.assertIn("--quote", now)
-        self.assertIn("&lt;你的名字&gt;", now)
-        self.assertIn("&lt;用户原话&gt;", now)
+        self.assertIn("&lt;your name&gt;", now)
+        self.assertIn("&lt;user&#x27;s words&gt;", now)
 
     def test_events_page_merges_the_run_log(self):
         self.sets()
-        ask = {"type": "ask", "question": "要不要关闭本轮？", "options": ["close_round", "stop"]}
+        ask = {"type": "ask", "question": "Close the round?", "options": ["close_round", "stop"]}
         self.log(
             {"at": "2026-11-23T08:00:00Z", "event": "launch", "dispatch_id": "d-0001", "module": "train",
              "launch": 1, "mode": "first", "runner": "claude", "session": SESSION},
@@ -1414,27 +1423,26 @@ class TestEngineState(EngineStateCase):
             {"at": "2026-11-23T08:20:00Z", "event": "resume", "dispatch_id": "d-0001", "mode": "resume",
              "launch": 3, "session": SESSION, "feedback": "feedback-3.md"},
             {"at": "2026-11-23T08:21:00Z", "event": "decision", "point": "handback_refused", "choice": "resume",
-             "by": "code", "reason": "默认 <原因>", "dispatch_id": "d-0001"},
+             "by": "code", "reason": "default <reason>", "dispatch_id": "d-0001"},
             {"at": "2026-11-23T08:22:00Z", "event": "decision", "point": "train_gate_failed", "choice": "tune",
-             "by": "agent", "reason": "配置问题", "dispatch_id": "d-0001"},
+             "by": "agent", "reason": "a config problem", "dispatch_id": "d-0001"},
             {"at": "2026-11-23T08:23:00Z", "event": "action", "step": 3, "action": ask},
             {"at": "2026-11-23T08:24:00Z", "event": "action", "step": 4, "action": ask},
             {"at": "2026-11-23T08:25:00Z", "event": "answer", "point": "handback_failed", "choice": "stop",
-             "by": "alice", "quote": "<停>", "ref": "d-0001", "effect": "the run is stopped"},
+             "by": "alice", "quote": "<stop>", "ref": "d-0001", "effect": "the run is stopped"},
             {"at": "2026-11-23T08:26:00Z", "event": "action", "step": 5, "action": {"type": "dispatch"}},
             "not json at all", "{broken", "[1, 2]")
         events = section(pages(self.ws)[EVENTS], "events")
-        self.assertIn("派出 rsi-train", events)
-        self.assertIn("退回 d-0001（第 1 次", events)
-        self.assertIn("退回 d-0001（第 2 次", events)
-        self.assertIn("决策 handback_refused → resume", events)
-        self.assertIn("代码", events)
-        self.assertIn("默认 &lt;原因&gt;", events)
-        self.assertIn("决策 agent", events)
-        self.assertIn("用户 alice", events)
-        self.assertIn("&lt;停&gt;", events)
-        self.assertNotIn("<停>", events)
-        self.assertEqual(events.count("向用户提问：要不要关闭本轮？"), 1)  # the same ask repeated: one line
+        self.assertIn("Dispatched rsi-train", events)
+        self.assertIn("Returned d-0001 (return 1", events)
+        self.assertIn("Returned d-0001 (return 2", events)
+        self.assertIn("Decision handback_refused → resume", events)
+        self.assertIn("(code; default &lt;reason&gt;)", events)
+        self.assertIn("(decision agent; a config problem)", events)
+        self.assertIn("user alice", events)
+        self.assertIn("&lt;stop&gt;", events)
+        self.assertNotIn("<stop>", events)
+        self.assertEqual(events.count("Asked the user: Close the round?"), 1)  # the same ask repeated: one line
         self.assertIn("task-0001", events)  # registrations are still there
 
     def test_rounds_page_lists_the_dispatches(self):
@@ -1446,10 +1454,10 @@ class TestEngineState(EngineStateCase):
         self.assertIn("rsi-train", block)
         self.assertIn("3f2a9c1e", block)
         self.assertNotIn(SESSION, block)
-        self.assertIn("退回 2 次", block)
-        self.assertIn("运行中", block)
+        self.assertIn("2 returns", block)
+        self.assertIn(">running</span>", block)
         self.assertIn("d-0002", block)
-        self.assertIn("完成", block)
+        self.assertIn(">done</span>", block)
         self.assertIn("sets", block)
 
 
@@ -1462,7 +1470,7 @@ class TestSim2Pages(EngineStateCase):
     def label(self, page=None):
         """The status chip of the top bar."""
         page = self.overview() if page is None else page
-        return re.search(r'<span class="chip">第 \d+ 轮</span>(<span class="chip[^"]*">[^<]*</span>)',
+        return re.search(r'<span class="chip">round \d+</span>(<span class="chip[^"]*">[^<]*</span>)',
                          page).group(1)
 
     def hold_lock(self, pid=None):
@@ -1490,32 +1498,33 @@ class TestSim2Pages(EngineStateCase):
         self.assertEqual(progress["deliver"]["state"], "pending")
         self.assertEqual([a["module"] for a in D.running_agents(ws)], ["train"])
         st = self.assertFlow(train="current", deliver="current")
-        self.assertIn("● 运行中", st["train"]["text"])
-        self.assertEqual(st["deliver"]["text"], "● 待启动")
+        self.assertIn("● running", st["train"]["text"])
+        self.assertEqual(st["deliver"]["text"], "● not launched yet")
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "② 训练调优 / ③ 交付：rsi-train 运行中，rsi-deliver 待启动")
-        self.assertIn("rsi-deliver 待启动", detail)
+        self.assertEqual(lead, "② Train &amp; tune / ④ Deliver: rsi-train running; rsi-deliver not launched yet")
+        self.assertIn("rsi-deliver not launched yet", detail)
         now = section(self.overview(), "now")
-        self.assertIn("d-0002 待启动", now)
-        self.assertNotIn("rsi-deliver 运行中", now)
+        self.assertIn("d-0002 not launched yet", now)
+        self.assertNotIn("rsi-deliver running", now)
         block = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("待启动", block)
-        self.assertIn("rsi-deliver 待启动", block)
+        self.assertIn("not launched yet", block)
+        self.assertIn("rsi-deliver not launched yet", block)
 
     # ---- the user's answer on its way back to the asking session ------------------------------------
 
     def asked(self, module="data", answered=False, **fields):
         rec = dict(status="handed_back", purpose="sets" if module == "data" else module, launches=1,
-                   launched_at=self.LAUNCHED, asked={"launch": 1, "question_id": "q-0001", "questions": ["删不删那 12 封？"]})
+                   launched_at=self.LAUNCHED, asked={"launch": 1, "question_id": "q-0001", "questions": ["Delete those 12 emails?"]})
         rec.update(fields)
         did = self.dispatch(module, **rec)
         ws = Workspace(self.ws)
         if answered:
-            ws.add_decision({"point": "handback", "choice": "已回答", "by": "alice", "quote": "删掉那 12 封",
+            ws.add_decision({"point": "handback", "choice": "answered", "by": "alice", "quote": "delete those 12",
                              "dispatch_id": did, "launches": 1, "question_id": "q-0001"})
         else:
-            ws.set_waiting({"kind": "question", "what": "handback", "ref": did, "options": ["已回答"],
-                            "question": "rsi-%s（%s）交回时有要你决定的事：删不删那 12 封？" % (module, did)})
+            ws.set_waiting({"kind": "question", "what": "handback", "ref": did, "options": ["answered"],
+                            "question": "rsi-%s (%s) handed back a question for the user: Delete those 12 emails?"
+                                        % (module, did)})
         return did
 
     def test_a_held_handback_and_the_answer_on_its_way_back(self):
@@ -1523,23 +1532,23 @@ class TestSim2Pages(EngineStateCase):
         self.asked("data")
         self.dispatch("tune", status="done", purpose="tune", returns=1, followups=1, answered=1, continued=2)
         block = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("交回未登记（等你回答它的提问）", block)
-        self.assertIn("退回 1 次 · 继续 1 次 · 长任务收尾 2 次 · 送回回答 1 次", block)
+        self.assertIn("handed back, not registered (waiting for the user to answer its questions)", block)
+        self.assertIn("1 return · 1 follow-up · 2 long-job wrap-ups · 1 answer sent back", block)
         # Answered (rsi answer), not sent back yet: the pages say the answer is on its way back.
         self.use_task(fixtures.binary_task(), "ws-answered")
         did = self.asked("data", answered=True)
         block = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("交回未登记（已回答，等 rsi run 送回）", block)
-        self.assertNotIn("等你回答它的提问", block)
+        self.assertIn("handed back, not registered (answered; waiting for rsi run to send the answer back)", block)
+        self.assertNotIn("waiting for the user to answer its questions", block)
         a = D.next_action(Workspace(self.ws))
         self.assertEqual((a["type"], a.get("mode")), ("resume", "answer"))
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "① 数据：把你的回答送回 rsi-data")
-        self.assertIn("把你的回答送回 rsi-data 的同一个会话（%s）" % did, detail)
-        self.assertIn("那时才登记", detail)
-        self.assertNotIn("起运行", detail)
-        self.assertIn("送回", self.waiting())
-        self.assertEqual(self.assertFlow(data="current")["data"]["text"], "● 送回你的回答")
+        self.assertEqual(lead, "① Data: sending the user&#x27;s answer back to rsi-data")
+        self.assertIn("Sending the user&#x27;s answer back to the same session of rsi-data (%s)" % did, detail)
+        self.assertIn("only then is it registered", detail)
+        self.assertNotIn("running since", detail)
+        self.assertIn("answer back", self.waiting())
+        self.assertEqual(self.assertFlow(data="current")["data"]["text"], "● sending answer back")
 
     def long_job_asked(self, answered=False):
         """train's long job ended (marker ok) and its hand-back asks something."""
@@ -1554,18 +1563,21 @@ class TestSim2Pages(EngineStateCase):
         # back to the session with the long job's results.
         did = self.long_job_asked()
         st = self.assertFlow(train="wait")
-        self.assertEqual(st["train"]["text"], "⏸ 等你回答")
-        self.assertIn("交回未登记（等你回答它的提问）", round_block(pages(self.ws)[ROUNDS], 1))
+        self.assertEqual(st["train"]["text"], "⏸ waiting for the user")
+        self.assertIn("handed back, not registered (waiting for the user to answer its questions)",
+                      round_block(pages(self.ws)[ROUNDS], 1))
         self.use_task(fixtures.binary_task(), "ws-long-answered")
         did = self.long_job_asked(answered=True)
         a = D.next_action(Workspace(self.ws))
         self.assertEqual((a["type"], a["dispatch_id"]), ("process_handback", did))  # the engine sends the answer
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "② 训练调优：把你的回答送回 rsi-train")
-        self.assertIn("长任务已结束，把你的回答送回 rsi-train 的同一个会话（%s）" % did, detail)
-        self.assertNotIn("等校验、登记", detail)
-        self.assertIn("交回未登记（已回答，等 rsi run 送回）", round_block(pages(self.ws)[ROUNDS], 1))
-        self.assertEqual(self.assertFlow(train="current")["train"]["text"], "● 送回你的回答")
+        self.assertEqual(lead, "② Train &amp; tune: sending the user&#x27;s answer back to rsi-train")
+        self.assertIn("The long job has ended; sending the user&#x27;s answer back to the same session of rsi-train "
+                      "(%s)" % did, detail)
+        self.assertNotIn("checked and registered", detail)
+        self.assertIn("handed back, not registered (answered; waiting for rsi run to send the answer back)",
+                      round_block(pages(self.ws)[ROUNDS], 1))
+        self.assertEqual(self.assertFlow(train="current")["train"]["text"], "● sending answer back")
 
     def test_after_a_stop_the_pages_say_what_still_runs_and_what_waited(self):
         # I2, M1, M7 (final review): the rounds page and the agents list agree with the diagram after a stop.
@@ -1575,24 +1587,24 @@ class TestSim2Pages(EngineStateCase):
         Workspace(self.ws).clear_waiting()
         Workspace(self.ws).stop("alice", "stop now")
         block = round_block(pages(self.ws)[ROUNDS], 1)
-        self.assertIn("rsi-train 停止后仍在运行", block)
-        self.assertIn("停止时未启动", block)
-        self.assertIn("交回未登记（停止时还在等你回答）", block)
-        self.assertNotIn("停止时未交回", block)
+        self.assertIn("rsi-train still running after the stop", block)
+        self.assertIn("not launched at the stop", block)
+        self.assertIn("handed back, not registered (still waiting for the user at the stop)", block)
+        self.assertNotIn("not handed back at the stop", block)
         now = section(self.overview(), "now")
-        self.assertIn("d-0002 停止时未启动（rsi run 关闭它，不再启动）", now)
-        self.assertNotIn("待启动", now)
+        self.assertIn("d-0002 not launched at the stop (rsi run closes it and does not launch it)", now)
+        self.assertNotIn("not launched yet", now)
         st = self.assertFlow(train="current", deliver="skip", data="skip")
-        self.assertEqual(st["train"]["text"], "● 停止后仍在运行")
-        self.assertEqual(st["deliver"]["text"], "停止时未启动")
-        self.assertEqual(st["data"]["text"], "停止时还在等你回答")
+        self.assertEqual(st["train"]["text"], "● still running after stop")
+        self.assertEqual(st["deliver"]["text"], "not launched at stop")
+        self.assertEqual(st["data"]["text"], "unanswered at stop")
         # a hand-back that did not wait for an answer: handed back, not registered, and the run has stopped
         self.use_task(fixtures.binary_task(), "ws-stopped-handback")
         self.sets()
         self.dispatch("deliver", status="handed_back", purpose="deliver", launched_at=self.LAUNCHED)
         Workspace(self.ws).stop("alice", "stop now")
-        self.assertIn("交回未登记（运行已停止）", round_block(pages(self.ws)[ROUNDS], 1))
-        self.assertEqual(self.assertFlow(deliver="skip")["deliver"]["text"], "交回未登记")
+        self.assertIn("handed back, not registered (the run has stopped)", round_block(pages(self.ws)[ROUNDS], 1))
+        self.assertEqual(self.assertFlow(deliver="skip")["deliver"]["text"], "not registered")
 
     def test_the_leads_name_rsi_run_for_its_own_steps(self):
         # M6 (final review): with the engine's records the overview's lead says rsi run does promote, close_round and
@@ -1600,16 +1612,16 @@ class TestSim2Pages(EngineStateCase):
         self.sets()
         self.dispatch("data", status="done", purpose="sets")
         ev = self.chain()
-        self.assertEqual(self.now_parts()[0], "顶层核对：rsi run 判定本轮（升级或保留）")
+        self.assertEqual(self.now_parts()[0], "Top-level check: rsi run decides the round (promote or keep)")
         Workspace(self.ws).promote(ev)
         self.plan(ev)
-        self.assertEqual(self.now_parts()[0], "rsi run 进入第 2 轮")
+        self.assertEqual(self.now_parts()[0], "rsi run moves on to round 2")
         self.task["stop"]["max_attempts_per_round"] = 1
         self.use_task(self.task, "ws-lead-close")
         self.sets()
         self.dispatch("data", status="done", purpose="sets")
         self.failed_search()
-        self.assertEqual(self.now_parts()[0], "rsi run 关闭本轮（rsi close-round 的效果）")
+        self.assertEqual(self.now_parts()[0], "rsi run closes the round (as rsi close-round does)")
         task = fixtures.binary_task()
         task["stop"]["target"] = 0.8
         self.use_task(task, "ws-lead-stop")
@@ -1618,11 +1630,11 @@ class TestSim2Pages(EngineStateCase):
         ev = self.chain()
         Workspace(self.ws).promote(ev)
         Workspace(self.ws).add_decision({"point": "milestone", "options": ["yes", "no"], "choice": "no", "by": "alice"})
-        self.assertEqual(self.now_parts()[0], "停止条件已满足：rsi run 结束运行")
+        self.assertEqual(self.now_parts()[0], "A stop condition is met: rsi run ends the run")
         self.use_task(fixtures.binary_task(), "ws-lead-manual")  # no records: the commands stay named
         self.sets()
         self.chain()
-        self.assertEqual(self.now_parts()[0], "顶层核对：等 rsi promote 判定本轮")
+        self.assertEqual(self.now_parts()[0], "Top-level check: waiting for rsi promote to decide the round")
 
     # ---- P6: a module's question pauses that module's node only ------------------------------------------
 
@@ -1631,36 +1643,36 @@ class TestSim2Pages(EngineStateCase):
         self.dispatch("train", launched_at=self.LAUNCHED)
         self.asked("data")  # ① asks: only ① waits
         st = self.assertFlow(data="wait", train="current")
-        self.assertEqual(st["data"]["text"], "⏸ 等你回答")
-        self.assertIn("● 运行中", st["train"]["text"])
+        self.assertEqual(st["data"]["text"], "⏸ waiting for the user")
+        self.assertIn("● running", st["train"]["text"])
         self.assertNotIn("⏸", st["train"]["text"])
 
-    # ---- P9: "● 运行中" only while an rsi run holds run.lock -----------------------------------------------
+    # ---- P9: "● running" only while an rsi run holds run.lock -----------------------------------------------
 
     def test_the_running_label_needs_a_live_rsi_run(self):
         from rsi import engine
         self.assertEqual(D.RUN_LOCK, engine.RUN_LOCK)
         self.sets()
-        self.assertEqual(self.label(), '<span class="chip idle">等待 rsi run</span>')
+        self.assertEqual(self.label(), '<span class="chip idle">waiting for rsi run</span>')
         self.assertFalse(D.run_active(Workspace(self.ws)))
         self.hold_lock()
         self.assertTrue(D.run_active(Workspace(self.ws)))
         for rel, text in pages(self.ws).items():
-            self.assertEqual(self.label(text), '<span class="chip run">● 运行中</span>', rel)
+            self.assertEqual(self.label(text), '<span class="chip run">● running</span>', rel)
         self.hold_lock(self.dead_pid())  # a killed run leaves its file behind: no run
         self.assertFalse(D.run_active(Workspace(self.ws)))
-        self.assertEqual(self.label(), '<span class="chip idle">等待 rsi run</span>')
+        self.assertEqual(self.label(), '<span class="chip idle">waiting for rsi run</span>')
         # Without a live run the label names what the run waits for.
         self.use_task(fixtures.binary_task(), "ws-long-job")
         self.sets()
         self.dispatch("train", status="long_job", marker=os.path.join(self.root, "never"))
-        self.assertEqual(self.label(), '<span class="chip idle">等长任务完成</span>')
+        self.assertEqual(self.label(), '<span class="chip idle">waiting for the long job</span>')
         self.use_task(fixtures.binary_task(), "ws-manual")
         self.sets()
         self.dispatch("train", runner="manual", launched_at=self.LAUNCHED)
-        self.assertEqual(self.label(), '<span class="chip idle">等手动交回</span>')
+        self.assertEqual(self.label(), '<span class="chip idle">waiting for a manual hand-back</span>')
         self.hold_lock()  # a run that works: running, whatever it waits for next
-        self.assertEqual(self.label(), '<span class="chip run">● 运行中</span>')
+        self.assertEqual(self.label(), '<span class="chip run">● running</span>')
 
     # ---- P3: stopped while agents or long jobs still run ---------------------------------------------------
 
@@ -1671,22 +1683,22 @@ class TestSim2Pages(EngineStateCase):
                       launched_at=self.LAUNCHED)
         Workspace(self.ws).stop("alice", "stop now")
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "已停止，还有 1 个 agent 和 1 个长任务在运行")
-        self.assertIn("运行 rsi run 终止它们并写报告", detail)
-        self.assertIn("停止原因：user requested: stop now", detail)
-        self.assertIn("运行 rsi run 终止它们并写报告", self.waiting())
+        self.assertEqual(lead, "Stopped, 1 agent and 1 long job still running")
+        self.assertIn("Run rsi run to terminate them and write the report", detail)
+        self.assertIn("Stop reason: user requested: stop now", detail)
+        self.assertIn("Run rsi run to terminate them and write the report", self.waiting())
         now = section(self.overview(), "now")
         self.assertIn("rsi-train", now)  # which ones
-        self.assertIn("长任务等待标记", now)
+        self.assertIn("long job waiting for its marker", now)
         st = self.assertFlow(train="current", stop="current")
-        self.assertEqual(st["train"]["text"], "● 停止后仍在运行")
+        self.assertEqual(st["train"]["text"], "● still running after stop")
         self.hold_lock()  # the run that holds the lock is ending them itself
         lead, detail = self.now_parts()
-        self.assertIn("rsi run 正在终止它们并写报告", detail)
-        self.assertNotIn("运行 rsi run", detail)
+        self.assertIn("rsi run is terminating them and writing the report", detail)
+        self.assertNotIn("Run rsi run", detail)
         ws = Workspace(self.ws)
-        ws.update_dispatch("d-0002", status="done", closed="运行已停止")
-        self.assertIn("rsi run 正在终止它并写报告", self.now_parts()[1])  # one left
+        ws.update_dispatch("d-0002", status="done", closed="the run has stopped")
+        self.assertIn("rsi run is terminating it and writing the report", self.now_parts()[1])  # one left
 
     def test_a_stop_reports_the_long_jobs_it_ended_and_left(self):
         from rsi import live as L
@@ -1702,28 +1714,31 @@ class TestSim2Pages(EngineStateCase):
         ws = Workspace(self.ws)
         ws.stop("alice", "stop now")
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "已停止，还有 4 个长任务在运行")
-        self.assertRegex(L.now_line(Workspace(self.ws)), r"^\d\d:\d\d 第1轮 已停止，还有 4 个长任务在运行 ｜ ")
-        ws.update_dispatch(a, status="done", closed="运行已停止", long_job_stop={
-            "pid": 4242, "pid_file": "x", "result": "terminated", "why": "已终止", "at": self.LAUNCHED})
-        ws.update_dispatch(b, status="done", closed="运行已停止", long_job_stop={
-            "pid": 4343, "pid_file": "y", "result": "unconfirmed", "why": "启动时间对不上", "at": self.LAUNCHED})
-        ws.update_dispatch(c, status="done", closed="运行已停止", long_job_stop={
-            "pid": 4141, "pid_file": "w", "result": "gone", "why": "进程已不在", "at": self.LAUNCHED, "context": "stop"})
-        ws.update_dispatch(d, long_job_stop={"pid": 4444, "pid_file": "z", "result": "terminated", "why": "已终止",
-                                             "at": self.LAUNCHED, "context": "close"})
+        self.assertEqual(lead, "Stopped, 4 long jobs still running")
+        self.assertRegex(L.now_line(Workspace(self.ws)), r"^\d\d:\d\d round 1 stopped, 4 long jobs still running \| ")
+        ws.update_dispatch(a, status="done", closed="the run has stopped", long_job_stop={
+            "pid": 4242, "pid_file": "x", "result": "terminated", "why": "terminated", "at": self.LAUNCHED})
+        ws.update_dispatch(b, status="done", closed="the run has stopped", long_job_stop={
+            "pid": 4343, "pid_file": "y", "result": "unconfirmed", "why": "start time does not match.", "at": self.LAUNCHED})
+        ws.update_dispatch(c, status="done", closed="the run has stopped", long_job_stop={
+            "pid": 4141, "pid_file": "w", "result": "gone", "why": "process is gone", "at": self.LAUNCHED, "context": "stop"})
+        ws.update_dispatch(d, long_job_stop={"pid": 4444, "pid_file": "z", "result": "terminated", "why": "terminated",
+                                             "at": self.LAUNCHED, "context": "close",
+                                             "others": [{"pid": 4545, "pid_file": "z2", "result": "terminated"}]})
         lead, detail = self.now_parts()
-        self.assertEqual(lead, "已停止：user requested: stop now")
-        self.assertIn("运行 rsi run 写运行报告", detail)
+        self.assertEqual(lead, "Stopped: user requested: stop now")
+        self.assertIn("Run rsi run to write the run report", detail)
         with open(os.path.join(self.ws, "REPORT.md"), "w", encoding="utf-8") as f:
-            f.write("# 报告\n")
+            f.write("# Report\n")
         lead, detail = self.now_parts()
         self.assertIn('href="dashboard/report.html"', detail)
         # B-7: what the stop ended apart from what an earlier close ended.
-        self.assertIn("停止时终止了长任务 d-0001（rsi-train，pid 4242）。关闭派出时终止了长任务 d-0004（rsi-train，pid 4444）",
-                      detail)
-        self.assertIn("没能终止的长任务（可能仍在运行，请手动结束）：d-0002（rsi-tune，pid 4343）：启动时间对不上", detail)
-        self.assertIn("没能终止的长任务", self.waiting())
+        # One dispatch whose two pid files were terminated: named once, its jobs in the plural.
+        self.assertIn("The stop terminated long job d-0001 (rsi-train, pid 4242). Closing the dispatch terminated long "
+                      "jobs d-0004 (rsi-train, pids 4444, 4545).", detail)
+        self.assertIn("Long job not terminated (it may still be running; end it by hand): d-0002 (rsi-tune, pid 4343): "
+                      "start time does not match.", detail)  # the why's own full stop is not doubled
+        self.assertIn("Long job not terminated", self.waiting())
 
     # ---- P7: the evalset of the best score, and the score on the current evalset after a refresh ------------
 
@@ -1742,7 +1757,7 @@ class TestSim2Pages(EngineStateCase):
         self.reg("evalset", 2, ids=range(60, 64))
         best = section(self.overview(), "best")
         self.assertIn("evalset-0001", best)
-        self.assertIn("当前评测集 evalset-0002 上还没有它的成绩", best)
+        self.assertIn("No score on the current evalset evalset-0002 yet", best)
         v1 = Workspace(self.ws).version("V1")["candidate_id"]
         red = self.reg("delivery", 2, ids=range(60, 64), val_ids=VAL_IDS, candidate_id=v1, evalset_id="evalset-0002",
                        wrong=(60,))
@@ -1757,23 +1772,23 @@ class TestSim2Pages(EngineStateCase):
     def test_the_best_card_names_the_evalset_and_the_current_score(self):
         self.promoted_round()
         best = section(self.overview(), "best")
-        self.assertIn("auc（评测集 evalset-0001，越高越好）", best)
-        self.assertNotIn("当前评测集", best)
+        self.assertIn("auc (evalset evalset-0001, higher is better)", best)
+        self.assertNotIn("current evalset", best)
         ev1, red, ev2, _plan = self.refreshed_keep()
         ws = Workspace(self.ws)
         now_value = ws.manifest(ev2)["metrics"]["best"]["auc"]
         self.assertLess(now_value, 1)
         best = section(self.overview(), "best")
         self.assertIn("V1 · 1", best)
-        self.assertIn("auc（评测集 evalset-0001，越高越好）", best)
-        self.assertIn("在当前评测集 evalset-0002 上：%s" % D._num(now_value), best)
+        self.assertIn("auc (evalset evalset-0001, higher is better)", best)
+        self.assertIn("On the current evalset evalset-0002: %s" % D._num(now_value), best)
         self.assertIn(ev2, best)
         self.assertIn(red, best)
-        self.assertIn("目标仍按 evalset-0001 上的成绩判断", best)
+        self.assertIn("still judged by the score on evalset-0001", best)
         from rsi.report import report_markdown  # the report says the same
         text = report_markdown(ws)
-        self.assertIn("当前最佳：V1，auc 1（evaluation-0001），在评测集 evalset-0001 上", text)
-        self.assertIn("- 在当前评测集 evalset-0002 上：auc %s（%s，用重新交付的 %s 算）"
+        self.assertIn("Current best: V1, auc 1 (evaluation-0001), on evalset evalset-0001", text)
+        self.assertIn("- On the current evalset evalset-0002: auc %s (%s, computed with the re-delivered %s)"
                       % (D._num(ws.manifest(ev2)["metrics"]["best"]["auc"]), ev2, red), text)
 
     # ---- P15 and the engine's new run-log events --------------------------------------------------------
@@ -1783,20 +1798,20 @@ class TestSim2Pages(EngineStateCase):
         self.log({"at": "2026-11-23T08:00:00Z", "event": "action", "step": 1,
                   "action": {"type": "promote", "evaluation_id": ev, "step": "promote"}})
         events = section(pages(self.ws)[EVENTS], "events")
-        self.assertIn("第 1 轮判定：升级 V1", events)
+        self.assertIn("Round 1 decided: promote V1", events)
         self.assertIn("· rsi run</span>", events)
         self.assertNotIn("· rsi promote", events)
-        self.assertNotIn("· 引擎", events)
+        self.assertNotIn("· engine", events)
         # a round closed and a stop by the stop condition, both carried out by rsi run
         self.use_task(fixtures.binary_task(), "ws-closed-by-run")
         self.sets()
         ws = Workspace(self.ws)
-        reason = "第 1 轮的 3 次尝试已用完，没有候选通过训练门"
+        reason = "round 1 has used up its 3 attempts and no candidate passed the train gate"
         self.log({"at": "2026-11-23T08:00:00Z", "event": "action", "step": 1,
                   "action": {"type": "close_round", "reason": reason, "step": "close"}})
         ws.close_round(reason)
         events = section(pages(self.ws)[EVENTS], "events")
-        self.assertIn("第 1 轮判定：关闭（没有评测）", events)
+        self.assertIn("Round 1 decided: closed (no evaluation)", events)
         self.assertIn("· rsi run</span>", events)
         self.assertNotIn("· rsi close-round", events)
         # without the run log (a round closed by hand) the command stays named
@@ -1824,29 +1839,32 @@ class TestSim2Pages(EngineStateCase):
              "session": SESSION, "feedback": "feedback-5.md"},
             {"at": at % 6, "event": "agent_stopped", "dispatch_id": did, "why": "stopped", "pid": 99},
             {"at": at % 7, "event": "long_job_stopped", "dispatch_id": did, "pid": 4242, "result": "terminated",
-             "why": "进程 4242 是这个长任务，已终止", "pid_file": "/m.pid"},
+             "why": "process 4242 is this long job; terminated", "pid_file": "/m.pid"},
             {"at": at % 8, "event": "long_job_gone", "dispatch_id": did, "pid": 4343, "result": "gone",
-             "why": "进程 4343 已不在", "pid_file": "/m.pid"},
+             "why": "process 4343 is gone", "pid_file": "/m.pid"},
             {"at": at % 9, "event": "long_job_left", "dispatch_id": did, "pid": None, "result": "no_pid_file",
-             "why": "没有 pid 文件", "pid_file": "/m.pid"},
+             "why": "no pid file", "pid_file": "/m.pid"},
             {"at": at % 10, "event": "closed", "dispatch_id": did, "why": "stopped", "launched": False},
             {"at": at % 11, "event": "long_job_stopped", "dispatch_id": did, "pid": 4444, "result": "terminated",
-             "why": "已终止", "pid_file": "/n.pid", "context": "close", "orphan": False},
+             "why": "terminated", "pid_file": "/n.pid", "context": "close", "orphan": False},
             {"at": at % 12, "event": "long_job_gone", "dispatch_id": did, "pid": 4545, "result": "gone",
-             "why": "进程 4545 已不在", "pid_file": "/old.pid", "context": "stop", "orphan": True})
+             "why": "process 4545 is gone", "pid_file": "/old.pid", "context": "stop", "orphan": True})
         events = section(pages(self.ws)[EVENTS], "events")
-        self.assertIn("继续 %s（交回的第二部分，不算退回，会话 3f2a9c1e，feedback-2.md）" % did, events)
-        self.assertIn("续跑 %s（长任务收尾" % did, events)
-        self.assertIn("退回 %s（第 1 次" % did, events)  # the second part and the continuation are no returns
-        self.assertNotIn("第 2 次", events)
-        self.assertIn("rsi-tune（%s）交回时提问：等你回答，交回的 trial-a、trial-b 暂不登记" % did, events)
-        self.assertIn("把你的回答送回 %s（会话 3f2a9c1e，feedback-5.md）" % did, events)
-        self.assertIn("停止时终止了 agent %s" % did, events)
-        self.assertIn("停止时终止了长任务 %s（pid 4242）" % did, events)
-        self.assertIn("停止时长任务 %s 的进程已不在（pid 4343）" % did, events)
-        self.assertIn("停止时没能终止长任务 %s：没有 pid 文件" % did, events)
-        self.assertIn("关闭派出 %s（运行已停止，没有启动）" % did, events)
-        self.assertIn("关闭派出时终止了长任务 %s（pid 4444）" % did, events)  # a decision or close-round closed it
+        self.assertIn("Continued %s (second part of the hand-back, not a return, session 3f2a9c1e, feedback-2.md)"
+                      % did, events)
+        self.assertIn("Resumed %s (long-job wrap-up" % did, events)
+        self.assertIn("Returned %s (return 1" % did, events)  # the second part and the continuation are no returns
+        self.assertNotIn("return 2", events)
+        self.assertIn("rsi-tune (%s) asked in its hand-back: waiting for the user; held unregistered: trial-a, trial-b"
+                      % did, events)
+        self.assertIn("Sent the user&#x27;s answer back to %s (session 3f2a9c1e, feedback-5.md)" % did, events)
+        self.assertIn("Terminated agent %s at the stop" % did, events)
+        self.assertIn("Terminated long job %s (pid 4242) at the stop" % did, events)
+        self.assertIn("Long job %s: its process was already gone (pid 4343) at the stop" % did, events)
+        self.assertIn("Could not terminate long job %s at the stop: no pid file" % did, events)
+        self.assertIn("Closed dispatch %s (the run has stopped, never launched)" % did, events)
+        # a decision or close-round closed it:
+        self.assertIn("Terminated long job %s (pid 4444) when its dispatch was closed" % did, events)
         self.assertNotIn("4545", events)  # an orphan pid file whose process had ended: no line
 
 
@@ -1866,66 +1884,81 @@ class TestNowLine(EngineStateCase):
         did = self.dispatch("train", status="long_job", launched_at=ago(20), ended_at=ago(7),
                             marker=os.path.join(outdir, "batch-3.done"))
         line = lambda: L.now_line(Workspace(self.ws), now)  # noqa: E731
-        self.assertEqual(line(), "20:23 第1轮 ② 训练调优 d-0001 · 长任务在跑，等完成标记 batch-3.done · 下次检查 20:46")
+        self.assertEqual(line(), "20:23 round 1 ② Train & tune d-0001 · long job running, waiting for completion marker "
+                                 "batch-3.done · next check-in 20:46")
 
         def progress(updated_at):
             with open(os.path.join(outdir, "progress.json"), "w", encoding="utf-8") as f:
-                json.dump({"version": 1, "updated_at": updated_at, "summary": "第 3 批：3 个训练在跑（卡 0、4、6）",
-                           "facts": [{"label": "配置", "value": "3/3"}, {"label": "GPU 小时", "value": "1.3/8"},
-                                     {"label": "当前方案", "value": "c43"}, {"label": "第四个", "value": "x"}]}, f)
+                json.dump({"version": 1, "updated_at": updated_at, "summary": "batch 3: 3 runs going (GPUs 0, 4, 6)",
+                           "facts": [{"label": "configs", "value": "3/3"}, {"label": "GPU hours", "value": "1.3/8"},
+                                     {"label": "best so far", "value": "c43"}, {"label": "fourth", "value": "x"}]}, f)
 
         progress(ago(1))
-        self.assertEqual(line(), "20:23 第1轮 ② 训练调优 d-0001 · 第 3 批：3 个训练在跑（卡 0、4、6） · 配置 3/3 · "
-                                 "GPU 小时 1.3/8 · 当前方案 c43 · 下次检查 20:46")
+        self.assertEqual(line(), "20:23 round 1 ② Train & tune d-0001 · batch 3: 3 runs going (GPUs 0, 4, 6) · "
+                                 "configs 3/3 · GPU hours 1.3/8 · best so far c43 · next check-in 20:46")
         progress(ago(10))  # the dispatch is alive and its progress is older than PROGRESS_STALE_SECONDS
-        self.assertIn("第 3 批：3 个训练在跑（卡 0、4、6）（进度 10 分钟没有更新） · 配置 3/3", line())
+        self.assertIn("batch 3: 3 runs going (GPUs 0, 4, 6) (no progress update for 10 minutes) · configs 3/3", line())
         # R5: a question STATE waits on that is tied to the dispatch (ref or dispatch_id, any what) comes before its
         # progress; its facts may follow, the next check-in does not.
-        facts = " · 配置 3/3 · GPU 小时 1.3/8 · 当前方案 c43"
+        facts = " · configs 3/3 · GPU hours 1.3/8 · best so far c43"
         # The check-in cap's question is live only while a check-in is due by the real clock (rsi.flow.checkin_moot):
         # its last hand-back a day back, so it is due in every time zone.
-        asks = (({"status": "handed_back"}, {"kind": "question", "what": "handback", "ref": did, "options": ["已回答"]}),
+        asks = (({"status": "handed_back"}, {"kind": "question", "what": "handback", "ref": did, "options": ["answered"]}),
                 ({"status": "handed_back"}, {"kind": "approval", "what": "over_budget", "ref": None, "dispatch_id": did,
                                              "options": ["approve", "stop"]}),
                 ({"status": "long_job", "checkins": 48, "ended_at": ago(60 * 24)},  # the check-in cap (48)
                  {"kind": "question", "what": "checkin", "ref": did, "options": ["continue", "wait", "stop"]}))
         for n, (fields, w) in enumerate(asks, 1):
             Workspace(self.ws).update_dispatch(did, **fields)
-            Workspace(self.ws).set_waiting(dict(w, question="要你决定的事"))
-            self.assertEqual(line(), "20:23 第1轮 ② 训练调优 d-0001 · 等你回答（q-%04d）%s" % (n, facts), w["what"])
+            Workspace(self.ws).set_waiting(dict(w, question="something for the user to decide"))
+            self.assertEqual(line(), "20:23 round 1 ② Train & tune d-0001 · waiting for the user (q-%04d)%s" % (n, facts),
+                             w["what"])
             Workspace(self.ws).clear_waiting()
         os.remove(os.path.join(outdir, "progress.json"))
         ws = Workspace(self.ws)
-        for fields, want in (({"status": "pending"}, "待启动"),
+        for fields, want in (({"status": "pending"}, "not launched yet"),
                              ({"status": "running", "launches": 9, "launch_mode": "checkin"},
-                              "rsi-train 运行中（第 9 次启动 · 定时检查）"),
-                             ({"status": "long_job"}, "长任务已完成，等 rsi run 收尾"),  # its marker is there
-                             ({"status": "handed_back"}, "已交回，等登记")):
+                              "rsi-train running (launch 9 · check-in)"),
+                             ({"status": "long_job"}, "long job done, waiting for rsi run to wrap it up"),  # marker there
+                             ({"status": "handed_back"}, "handed back, waiting to be registered")):
             ws.update_dispatch(did, **fields)
             if fields["status"] == "long_job":
                 with open(os.path.join(outdir, "batch-3.done"), "w") as f:
                     f.write("ok\n")
-            self.assertEqual(line(), "20:23 第1轮 ② 训练调优 d-0001 · %s" % want, fields)
+            self.assertEqual(line(), "20:23 round 1 ② Train & tune d-0001 · %s" % want, fields)
         self.dispatch("data", status="pending", outdir="work/round-1/data")
-        self.assertEqual(line().split(" ｜ "), ["20:23 第1轮 ② 训练调优 d-0001 · 已交回，等登记", "① 数据 d-0002 · 待启动"])
+        self.assertEqual(line().split(" | "), ["20:23 round 1 ② Train & tune d-0001 · handed back, waiting to be registered",
+                                               "① Data d-0002 · not launched yet"])
         for d in ("d-0001", "d-0002"):
             Workspace(self.ws).update_dispatch(d, status="done")
         # No open dispatch: the question STATE waits on (one without a ref), the notes' questions (not the page's
-        # 「上方」), else the overview's lead.
-        Workspace(self.ws).set_waiting({"kind": "approval", "what": "refresh_sets", "ref": None, "question": "刷新？",
+        # "question above"), else the overview's lead.
+        Workspace(self.ws).set_waiting({"kind": "approval", "what": "refresh_sets", "ref": None, "question": "Refresh?",
                                         "options": ["approve", "close_round", "stop"]})
-        self.assertEqual(line(), "20:23 第1轮 等你回答（q-0004）")
+        self.assertEqual(line(), "20:23 round 1 waiting for the user (q-0004)")
         Workspace(self.ws).clear_waiting()
         notes = os.path.join(self.ws, "work", "notes.md")
         with open(notes, "w", encoding="utf-8") as f:
-            f.write("## 待用户回答\n- 要不要多用一张卡？\n")
-        self.assertEqual(line(), "20:23 第1轮 等你在 Claude 里回答 1 个问题（进度页面上列着）")
+            f.write("## Questions for the user\n- Use one more GPU?\n")
+        self.assertEqual(line(), "20:23 round 1 waiting for the user to answer 1 question in Claude (listed on the "
+                                 "progress page)")
+        with open(notes, "w", encoding="utf-8") as f:  # the count in the plural
+            f.write("## Questions for the user\n- Use one more GPU?\n- Keep the old trainset?\n- Retry with seed 2?\n")
+        self.assertEqual(line(), "20:23 round 1 waiting for the user to answer 3 questions in Claude (listed on the "
+                                 "progress page)")
         os.remove(notes)
-        self.assertEqual(line(), "20:23 第1轮 " + D.now_lead(Workspace(self.ws)))
+        lead = D.now_lead(Workspace(self.ws))  # the line goes on in lower case
+        self.assertEqual(line(), "20:23 round 1 " + lead[:1].lower() + lead[1:])
+        # Last, the spend ledger's short form: the resources with a budget or a use (none above), the problems.
+        with Workspace(self.ws).transaction() as s:
+            s["budget_used"].update(compute_hours=1.25, agent_usd=4.2)
+            s["spend_problems"] = 1
+        self.assertTrue(line().endswith(" | budget: GPU hours 1.25/– · agent $ 4.20/– · spend-file problems 1"), line())
 
 
 class TestLivePanels(EngineStateCase):
-    """The overview's live panels (spec §4, §5): 现在在做什么, agent 的判断, GPU, 最近事件, and the cards' new lines."""
+    """The overview's live panels (spec §4, §5): What is running now, Agent judgement, GPU, Recent events, and the cards'
+    new lines."""
 
     NOW = datetime.datetime(2026, 11, 24, 20, 23, tzinfo=datetime.timezone.utc)
 
@@ -1960,55 +1993,55 @@ class TestLivePanels(EngineStateCase):
         return pages(self.ws, self.NOW)[OVERVIEW]
 
     def test_doing_panel_shows_the_modules_progress(self):
-        self.assertIn("现在没有在跑的模块", section(self.ov(), "doing"))
+        self.assertIn("No module is running now", section(self.ov(), "doing"))
         self.long_job()
         self.write("progress.json", {
-            "version": 1, "updated_at": self.ago(60), "summary": "第 3 批：3 个训练在跑",
-            "facts": [{"label": "配置", "value": "3/3"}, {"label": "GPU 小时", "value": "1.3/8"},
-                      {"label": "当前方案", "value": "c43"}],
-            "table": {"title": "本次搜索的试验", "columns": ["试验", "验证集 auc"],
+            "version": 1, "updated_at": self.ago(60), "summary": "batch 3: 3 runs going",
+            "facts": [{"label": "configs", "value": "3/3"}, {"label": "GPU hours", "value": "1.3/8"},
+                      {"label": "best so far", "value": "c43"}],
+            "table": {"title": "this search's trials", "columns": ["trial", "valset auc"],
                       "rows": [["c43-s1", 0.61], ["c43-s2", None]]},
-            "notes": ["next：补 seed 1、2"]})
+            "notes": ["next: add seeds 1, 2"]})
         ov = self.ov()
         doing = section(ov, "doing")
-        for text in ("第 3 批：3 个训练在跑", "配置", "3/3", "验证集 auc", "c43-s1", "next：补 seed 1、2", "1 分钟前",
-                     "定时检查 0 / 48", "完成标记"):
+        for text in ("batch 3: 3 runs going", "configs", "3/3", "valset auc", "c43-s1", "next: add seeds 1, 2",
+                     "1 minute ago", "check-ins 0 / 48", "completion marker"):
             self.assertIn(text, doing)
-        self.assertIn("配置 3/3", re.search(r'<g id="n-train".*?</g>', ov, re.S).group(0))
+        self.assertIn("configs 3/3", re.search(r'<g id="n-train".*?</g>', ov, re.S).group(0))
 
     def test_stale_and_broken_progress_never_break_the_page(self):
         did = self.long_job()
-        stale = {"updated_at": self.ago(600), "summary": "第 3 批"}
+        stale = {"updated_at": self.ago(600), "summary": "batch 3"}
         self.write("progress.json", stale)  # (a) the job is alive, its marker not there
-        self.assertIn("10 分钟没有更新", section(self.ov(), "doing"))
+        self.assertIn("No progress update for 10 minutes", section(self.ov(), "doing"))
         self.write("progress.json", "{not json")  # (b)
         doing = section(self.ov(), "doing")
-        self.assertIn("progress.json 不是合法的 JSON", doing)
+        self.assertIn("progress.json is not valid JSON", doing)
         self.assertNotIn("Traceback", doing)
         self.write("progress.json", stale)  # (c) handed back: not alive, never stale
         Workspace(self.ws).update_dispatch(did, status="handed_back")
-        self.assertNotIn("没有更新", section(self.ov(), "doing"))
+        self.assertNotIn("No progress update", section(self.ov(), "doing"))
 
     def test_judgement_panel_lists_latest_notes_and_questions(self):
         from rsi import live as L
         self.long_job(launches=2)
-        self.write("handback-1.json", {"status": "long_job", "notes": "first", "questions": []}, age=900)
-        questions = ["要不要放宽门槛？", "问" * 600] + ["q%d" % i for i in range(5)]  # 7: the first 5, each clipped
-        self.write("handback.json", {"status": "ok", "notes": "长" * 300 + "余" * 100, "questions": questions}, age=60)
+        self.write("handback-1.json", {"status": "long_job", "notes": "the earlier note", "questions": []}, age=900)
+        questions = ["Relax the threshold?", "ñ" * 600] + ["q%d" % i for i in range(5)]  # 7: the first 5, each clipped
+        self.write("handback.json", {"status": "ok", "notes": "é" * 300 + "ü" * 100, "questions": questions}, age=60)
         j = section(self.ov(), "judgement")
-        self.assertLess(j.index("要不要放宽门槛？"), j.index("first"))  # the newer first
-        self.assertRegex(j, r'长{300}…</div><details[^>]*><summary>[^<]*</summary><div class="hbn">余{100}</div>'
+        self.assertLess(j.index("Relax the threshold?"), j.index("the earlier note"))  # the newer first
+        self.assertRegex(j, r'é{300}…</div><details[^>]*><summary>[^<]*</summary><div class="hbn">ü{100}</div>'
                             r'</details>')  # only the rest inside <details>
-        self.assertIn("问" * 500 + "…<", j)
-        self.assertNotIn("问" * 501, j)
+        self.assertIn("ñ" * 500 + "…<", j)
+        self.assertNotIn("ñ" * 501, j)
         self.assertIn("q2", j)
         self.assertNotIn("q3", j)
-        self.assertIn("另有 2 条", j)
+        self.assertIn("2 more", j)
         for n in range(2, 8):  # 8 hand-backs (one unreadable, skipped): the latest 6
             self.write("handback-%d.json" % n, "{bad" if n == 7 else {"status": "ok", "notes": "n%d" % n}, age=800 - n)
         ws = Workspace(self.ws)
         notes = L.handback_notes(ws)
-        self.assertEqual([h["notes"][:2] for h in notes], ["长长", "n6", "n5", "n4", "n3", "n2"])
+        self.assertEqual([h["notes"][:2] for h in notes], ["éé", "n6", "n5", "n4", "n3", "n2"])
         self.assertEqual((notes[0]["dispatch_id"], notes[0]["module"], notes[0]["launch"]), ("d-0001", "train", 2))
         self.assertEqual(section(self.ov(), "judgement").count('<li class="hb"'), 6)
 
@@ -2023,14 +2056,14 @@ class TestLivePanels(EngineStateCase):
         def snap(status="ok", age=30, error=None, gpus=cards):
             return {"at": self.ago(age), "status": status, "error": error, "uid": 1000, "gpus": gpus}
 
-        cases = (("none", None, ["还没有 GPU 信息", "每 60 秒"], ["卡 0"]),
-                 ("broken", "{half", ["GPU 快照读不了"], ["还没有 GPU 信息"]),
-                 ("missing", snap("missing", gpus=[]), ["这台机器没有 nvidia-smi"], ["卡 0"]),
-                 ("ok", snap(), ["卡 0", "卡 2", "卡 5", "没有这张卡", "本用户", "alice", "未知", "20.0 / 80.0 GB"],
-                  ["卡 1", "已过时"]),
-                 ("error", snap("error", error="nvidia-smi 超时（5 秒没有返回）", gpus=[]),
-                  ["nvidia-smi 超时（5 秒没有返回）"], []),
-                 ("old", snap(age=181), ["已过时"], []))
+        cases = (("none", None, ["No GPU information yet", "every 60 seconds"], ["GPU 0"]),
+                 ("broken", "{half", ["The GPU snapshot cannot be read"], ["No GPU information yet"]),
+                 ("missing", snap("missing", gpus=[]), ["This machine has no nvidia-smi"], ["GPU 0"]),
+                 ("ok", snap(), ["GPU 0", "GPU 2", "GPU 5", "no such GPU", "this user", "alice", "unknown owner",
+                                 "20.0 / 80.0 GB"], ["GPU 1", "Stale"]),
+                 ("error", snap("error", error="nvidia-smi timed out (no return in 5 seconds)", gpus=[]),
+                  ["nvidia-smi timed out (no return in 5 seconds)"], []),
+                 ("old", snap(age=181), ["Stale"], []))
         for name, doc, has, lacks in cases:
             with self.subTest(name):
                 if isinstance(doc, str):
@@ -2059,10 +2092,10 @@ class TestLivePanels(EngineStateCase):
                     "module": "data", "runner": "claude"} for i in range(12)])
         ov = self.ov()
         best = section(ov, "best")
-        self.assertIn("本轮验证集最好", best)
+        self.assertIn("Best on the valset this round", best)
         self.assertIn("auc %s" % D._num(vals[high]), best)
         self.assertIn(high, best)
-        self.assertIn("（1 次进行中）", section(ov, "stop"))
+        self.assertIn("(1 in progress)", section(ov, "stop"))
         recent = section(ov, "recent")
         self.assertEqual(recent.count("<li"), 10)
         self.assertIn('href="dashboard/events.html"', recent)

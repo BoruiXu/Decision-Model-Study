@@ -3,14 +3,27 @@
 sets     split the corpus rows by the task's data.split, with --split (the agent's rule) merged under it: write the
          testset, evalset, valset, pool and trainset under --out; the corpus manifest and split report when the corpus
          has no manifest yet; the task version with the filled rule (--out/task/) when the task's rule was incomplete
-grow     a new trainset: the current one (--trainset), --add N rows drawn from the pool, the rows of --with
+grow     a new trainset: the current one (--trainset), --add N rows drawn from the pool, the rows of every --with
+         file (repeatable, e.g. each dgen arm's verified.jsonl; the manifest's changes name each file)
 check    report the rows, duplicate ids, duplicate inputs, inputs with more than one hard label and the overlap with
-         each --against file; --write a cleaned trainset (--mode drop or merge)
+         each --against file; --by-source adds by_source (rows per source prefix, label source and hard label) and
+         synthetic_share (the share of rows dgen generated); --write a cleaned trainset (--mode drop or merge)
 refresh  a new evalset of rows in the evalset's range that no set, the pool or an --exclude file holds
+repair   the rows with each state repaired by the task's features constraints and then its features adapter, written
+         to --out (a new file); the summary counts the rows repaired and the rows that still break a rule, by rule
+
+Prompt-variant rows (meta.extra.variant; rsi.variants, e.g. from `dgen variants`) are taken only with the specs they
+were made with: grow takes the --trainset manifest's prompt_variants and those of every --variants file, check those of
+every --variants file (repeatable; a JSON list of specs, or a trainset's manifest.json for its prompt_variants). Each
+variant is checked against its seed (rsi.variants.check_variant_rows), the trainset written lists the specs its
+variant rows use in prompt_variants, a variant is never counted as a duplicate of its seed, and --write keeps it right
+after its seed when the seed stays unchanged. Without its spec a variant row is refused, as in any other set.
 
 Every command prints one JSON summary on stdout. Exit codes: 0 done; 1 an error in the input or the rule (stderr
-`dset: error: <reason>`, nothing written); 2 the trainset quality gate failed (sets only: nothing written). An output
-directory must not exist yet: dset overwrites nothing. --dry-run prints the summary and writes nothing.
+`dset: error: <reason>`, nothing written), or for repair rows that still break a rule after repair (their ids in
+the summary's `left`; the rows are written all the same); 2 the trainset quality gate failed (sets only: nothing
+written). An output directory or file must not exist yet: dset overwrites nothing. --dry-run prints the summary and
+writes nothing.
 """
 import argparse
 import copy
@@ -20,6 +33,7 @@ import sys
 
 from rsi import datasplit as DS
 from rsi import rows as R
+from rsi import variants as V
 
 from . import DSET_VERSION, DsetError
 from . import quality as Q
@@ -84,7 +98,12 @@ def build_parser():
     g.add_argument("--trainset", help="the current trainset's directory (with --parent)")
     g.add_argument("--parent", help="the current trainset's registered id (with --trainset)")
     g.add_argument("--add", type=_count, help="rows to draw from the pool rows not in the trainset")
-    g.add_argument("--with", dest="with_rows", help="full rows to add (JSONL), e.g. rows written from feedback")
+    g.add_argument("--with", dest="with_rows", action="append",
+                   help="full rows to add (JSONL), e.g. rows written from feedback or a dgen arm's verified.jsonl "
+                        "(repeatable)")
+    g.add_argument("--variants", action="append",
+                   help="the specs of prompt-variant rows among the --with rows: a JSON list, or a trainset's "
+                        "manifest.json (repeatable; the --trainset manifest's are taken anyway)")
     g.add_argument("--label-method", help="default: the current trainset's")
     g.add_argument("--checks")
     g.add_argument("--dry-run", action="store_true")
@@ -94,6 +113,10 @@ def build_parser():
     c.add_argument("--task", required=True)
     c.add_argument("--rows", required=True, help="full rows (JSONL)")
     c.add_argument("--against", action="append", help="a rows or inputs file to count overlaps with (repeatable)")
+    c.add_argument("--by-source", action="store_true",
+                   help="add by_source (rows per source prefix|label_source|hard label) and synthetic_share")
+    c.add_argument("--variants", action="append",
+                   help="the specs of the prompt-variant rows: a JSON list, or a trainset's manifest.json (repeatable)")
     c.add_argument("--write", help="write the cleaned rows as a trainset into this directory (must not exist)")
     c.add_argument("--mode", choices=sorted(MODES), help="with --write: drop or merge")
     c.add_argument("--round", type=_round, help="with --write")
@@ -110,6 +133,12 @@ def build_parser():
                                                       "(earlier evalsets' inputs, the current trainset and valset)")
     r.add_argument("--dry-run", action="store_true")
     r.set_defaults(fn=cmd_refresh)
+
+    f = sub.add_parser("repair", help="repair rows by the task's features constraints and adapter")
+    f.add_argument("--task", required=True, help="task.json (its features.constraints and features.adapter)")
+    f.add_argument("--rows", required=True, help="full rows (JSONL)")
+    f.add_argument("--out", required=True, help="the repaired rows (JSONL; must not exist)")
+    f.set_defaults(fn=cmd_repair)
     return p
 
 
@@ -181,9 +210,13 @@ def _dir_rows(d, what):
     return _read_rows(os.path.join(d, _rows_file(m, what)), what), m
 
 
-def _check_rows(rows, task, what, train=False):
-    """Full rows of the task (rsi.rows.check_full_rows); `train`: also no split starting with test."""
-    errors = R.check_full_rows(rows, task)
+def _check_rows(rows, task, what, train=False, variants=None, seeds=True):
+    """Full rows of the task (rsi.rows.check_full_rows); `train`: also no split starting with test. `variants` (specs):
+    prompt-variant rows are taken, and with `seeds` each is checked against its seed among `rows`
+    (rsi.variants.check_variant_rows); None: they are refused."""
+    errors = R.check_full_rows(rows, task, variants)
+    if variants is not None and seeds:
+        errors += V.check_variant_rows(rows, variants, task)
     if train:
         bad = [r.get("id") for r in rows if isinstance(r.get("split"), str)
                and r["split"].strip().lower().startswith("test")]
@@ -192,6 +225,31 @@ def _check_rows(rows, task, what, train=False):
                           % (len(bad), bad[0]))
     if errors:
         raise DsetError("%s: %d problems in the rows: %s" % (what, len(errors), _some(errors)))
+
+
+def _load_variants(paths, manifest=None):
+    """The prompt-variant specs of `manifest` (a trainset's, its prompt_variants) and of each file of `paths` (a JSON
+    list of specs, or a trainset's manifest.json), each id once: the same id with another spec is an error. Whether
+    each spec is valid is checked with the rows (rsi.variants.check_variant_rows)."""
+    found = [("--trainset's manifest", manifest)] if manifest is not None else []
+    found += [("--variants %s" % path, _load_json(path, "--variants")) for path in paths or []]
+    merged = {}
+    for what, obj in found:
+        specs = (obj.get("prompt_variants") or []) if isinstance(obj, dict) else obj
+        if not isinstance(specs, list) or not all(isinstance(x, dict) and isinstance(x.get("id"), str) for x in specs):
+            raise DsetError("%s: expected a JSON list of prompt-variant specs, each with a string id, or a trainset's "
+                            "manifest.json" % what)
+        for spec in specs:
+            if merged.setdefault(spec["id"], spec) != spec:
+                raise DsetError("%s: another spec has the id %s already: give each spec its own id" % (what, spec["id"]))
+    return list(merged.values())
+
+
+def _used_variants(rows, specs):
+    """{"prompt_variants": the specs the variant rows of `rows` use} ({} when none: no such manifest field)."""
+    used = set(r["meta"]["extra"]["variant"] for r in rows if R.is_variant(r))
+    kept = [s for s in specs if s.get("id") in used]
+    return {"prompt_variants": kept} if kept else {}
 
 
 def _new_paths(paths):
@@ -356,31 +414,39 @@ def cmd_grow(a):
     pool, _ = _dir_rows(a.pool, "--pool")
     _check_rows(pool, task, "--pool %s" % a.pool, train=True)
     current, current_m = _dir_rows(a.trainset, "--trainset") if a.trainset else ([], None)
-    extra = []
-    if a.with_rows:
-        extra = _read_rows(a.with_rows, "--with")
-        _check_rows(extra, task, "--with %s" % a.with_rows, train=True)
+    variants = _load_variants(a.variants, current_m)
+    extra, with_files = [], {}
+    for path in a.with_rows or []:
+        if path in with_files:
+            raise DsetError("--with %s: given twice" % path)
+        rows = _read_rows(path, "--with")
+        _check_rows(rows, task, "--with %s" % path, train=True, variants=variants, seeds=False)  # seeds: below
+        extra += rows
+        with_files[path] = len(rows)
     drawn, free = S.grow(pool, current, a.add or 0, task, rule, extra)
     rows = current + W.resplit(drawn, "train") + extra
-    _check_rows(rows, task, "the new trainset (the current one, the rows drawn and the --with rows)", train=True)
+    _check_rows(rows, task, "the new trainset (the current one, the rows drawn and the --with rows)", train=True,
+                variants=variants)
     label_method = a.label_method or (current_m or {}).get("label_method")
     if not isinstance(label_method, str) or not label_method:
         raise DsetError("--label-method: needed (no --trainset whose manifest has one)")
     checks = Q.quality_checks(rows, task, _given_checks(a.checks))
     gate = Q.gate(checks)
     info = {"parent_trainset": a.parent, "kept": len(current), "added": len(drawn), "with": len(extra),
-            "pool_rows": len(pool), "pool_left": free - len(drawn)}
+            "with_files": with_files, "pool_rows": len(pool), "pool_left": free - len(drawn)}
     summary = dict(info, profile=Q.profile(rows, task), gate=gate, wrote=[])
     if not a.dry_run:
         changes = "dset grow: %d rows of %s kept, %d drawn from the pool, %d from %s" % (
-            len(current), a.parent or "no trainset", len(drawn), len(extra), a.with_rows or "no --with file")
+            len(current), a.parent or "no trainset", len(drawn), len(extra),
+            ", ".join("%s (%d rows)" % kv for kv in with_files.items()) or "no --with file")
         notes = W.notes_line("grow", {"rows": len(rows), "label_counts": summary["profile"]["label_counts"]})
         notes += "; kept %d; added %d; with %d" % (len(current), len(drawn), len(extra))
         with W.publishing() as pub:
             W.write_set(pub.dir(a.out), "trainset", rows, task, a.round, notes, [a.parent] if a.parent else [],
                         quality_report={"dset_version": DSET_VERSION, "profile": summary["profile"],
                                         "checks": checks, "grow": info},
-                        label_method=label_method, parent_trainset=a.parent, changes=changes, quality=gate)
+                        label_method=label_method, parent_trainset=a.parent, changes=changes, quality=gate,
+                        **_used_variants(rows, variants))
         summary["wrote"].append(a.out)
     _emit(summary)
     return 0
@@ -399,11 +465,16 @@ def cmd_check(a):
     # Every row is checked. A repeated id is reported (and refused by --write), so only the error it raises itself,
     # rsi.rows' "row <i> (id=<id>): duplicate id" of exactly those rows, is left out.
     repeat_errors = set("row %d (id=%s): duplicate id" % ir for ir in repeated)
-    errors = [e for e in R.check_full_rows(rows, task) if e not in repeat_errors]
+    variants = _load_variants(a.variants) if a.variants else None
+    errors = [e for e in R.check_full_rows(rows, task, variants) if e not in repeat_errors]
+    if variants is not None and not repeated:
+        errors += V.check_variant_rows(rows, variants, task)
     if errors:
         raise DsetError("--rows %s: %d problems in the rows: %s" % (a.rows, len(errors), _some(errors)))
     summary = Q.profile(rows, task)
     summary["duplicate_ids"] = len(repeated)
+    if a.by_source:
+        summary.update(by_source=Q.by_source(rows, task), synthetic_share=Q.synthetic_share(rows))
     summary["against"] = {}
     for f in a.against or []:
         other = _read_rows(f, "--against")
@@ -424,7 +495,7 @@ def cmd_check(a):
                         % (a.rows, len(repeated), repeated[0][1]))
     _new_paths([a.write])
     cleaned = Q.clean(rows, task, a.mode)
-    _check_rows(cleaned, task, "--rows %s" % a.rows, train=True)
+    _check_rows(cleaned, task, "--rows %s" % a.rows, train=True, variants=variants)
     checks = Q.quality_checks(cleaned, task, _given_checks(a.checks))
     gate = Q.gate(checks)
     written = Q.profile(cleaned, task)
@@ -438,7 +509,7 @@ def cmd_check(a):
                                     "check": {"mode": a.mode, "rows": a.rows, "before": summary}},
                     label_method=label_method, parent_trainset=a.parent,
                     changes="%s: %d rows of %s became %d" % (MODES[a.mode], len(rows), a.rows, len(cleaned)),
-                    quality=gate)
+                    quality=gate, **_used_variants(cleaned, variants or []))
     summary.update(written=written, gate=gate, wrote=[a.write])
     _emit(summary)
     return 0
@@ -467,4 +538,69 @@ def cmd_refresh(a):
                         W.notes_line("refresh", entry, rule.get("key"), "evalset"))
         summary["wrote"].append(a.out)
     _emit(summary)
+    return 0
+
+
+# ---- repair ----------------------------------------------------------------------------------------------------------
+
+LEFT_SHOWN = 20  # the rows that still break a rule, listed in the summary (the count has them all)
+
+
+def _adapter(task):
+    """The task's features adapter with its constraints (features.adapter.load_adapter); an adapter that cannot be
+    loaded, or a malformed constraint, is an input error."""
+    from features.adapter import load_adapter
+    from rsi.rules import adapter_path, features_settings
+    try:
+        return load_adapter(adapter_path(task), features_settings(task)["constraints"])
+    except Exception as e:  # noqa: BLE001  (a FeatureError, or whatever the adapter file raises on import)
+        raise DsetError("--task: the features adapter or constraints: %s: %s" % (type(e).__name__, e))
+
+
+def _broken(adapter, row, i):
+    try:
+        return adapter.violations(R.state_of(row))
+    except Exception as e:  # noqa: BLE001  (an adapter's check that fails on this state)
+        raise DsetError("row %d (id=%s): the adapter's check raised %s: %s" % (i, row.get("id"), type(e).__name__, e))
+
+
+def cmd_repair(a):
+    task = _load_task(a.task)
+    rows = _read_rows(a.rows, "--rows")
+    _check_rows(rows, task, "--rows %s" % a.rows, variants=[], seeds=False)  # a variant is written as it is
+    _new_paths([a.out])
+    adapter = _adapter(task)
+    from features.table import real_rows
+    real = set(id(r) for r in real_rows(rows))  # prompt variants keep their state: it is the seed's, renamed
+    out, repaired, left, by_rule = [], 0, [], {}
+    for i, r in enumerate(rows):
+        if id(r) not in real:
+            out.append(r)
+            continue
+        before = _broken(adapter, r, i)
+        try:
+            state = adapter.repair(R.state_of(r))
+        except Exception as e:  # noqa: BLE001
+            raise DsetError("row %d (id=%s): the adapter's repair raised %s: %s" % (i, r.get("id"),
+                                                                                    type(e).__name__, e))
+        fixed = dict(r, **{"state" if "state" in r else "input": state})  # input: a row of an old workspace
+        after = _broken(adapter, fixed, i)
+        for which, found in (("broken", before), ("left", after)):
+            for rule in set(rule for rule, _ in found):
+                by_rule.setdefault(rule, {"broken": 0, "left": 0})[which] += 1
+        repaired += int(state != R.state_of(r))
+        if after:
+            left.append({"id": r.get("id"), "violations": [m for _, m in after]})
+        out.append(fixed)
+    with W.publishing() as pub:
+        pub.file(a.out, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in out).encode("utf-8"))
+    summary = {"rows": len(rows), "variants": len(rows) - len(real), "repaired": repaired,
+               "violations_left": len(left), "by_rule": dict(sorted(by_rule.items())), "left": left[:LEFT_SHOWN],
+               "wrote": [a.out]}
+    _emit(summary)
+    if left:
+        sys.stderr.write("dset: error: %d of %d rows still break a rule after repair, e.g. %s: %s (the rows are in "
+                         "%s all the same; the summary's left lists them)\n"
+                         % (len(left), len(rows), left[0]["id"], left[0]["violations"][0], a.out))
+        return 1
     return 0

@@ -1,81 +1,105 @@
-# 任务说明：<task_id>
+# Task: <task_id>
 
-本文件是 `task.json` 的人读版本，章节与字段一一对应。改动后必须同步 `task.json`，并升 `version`。
+This file is the version of `task.json` for people; its sections match the fields one to one. After any change, update `task.json` to match and raise `version`.
 
-## 决策（`decision`）
+## Decision (`decision`)
 
-- 类型（`type`）：binary / choice / score
-- 决策说明（`instructions`）：这个决策要回答什么问题？
-- 标签（`labels`）与含义（`label_meanings`）：
-  - `<标签>`：<含义>
-- 正类（`positive`，仅 binary）：
+- Type (`type`): binary / choice / score
+- Decision instructions (`instructions`): what question does this decision answer?
+- Labels (`labels`) and their meanings (`label_meanings`):
+  - `<label>`: <meaning>
+- Positive class (`positive`, binary only):
 
-## 输入（`input`）
+## Input (`input`)
 
-数据集每一行的 `state`（模型的输入）的格式；每一行的 `question` 由上面的决策得出，见 `docs/interfaces/README.md` 的「决策样本行」。
+The format of `state` (the model's input) in each row of the datasets; each row's `question` derives from the decision above, see "Decision rows" in `docs/interfaces/README.md`.
 
-- 格式（`format`）：messages / fields / object
-- 说明（`description`）：
-- 字段（`fields`，仅 fields 格式）：
+- Format (`format`): messages / fields / object
+- Description (`description`):
+- Fields (`fields`, fields format only):
+- Verbatim paths (`verbatim`, optional, `[]` when not written): the state paths whose text is a row's own request, e.g. `messages[].content` (dots between keys, `[]` for every item of a list); data generation and prompt variants never change that text. All instructions, label meanings and state keys are in English.
 
-## 数据（`data`）
+## Features (`features`, optional)
 
-- 原始数据来源（`sources`）：
-- 允许的标签来源（`label_sources`）：rule / model_judge / human / outcome
-- 行说明（`rows`，可选）：一行是什么、各字段从哪来；预期的总行数和各标签行数（`expect`，可选）：
-- 切分规则（`split`，可选，可以只写一部分）：by（time / group / random）、key、ranges 或 fractions、sizes、stratify、unit、seed；没写的由数据模块按数据补全（评测集、封存 test 登记之前），记成任务定义的新版本（本文件末尾加一节「切分规则」，由 `rsi.datasplit.fill_task_md` 生成）：
+How a row's `state` becomes numbers for ③ Compare's CPU baselines and for the data module's generation; without the section the generic views are used.
 
-## 数据质量检查（`quality_checks`，可选）
+- Adapter (`adapter`, optional): a Python file (standard library only, a path relative to the repository root or absolute) that may define `features`, `edit_view`, `apply`, `repair`, `check` and `describe`; what it leaves out is generic:
+- Constraints (`constraints`, optional, `[]` when not written): declarative rules on the state's numbers, each one of `nonneg`, `integer`, `sum` + `of`, `order`, `zero_if_zero` + `then` (grammar in "features" of `docs/interfaces/task.md`); `dset repair` and data generation repair and check rows by them:
 
-数据模块质量门的检查项和阈值（例如最少样本量、近似重复率上限、标签信度下限），不写时由数据模块自定：
+## Data (`data`)
 
-## 指标（`metrics`）
+- Raw data sources (`sources`):
+- Allowed label sources (`label_sources`): rule / model_judge / human / outcome
+- Row description (`rows`, optional): what a row is and where each field comes from; the expected total rows and rows per label (`expect`, optional):
+- Split rule (`split`, optional, may be written in part): by (time / group / random), key, ranges or fractions, sizes, stratify, unit, seed; what is not written the data module fills in from the data (before the evalset and the sealed testset are registered) and records as a new version of the task definition (a section "Split rule (`data.split`)" is added at the end of this file, written by `rsi.datasplit.fill_task_md`):
 
-`rsi` 按固定定义计算并在登记时核对的指标：`accuracy`、`log_loss`（越低越好）、`macro_f1`、`auc`（仅 binary）、`auprc`（仅 binary）、`brier`（越低越好，仅 binary）；基线：`majority`（训练集先验）、`group_prior`（按 `meta.state_id` 分组的训练集先验）。定义见 `docs/interfaces/task.md` 的「指标的定义」。别的名字也可以写，但 `rsi` 不计算、不核对，由模块自己算并说明算法。
+## Data quality checks (`quality_checks`, optional)
 
-- 主指标（`primary`），是否越高越好（`higher_is_better`，已知指标必须与它的方向一致）：
-- 其他指标（`others`）：
-- 必须对比的基线（`baselines`）：
-- 差值置信区间（`ci`，可选）：抽样次数 `resamples`（不写时 1000）、随机种子 `seed`（不写时 0）、置信水平 `level`（不写时 0.95）
+The checks and thresholds of the data module's quality gate (e.g. a minimum sample size, a maximum near-duplicate rate, a minimum label reliability, the largest share of generated rows `max_synthetic_share`); when not written, the data module sets its own:
 
-## 晋升规则（`promotion_rule`）
+## Metrics (`metrics`)
 
-- 最小提升（`min_delta`）：
-- 置信区间下界要求（`ci_lower_min`）：
-- 护栏（`guards`）：指标、方向、允许的最大退步（`max_regression`）
+The metrics `rsi` computes by fixed definitions and checks at registration: `accuracy`, `log_loss` (lower is better), `macro_f1`, `auc` (binary only), `auprc` (binary only), `brier` (lower is better, binary only), `f1` (binary only), `expected_cost` (lower is better, needs `metrics.costs`); baselines: `majority` (the trainset prior), `group_prior` (the trainset prior grouped by `meta.state_id`). Definitions in "Metric definitions" of `docs/interfaces/task.md`. Other names may be written too, but `rsi` neither computes nor checks them; the modules compute them and explain the method.
 
-## 停止条件（`stop`）
+- Primary metric (`primary`), and whether higher is better (`higher_is_better`; for a known metric it must match the metric's direction):
+- Other metrics (`others`):
+- Baselines that must be compared (`baselines`):
+- Confidence interval of the delta (`ci`, optional): resamples `resamples` (1000 when not written), random seed `seed` (0 when not written), confidence level `level` (0.95 when not written)
 
-- 目标值（`target`）：
-- 最大轮数（`max_rounds`）：
-- 连续无晋升轮数（`patience`，可选，不写时为 3）：
-- 每轮最多尝试次数（`max_attempts_per_round`，可选，不写时为 3；一次搜索（search）算一次，搜索里的试验候选不单独算）：
+## Promotion rule (`promotion_rule`)
 
-用户随时可以要求结束运行。每次停止都交付运行报告；一个版本都没有升级时，交付的是说明各轮结论的失败报告。
+- Minimum gain (`min_delta`):
+- Required lower bound of the confidence interval (`ci_lower_min`):
+- Guards (`guards`): metric, direction, largest regression allowed (`max_regression`)
 
-## 预算（`budget`）
+## Decision policy (`policy`, optional)
 
-- 算力小时（`compute_hours`）：
-- 标注条数（`annotation_items`）：
-- API 费用（`api_cost`）：
+With this section every candidate and every ③ Compare baseline fits a calibration and a decision rule on its valset predictions (valset labels only), and its `model.predict` applies them; without it nothing is fitted. Every field is optional (`{}` takes all the defaults; details in "policy" of `docs/interfaces/task.md`):
 
-注意：`rsi` 只把已登记候选模型的 `cost.compute_hours` 计入已用算力，并据此做超预算审批和停止检查；标注条数和 API 费用代码不统计也不强制，模块在交回的报告里写用量，要超出时停下问你。
+- Objective (`objective`): the metric the policy is chosen by (`f1` for binary, `log_loss` otherwise when not written; `expected_cost` needs `metrics.costs`):
+- Calibrations (`calibrations`), decision rules (`rules`), how the valset is split to fit and select (`split`), the smallest accepted improvement (`min_lo`):
 
-## 资源（`resources`）
+## ③ Compare (`compare`, optional)
 
-可用的机器、模型、额度等。训练命令的位置写 `train_command`（可选，绝对路径），不写时用 `<repo root>/modules/train/train`；即 `resources.train_command`：
+With this section ③ Compare runs between ② Train & tune and ④ Deliver: it trains baselines once per trainset, reports the candidate against each on the valset and has them predict the evalset for the judge; a report only, never a gate. Without it ③ is off. Details in "compare" of `docs/interfaces/task.md`.
 
-## 评测集使用上限（`eval_use_limit`）
+- Baselines (`baselines`, required): from `lr`, `gbdt`, `mlp` (CPU, on the features), `zero_shot`, `few_shot` (the base model without training, and with labelled examples in its prompt) and `team_recipe` (the team's existing training recipe):
+- The team's recipe (`team_recipe`, with `team_recipe` in the baselines): `{"base", "recipe", "overrides", "seed", "max_steps"}`, like a candidate's config:
+- Other settings (optional): `seed`, `python`, `max_train_rows`, `grids`, `zero_shot`, `few_shot`, `gpu_hours`:
 
-同一评测集最多使用几次：
+## Stop conditions (`stop`)
 
-## 交付（`delivery`，可选）
+- Target (`target`):
+- Maximum rounds (`max_rounds`):
+- Rounds in a row without promotion (`patience`, optional, 3 when not written):
+- Maximum attempts per round (`max_attempts_per_round`, optional, 3 when not written; one search counts as one attempt, and the trial candidates in a search do not count separately):
 
-- 复现容差（`reproduction_tolerance`，不写时为 1e-6）：交付包在验证集输入上的概率与候选的概率最多差多少；模型用低精度（例如 bf16）在 GPU 上跑、batch 大小会变时调大，例如 1e-4：
-- 允许的决策翻转比例（`max_decision_mismatch_rate`，0 到 1 之间不含 1，不写时为 0）：概率在容差之内、但靠近决策边界而翻了决策的验证集行，最多占多少（按行数向下取整封顶）：
+The user can ask to end the run at any time. Every stop delivers the run report; when no version was promoted, what is delivered is a failure report stating each round's conclusions.
 
-## 需要审批的事项（`approvals`）
+## Budget (`budget`)
 
-`task_change`、`refresh_sets`、`use_testset` 守护固定规则，总是需要审批，每次审批只对一次登记有效，不必勾选。
+- GPU hours (`compute_hours`):
+- Annotation items (`annotation_items`):
+- Data LLM cost in dollars (`api_cost`: the LLM calls that generate or review data and paraphrase prompts):
+- Agent cost in dollars (`agent_cost`, optional: the module and decision agents' sessions):
 
-本列表只决定以下三项是否需要审批，勾选：plan / over_budget / delete
+Note: `rsi` keeps a spend ledger of all four (`docs/interfaces/spend.md`): GPU hours of candidates and of the work modules report in their spend files, data LLM dollars and annotation items from the spend files, agent dollars as each agent session reports them; the two dollar budgets are separate. Once any budget is reached the run stops after the round's decision, and with the `over_budget` approval going on needs your approval first.
+
+## Resources (`resources`)
+
+The machines, models, quotas and so on available. The location of the train command goes into `train_command` (optional, an absolute path); when not written, `<repo root>/modules/train/train` is used; that is, `resources.train_command`:
+
+## Evalset use limit (`eval_use_limit`)
+
+How many times one evalset may be used at most:
+
+## Delivery (`delivery`, optional)
+
+- Reproduction tolerance (`reproduction_tolerance`, 1e-6 when not written): how far the delivery package's probabilities on the valset inputs may be from the candidate's at most; raise it, e.g. to 1e-4, when the model runs on a GPU in low precision (e.g. bf16) and the batch size varies:
+- Allowed share of flipped decisions (`max_decision_mismatch_rate`, from 0 up to but not including 1, 0 when not written): the largest share of valset rows whose probabilities are within the tolerance but whose decision flipped near the decision boundary (a cap of the row count times this share, rounded down):
+
+## Items needing approval (`approvals`)
+
+`task_change`, `refresh_sets` and `use_testset` guard fixed rules: they always need approval, each approval is valid for one registration only, and they need not be checked here.
+
+This list decides only whether the three items below need approval; check: plan / over_budget / delete

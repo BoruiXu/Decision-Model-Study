@@ -147,7 +147,7 @@ class TestInit(WsCase):
                                              "decision": None, "plan_id": None}})
         self.assertEqual(s["no_promotion_streak"], 0)
         self.assertIsNone(s["stopped"])
-        self.assertEqual(s["budget_used"], {"compute_hours": 0})
+        self.assertEqual(s["budget_used"], {"compute_hours": 0, "api_usd": 0, "agent_usd": 0, "annotation_items": 0})
         reg = read_registry(self.wsdir)
         self.assertEqual(len(reg), 1)
         e = reg[0]
@@ -253,7 +253,7 @@ class TestTaskVersion(WsCase):
                            "task_change")  # TASK.md changed only: no fill reasons
         self.assertNotIn("data.split", msg)
         for n, other in enumerate(("label 'yes' now means the opposite\n",  # a fill keeps TASK.md ...
-                                   text + "\n## 切分规则\n\n标签 yes 现在表示相反\n")):  # ... and appends only the rule
+                                   text + "\n## Split rule\n\nyes now means the opposite\n")):  # ... and appends only the rule
             self.refused("task", make_task_dir(self.src("v2-text-%d" % n), t2, other), "task_change", "TASK.md")
         self.assertEqual(self.ws.register("task", make_task_dir(self.src("v2"), t2, md)), "task-0002")
         self.assertEqual(self.ws.state["approvals"], [])  # no task_change asked or used
@@ -1083,7 +1083,7 @@ class TestCliCommands(WsCase):
         for line in ("task: spam-check v1 (task-0001)", "round: 1", "trainset: trainset-0001",
                      "valset: valset-0001", "evalset: evalset-0001", "testset: testset-0001",
                      "best: none", "eval uses: 1/3", "unapproved plans: plan-0001", "stopped: no",
-                     "compute hours: 1.5"):
+                     "budget: GPU hours 1.5/– · data LLM $ 0.00/– · agent $ 0.00/– · annotation 0/–"):
             self.assertIn(line, out)
         self.approve("plan", "plan-0001")
         self.ws.state["versions"].append({"version": "V1", "candidate_id": "candidate-0001",
@@ -1143,7 +1143,9 @@ class TestRefusedCompute(WsCase):
     the later registration of a counted source does not add the same cost again."""
 
     def used(self):
-        return Workspace(self.wsdir).state["budget_used"]
+        """The compute part of budget_used (the ledger's other accounts: test_ledger)."""
+        used = Workspace(self.wsdir).state["budget_used"]
+        return dict((k, v) for k, v in used.items() if k in ("compute_hours", "refused"))
 
     def cand(self, name, cost, **fields):
         fields.setdefault("ids", VAL)
@@ -1199,7 +1201,7 @@ class TestRefusedCompute(WsCase):
         same = os.path.join(self.root, "src", "same-content")
         shutil.copytree(reg, same)
         self.refused("candidate", same, "same content")  # a copy of a registered candidate: no new training
-        self.ws.stop("alice", "先停")
+        self.ws.stop("alice", "stop for now")
         late = self.cand("late", 0.1, ids=TRAIN)
         with self.assertRaises(StoppedError):  # refused because the run stopped: not counted
             self.ws.register("candidate", late)
@@ -1222,7 +1224,7 @@ class TestRefusedCompute(WsCase):
         # The budget refusal is a refusal too: cand-b's training counts (0.3), and its registration once approved
         # adds nothing more.
         self.assertAlmostEqual(self.used()["compute_hours"], 0.3)
-        self.ws.approve("over_budget", "alice", "可以超")
+        self.ws.approve("over_budget", "alice", "going over is fine")
         self.assertEqual(self.ws.register("candidate", b), "candidate-0002")
         self.assertAlmostEqual(self.used()["compute_hours"], 0.3)
 
@@ -1278,7 +1280,7 @@ class TestRefusedCompute(WsCase):
         ws.update_dispatch(done, held_budget=dict(held, dirs=["candidate"]))  # processed after its approval
         for out, names in ((outs[0], ("trial-1", "trial-2")), (outs[1], ("candidate",)), (outs[2], ("candidate",))):
             self.handed_back(out, *names)
-        Workspace(self.wsdir).stop("alice", "停")
+        Workspace(self.wsdir).stop("alice", "stop")
         used = self.used()
         self.assertAlmostEqual(used["compute_hours"], 2.0)  # 0.2 + 0.3, and the fixture candidate's 1.5
         self.assertEqual(used["refused"], {trials[0]: 0.2, trials[1]: 0.3,
@@ -1299,14 +1301,14 @@ class TestRefusedCompute(WsCase):
         ws.update_dispatch(did, held_budget={"launch": 1, "question_id": "q-0001", "dirs": ["candidate"],
                                              "cost": 0.35, "used": 0, "budget": 0.25})
         self.handed_back(out, "candidate")
-        Workspace(self.wsdir).approve("over_budget", "alice", "可以超")
+        Workspace(self.wsdir).approve("over_budget", "alice", "going over is fine")
         stopper, stale = Workspace(self.wsdir), Workspace(self.wsdir)  # loaded before the engine's commit
         self.assertEqual(Workspace(self.wsdir).register("candidate", src), "candidate-0001")  # the engine's commit
         stale._count_refused(src)  # a refusal counted from a stale registry view: the source is registered now
         self.assertEqual(self.used(), {"compute_hours": 0.35})
-        stopper.stop("alice", "停")
+        stopper.stop("alice", "stop")
         self.assertEqual(self.used(), {"compute_hours": 0.35})
-        self.assertEqual(Workspace(self.wsdir).state["stopped"]["reason"], "user requested: 停")
+        self.assertEqual(Workspace(self.wsdir).state["stopped"]["reason"], "user requested: stop")
 
     def test_stop_check_if_closed(self):
         self.sets()

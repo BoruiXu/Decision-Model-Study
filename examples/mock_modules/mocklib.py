@@ -1,4 +1,5 @@
-"""Shared code of the example mock modules: deterministic stand-ins for the five module agents (stdlib only).
+"""Shared code of the example mock modules: deterministic stand-ins for the modules (stdlib only): the four module
+agents and compare, a code module whose fixed command the script stands in for under --runner mock.
 
 `rsi run <ws> --runner mock --mock-dir examples/mock_modules` runs <module>.py from this directory as the agent
 of a dispatch (rsi.runners.MockRunner):
@@ -38,14 +39,22 @@ module does its plain job. "First call" below is the first launch of a dispatch 
                                       check-in hands back long_job again; with checkins the job waits for
                                       the n-th check-in, which lets it run and waits for its marker; the
                                       continued session collects the trials
+  compare  long_job {round: {"release": path} | {"seconds": s}}
+                                      the first call starts a background job (waiting for the release file, or s
+                                      seconds, then writing ok), writes the pid file <marker>.pid and hands back
+                                      long_job (marker baselines.marker); a check-in hands back long_job again; the
+                                      continued session trains the baseline
   deliver  malformed {round: true}    the first call's delivery has a malformed manifest and is handed back
                                       without validating it, so registration refuses it; the return fixes it
   judge    entry {round: module}      the plan's entry module (default train); a revise answer that names a
-                                      module (data, train, deliver) moves the entry there
+                                      module (data, train, deliver) moves the entry there. With ③ Compare the
+                                      evaluation reports every baseline the brief gives (baselines_scored, from
+                                      `rsi score --baselines-on`): baselines_eval, at the milestone baselines_test
   any      questions {round: [text]}  the hand-back questions of the first call (the engine registers nothing it
                                       handed back until the user answers; the answer comes back to the same
                                       session: data then drops the rows of unknown source it added when the
-                                      answer says 删, any other module hands back the same subdirectories again)
+                                      answer says "drop", any other module hands back the same subdirectories
+                                      again)
            hang {round: {"started": path, "release": path}}
                                       the first call writes `started`, then waits for `release`
            kill_parent {round: "after_handback"}
@@ -278,16 +287,35 @@ def rsi(brief, *args):
     return p.returncode, p.stdout + p.stderr if p.returncode else p.stdout
 
 
-def score(brief, labels, predictions, train=None, clusters=None, compare=None):
+def score(brief, labels, predictions, train=None, clusters=None, compare=None, baselines_on=None, baselines=()):
     """What `rsi score` prints for these files, parsed (the numbers a manifest reports)."""
     args = ["score", "--task", brief["task_json"], "--labels", labels, "--predictions", predictions]
-    for opt, val in (("--train", train), ("--clusters", clusters), ("--compare", compare)):
+    for opt, val in (("--train", train), ("--clusters", clusters), ("--compare", compare),
+                     ("--baselines-on", baselines_on)):
         if val:
             args += [opt, val]
+    for d in baselines:
+        args += ["--baseline", d]
     code, out = rsi(brief, *args)
     if code != 0:
         raise SystemExit("rsi score failed:\n%s" % out)
     return json.loads(out)
+
+
+def baselines_scored(c, milestone):
+    """③ Compare's baselines a judge brief gives (baseline_eval_<id>, the baseline directory; at the milestone
+    baseline_test_<id>) as the evaluation reports them: the baselines_eval (baselines_test) object that `rsi score
+    --baselines-on evalset (testset) --baseline <dir>...` prints, with the set's labels, the delivery's predictions on
+    it and the set's inputs as clusters; {} when the brief gives none."""
+    prefix, logical, kind, field = (("baseline_test_", "predictions_test", "testset", "baselines_test") if milestone
+                                    else ("baseline_eval_", "predictions_eval", "evalset", "baselines_eval"))
+    dirs = [path for key, path in sorted(c.inputs.items()) if key.startswith(prefix)]
+    if not dirs:
+        return {}
+    dm = read_json(os.path.join(c.inputs["delivery"], "manifest.json"))
+    mine = os.path.join(c.inputs["delivery"], dm["files"][logical]["path"])
+    return score(c.brief, c.inputs[kind + "_labels"], mine, clusters=c.inputs[kind + "_inputs"], baselines_on=kind,
+                 baselines=dirs)[field]
 
 
 def validate(brief, kind, path):
@@ -333,7 +361,7 @@ def base_manifest(brief, kind, producer, parents=(), notes=""):
 def write_record(c, name, failure, hypothesis, action, metric, before, after, conclusion, knowledge, artifacts=(),
                  automation="scripted"):
     d = c.new_dir(name)
-    m = base_manifest(c.brief, "record", c.module, notes="第 %d 次启动（会话 %s）" % (c.n, c.session))
+    m = base_manifest(c.brief, "record", c.module, notes="launch %d (session %s)" % (c.n, c.session))
     m.update({"module": c.module, "owner": "mock-%s" % c.module, "failure": failure, "hypothesis": hypothesis,
               "action": action, "result": {"metric": metric, "before": before, "after": after,
                                            "conclusion": conclusion},
@@ -387,8 +415,8 @@ class Call(object):
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def reason(self, default=""):
-        """The reason line of the feedback (原因：… / 决策点给出的原因：…), or `default`."""
-        m = re.search(r"^(?:原因|决策点给出的原因)：(.*)$", self.feedback, re.M)
+        """The reason line of the feedback (Reason: … / Reason given by the decision point: …), or `default`."""
+        m = re.search(r"^(?:Reason|Reason given by the decision point): (.*)$", self.feedback, re.M)
         return m.group(1) if m else default
 
     def state(self):
@@ -400,7 +428,7 @@ class Call(object):
 
     def answers(self):
         """The user's answers to this dispatch's questions given in the feedback: [(question, answer)]."""
-        return re.findall(r"^- (.*)\n  用户（[^）]*）的回答：(.*)$", self.feedback, re.M)
+        return re.findall(r"^- (.*)\n  The user's answer \([^)]*\): (.*)$", self.feedback, re.M)
 
     def previous_artifacts(self):
         """The subdirectories the dispatch's previous hand-back listed (kept by the engine as handback-<n>.json)."""
@@ -414,7 +442,8 @@ class Call(object):
             return False
         names = self.previous_artifacts()
         self.handback([os.path.join(self.outdir, n) for n in names],
-                      notes="用户回答了问题（%s），交回的产物不变" % self.answers()[-1][1])
+                      notes="the user answered the questions (%s); the artifacts handed back are unchanged"
+                            % self.answers()[-1][1])
         return True
 
     def handed_back_before(self):
@@ -435,7 +464,7 @@ class Call(object):
     def check(self, kind, path):
         ok, out = validate(self.brief, kind, path)
         if not ok:
-            self.fail("%s %s 没通过 rsi validate：%s" % (kind, os.path.basename(path), out))
+            self.fail("%s %s failed rsi validate: %s" % (kind, os.path.basename(path), out))
 
     def handback(self, artifacts, status="ok", marker=None, notes=""):
         qs = self.knob("questions") if self.first else None

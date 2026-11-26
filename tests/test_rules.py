@@ -186,19 +186,31 @@ class TestCheckStop(unittest.TestCase):
         self.assertFalse(check_stop(self.task, stop_state(budget_used={"compute_hours": 9.5}), None)[0])
         stop, reason = check_stop(self.task, stop_state(budget_used={"compute_hours": 10}), None)
         self.assertTrue(stop)
-        self.assertIn("compute", reason)
+        self.assertIn("GPU hours used 10 reached budget 10", reason)
         # Sums of costs carry floating-point error: 0.7 + 0.1 + 0.1 + 0.1 < 1.0.
         self.task["budget"]["compute_hours"] = 1.0
         used = 0.7 + 0.1 + 0.1 + 0.1
         self.assertTrue(check_stop(self.task, stop_state(budget_used={"compute_hours": used}), None)[0])
         self.task["budget"]["compute_hours"] = None
         self.assertFalse(check_stop(self.task, stop_state(budget_used={"compute_hours": 1e6}), None)[0])
+        # A budget of 0 for anything but GPU hours (annotation_items 0: no annotation) is reached only by a use.
+        self.task["budget"].update(annotation_items=0, api_cost=0)
+        self.assertFalse(check_stop(self.task, stop_state(budget_used={"compute_hours": 0}), None)[0])
+        stop, reason = check_stop(self.task, stop_state(budget_used={"compute_hours": 0, "annotation_items": 1}), None)
+        self.assertTrue(stop)
+        self.assertEqual(reason, "annotation used 1 reached budget 0")
+        self.task["budget"]["compute_hours"] = 0  # GPU hours keep their rule
+        self.assertTrue(check_stop(self.task, stop_state(budget_used={"compute_hours": 0}), None)[0])
+        self.task["budget"].update(compute_hours=None, annotation_items=None, api_cost=None)
         # max_rounds counts decided rounds.
         self.task["stop"]["max_rounds"] = 2
         self.assertFalse(check_stop(self.task, stop_state(rounds=decided(1)), None)[0])
         stop, reason = check_stop(self.task, stop_state(rounds=decided(2)), None)
         self.assertTrue(stop)
-        self.assertIn("max_rounds", reason)
+        self.assertIn("2 completed rounds reached max_rounds 2", reason)
+        self.task["stop"]["max_rounds"] = 1
+        self.assertIn("1 completed round reached max_rounds 1", check_stop(self.task, stop_state(rounds=decided(1)),
+                                                                           None)[1])
         # No condition met: continue, saying so; a stopped run stays stopped.
         self.task = binary_task()
         stop, reason = check_stop(self.task, stop_state(), 0.8)
@@ -503,8 +515,8 @@ class TestNext(LoopCase):
         r = run_rsi("next", self.wsdir)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.stdout.startswith("stop: "), r.stdout)
-        self.assertIn("compute hours", r.stdout)
-        self.assertIn("compute hours", Workspace(self.wsdir).state["stopped"]["reason"])
+        self.assertIn("GPU hours", r.stdout)
+        self.assertIn("GPU hours", Workspace(self.wsdir).state["stopped"]["reason"])
 
     def test_after_stop_delete_approval_and_records_allowed(self):
         # R18: cleanup approvals and final experiment records stay possible after a stop.
@@ -630,7 +642,7 @@ class TestMilestoneEvaluation(LoopCase):
         # The round has only a milestone evaluation: next does not ask for `rsi promote`.
         n, reason = self.ws.next_round()
         self.assertIsNone(n)
-        self.assertIn("compute hours", reason)
+        self.assertIn("GPU hours", reason)
 
 
 class TestRegistrationGuards(LoopCase):

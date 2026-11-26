@@ -9,9 +9,11 @@ so only the workspace holds the labels; a refused registration changes
 nothing (but the compute of a refused candidate, below). Per-kind workspace
 rules live in REGISTER_CHECKS (refusals) and
 REGISTER_EFFECTS (STATE updates). Among the refusals, the numbers a
-candidate or an evaluation reports (metrics, baselines, train gate, deltas
-and intervals) are recomputed with rsi.metrics, so the promotion rule and the
-train gate rest on numbers the code has checked.
+candidate, a baseline, a comparison or an evaluation reports (metrics,
+baselines, train gate, deltas and intervals, the strongest baseline, ③'s
+baselines on the evalset and the testset) are recomputed with rsi.metrics, so
+the promotion rule, the train gate and the reports rest on numbers the code
+has checked.
 
 Compute used (STATE budget_used.compute_hours) is the cost.compute_hours of
 the registered candidates plus that of refused ones: a candidate refused after
@@ -25,6 +27,16 @@ unregistered candidates of a hand-back a stop closes before it is processed
 budget_overrun tells the engine, before it registers a hand-back, whether its
 candidates would go over budget.compute_hours without the over_budget
 approval (the engine then holds the hand-back and asks).
+
+The spend ledger (docs/interfaces/spend.md, rsi.rules.RESOURCES): budget_used
+also keeps api_usd (the LLM calls that generate or review data), agent_usd
+(the module and decision agents' sessions) and annotation_items; a workspace
+made before them reads them as 0 (used). count_spend adds the new lines of a
+dispatch's spend file (compute_hours, api_usd, annotation_items); the engine
+adds what each agent launch adds to its session's cumulative cost, once
+(add_agent_cost), and each decision agent's cost once (add_decision_cost). The
+two dollar accounts are never added together; budget_exhausted lists the
+resources whose budget is reached.
 
 promote, approve, next_round and stop_check carry out the top-level decisions;
 the decisions themselves come from the pure rules in rsi.rules.
@@ -53,9 +65,11 @@ except ImportError:  # no fcntl (not POSIX, e.g. Windows): STATE writes are not 
 from rsi import datasplit as DS
 from rsi import metrics as M
 from rsi import rows as R
-from rsi.artifacts import EXTERNAL_PREFIX, KIND_CHECKS, MOVED_KINDS, link_errors, load_manifest, validate_artifact
-from rsi.rules import (APPROVAL_ITEMS, EPS, check_stop, decide_promotion, is_number, max_decision_mismatches,
-                       reproduction_tolerance, stop_settings)
+from rsi import variants as V
+from rsi.artifacts import (CANDIDATE_KEY, EXTERNAL_PREFIX, KIND_CHECKS, MOVED_KINDS, link_errors, load_manifest,
+                           validate_artifact)
+from rsi.rules import (APPROVAL_ITEMS, EPS, check_stop, decide_promotion, exhausted, is_number,
+                       max_decision_mismatches, reproduction_tolerance, stop_settings)
 
 KINDS = ("task",) + tuple(KIND_CHECKS)
 DATASETS = ("trainset", "valset", "evalset", "testset")
@@ -71,10 +85,17 @@ SINGLE_USE_APPROVALS = ("task_change", "refresh_sets", "use_testset")
 # Still allowed after the run has stopped: cleanup approvals and final experiment records.
 AFTER_STOP_APPROVALS = ("delete",)
 AFTER_STOP_KINDS = ("record",)
+# A dispatch's spend file in its output directory (docs/interfaces/spend.md): one JSON object per line, the keys
+# SPEND_KEYS, at and source required, the amounts SPEND_AMOUNTS numbers >= 0.
+SPEND_FILE = "spend.jsonl"
+SPEND_AMOUNTS = ("compute_hours", "api_usd", "annotation_items")
+SPEND_KEYS = ("at", "source", "note") + SPEND_AMOUNTS
 # Engine records (see the engine records section of Workspace).
 DISPATCH_STATUSES = ("pending", "running", "handed_back", "long_job", "failed", "done")
 WAITING_KINDS = ("approval", "question")
 STATE_LOCK = "STATE.lock"
+# The quality check registration adds to a trainset whose generated or prompt-variant rows match held-out inputs.
+HELDOUT_CHECK = "generated_matches_heldout"
 _HELD = {}  # lock path -> how often this process holds it (state_lock is reentrant within a process)
 
 
@@ -132,6 +153,53 @@ def _budget_excess(ws, added):
     if used + added <= budget + EPS:
         return None
     return used, budget
+
+
+def spend_line_problems(obj):
+    """(amounts, problems) of `obj`, a parsed spend-file line: amounts {key: value} of each key of SPEND_AMOUNTS whose
+    value is a finite number >= 0, counted whatever else is wrong with the line (a budget guard must not fail open);
+    problems, the rules it breaks ([] for a good line): not a JSON object (then no amounts), a key not in SPEND_KEYS,
+    at or source not a non-empty string, note not a string, an amount that is not a finite number >= 0 (not counted).
+    """
+    if not isinstance(obj, dict):
+        return {}, ["not a JSON object"]
+    problems = []
+    extra = sorted(set(obj) - set(SPEND_KEYS))
+    if extra:
+        problems.append("keys not allowed: %s" % ", ".join(extra))
+    for k in ("at", "source"):
+        if not isinstance(obj.get(k), str) or not obj[k]:
+            problems.append("%s must be a non-empty string" % k)
+    if not isinstance(obj.get("note", ""), str):
+        problems.append("note must be a string")
+    amounts = {}
+    for k in SPEND_AMOUNTS:
+        if k not in obj:
+            continue
+        if is_number(obj[k]) and obj[k] >= 0:
+            amounts[k] = obj[k]
+        else:
+            problems.append("%s must be a number >= 0 (not counted)" % k)
+    return amounts, problems
+
+
+def _spend_lines(path):
+    """The complete lines of spend file `path` ([] without one): every line ending in a newline, and a last one without
+    it only when it parses (its writer may be halfway through it)."""
+    try:
+        with open(path, "rb") as f:
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = text.split("\n")
+    last = lines.pop()  # "" after a final newline
+    if last.strip():
+        try:
+            json.loads(last)
+        except ValueError:
+            return lines
+        lines.append(last)
+    return lines
 
 
 def now_iso():
@@ -250,7 +318,7 @@ def _initial_state(task):
                         "opened_at": now_iso()}},
         "no_promotion_streak": 0,
         "stopped": None,
-        "budget_used": {"compute_hours": 0},
+        "budget_used": {"compute_hours": 0, "api_usd": 0, "agent_usd": 0, "annotation_items": 0},
         # Written by the engine, read by rsi.flow (see the engine records section of Workspace).
         "dispatches": [],
         "decisions": [],
@@ -465,7 +533,7 @@ class Workspace(object):
 
     @staticmethod
     def is_attempt(kind, producer):
-        """True for an artifact that counts as an attempt: a search. One dispatch of the training-tuning module
+        """True for an artifact that counts as an attempt: a search. One dispatch of the train module
         runs one search; its trial candidates are not counted (also those of an old workspace: train candidates,
         tune's trials), the search they are compared in is the attempt."""
         return kind == "search"
@@ -516,7 +584,7 @@ class Workspace(object):
         loc = m["package"]["location"]
         if loc.startswith(EXTERNAL_PREFIX):
             ext = m.get("external", {}).get(loc[len(EXTERNAL_PREFIX):], {})
-            return "%s（%s，sha256 %s）" % (ext.get("location"), loc, ext.get("sha256"))
+            return "%s (%s, sha256 %s)" % (ext.get("location"), loc, ext.get("sha256"))
         return os.path.join(self.path(delivery_id), loc)
 
     def decision_mismatches(self, aid):
@@ -546,8 +614,12 @@ class Workspace(object):
     #   rsi.flow.PURPOSES), "outdir" (relative to the workspace), "brief", "runner", "session", "status"
     #   (DISPATCH_STATUSES: pending until its agent is launched, then running), "returns" (times sent back to its
     #   session), "started_at", "ended_at", "marker"
-    #   (absolute, or relative to the workspace)}];
+    #   (absolute, or relative to the workspace), "spend_lines" (the lines of its spend file counted: count_spend),
+    #   "spent_launches" (the launches whose agent cost is counted: add_agent_cost), "spent_sessions" ({session:
+    #   its cumulative cost counted so far})}];
     # STATE["decisions"]: [{"round", "point", "options", "choice", "by", "reason", "at"}];
+    # STATE["decision_costs"]: {decision key: the decision agent's cost counted in budget_used.agent_usd};
+    # STATE["spend_problems"]: how many spend-file lines had a problem (count_spend);
     # STATE["waiting"]: null or {"id" (q-NNNN), "kind" (approval | question), "what", "ref", "question", "options",
     #   "since"}; STATE["waiting_seq"]: the number of the last waiting id.
     # A workspace made before these fields existed has none: the readers treat a missing field as empty.
@@ -789,6 +861,109 @@ class Workspace(object):
             return None
         return {"dirs": dirs, "cost": added, "used": over[0], "budget": over[1]}
 
+    # ---- the spend ledger (docs/interfaces/spend.md) -------------------------
+
+    def used(self, key):
+        """How much of resource `key` (a used key of rsi.rules.RESOURCES) the run has used: STATE budget_used[key], 0
+        when it is missing (a workspace made before the ledger)."""
+        u = (self._state.get("budget_used") or {}).get(key)
+        return float(u) if is_number(u) else 0.0
+
+    def budget_exhausted(self):
+        """[(label, used, budget)] for every resource with a budget that its use has reached (rsi.rules.exhausted)."""
+        return exhausted(self.task(), self._state)
+
+    def _add_used(self, key, amount):
+        """Inside a transaction: add `amount` to budget_used[key]."""
+        used = self._state.setdefault("budget_used", {})
+        used[key] = (used[key] if is_number(used.get(key)) else 0) + amount
+
+    def count_spend(self, d):
+        """Add the lines of dispatch `d`'s <outdir>/spend.jsonl beyond its record's spend_lines (0 when absent) to
+        budget_used, in one transaction (the record as STATE holds it then; spend_lines becomes the lines read), and
+        return the amounts added {compute_hours, api_usd, annotation_items}. Every amount that is a finite number >= 0
+        is counted, also on a line whose other keys break the rules (spend_line_problems); a line with a problem (not a
+        JSON object, a bad key or amount) is logged as spend_invalid in run.jsonl and counted in STATE spend_problems.
+        A blank line is read and skipped. So no line is counted twice, whoever calls it and how often."""
+        added = dict((k, 0) for k in SPEND_AMOUNTS)
+        if not d.get("outdir"):
+            return added
+        lines = _spend_lines(os.path.join(self.root, d["outdir"], SPEND_FILE))
+        if len(lines) <= max(int(d.get("spend_lines") or 0), int(self.dispatch(d["id"]).get("spend_lines") or 0)):
+            return added  # nothing new (as `d` and this object know STATE; checked again under the lock)
+        bad = []
+        with self.transaction():
+            cur = self.dispatch(d["id"])
+            done = int(cur.get("spend_lines") or 0)
+            if len(lines) <= done:
+                return added
+            for n, text in enumerate(lines[done:], done + 1):
+                if not text.strip():
+                    continue
+                try:
+                    obj = json.loads(text)
+                except ValueError:
+                    obj = None
+                amounts, problems = spend_line_problems(obj)
+                for k, v in amounts.items():
+                    added[k] += v
+                if problems:
+                    bad.append((n, "; ".join(problems), amounts, text[:500]))
+            for k, v in added.items():
+                if v:
+                    self._add_used(k, v)
+            if bad:
+                self._state["spend_problems"] = self.spend_problems() + len(bad)
+            self.update_dispatch(cur["id"], spend_lines=len(lines))
+        if bad:
+            from rsi.engine import log_event  # rsi.engine imports this module
+            for n, error, amounts, text in bad:
+                log_event(self.root, "spend_invalid", dispatch_id=d["id"], file=SPEND_FILE, line=n, error=error,
+                          counted=amounts, text=text)
+        return added
+
+    def spend_problems(self):
+        """How many spend-file lines had a problem (count_spend; STATE spend_problems, 0 when absent)."""
+        n = self._state.get("spend_problems")
+        return n if isinstance(n, int) and not isinstance(n, bool) else 0
+
+    def add_agent_cost(self, did, launch, usd, session=None):
+        """Count launch `launch` of dispatch `did`, whose agent session `session` reports `usd` as its cost so far: a
+        resumed `claude -p` reports the session's cumulative total_cost_usd, not the launch's own. budget_used.agent_usd
+        grows by the increase over the session's last counted total (the record's spent_sessions {session: total}; a
+        new session, e.g. a fresh one, starts from 0; a negative increase counts as 0), once per launch (the record's
+        spent_launches). A launch without a number >= 0 (no result object: killed, timed out) counts nothing and
+        leaves the last total. True when the launch was counted."""
+        launch, key = int(launch), session or ""
+        if not (is_number(usd) and usd >= 0) or launch in (self.dispatch(did).get("spent_launches") or []):
+            return False
+        with self.transaction():
+            d = self.dispatch(did)
+            done = list(d.get("spent_launches") or [])
+            if launch in done:
+                return False
+            totals = dict(d.get("spent_sessions") or {})
+            last = totals.get(key) if is_number(totals.get(key)) else 0
+            totals[key] = max(last, usd)
+            self.update_dispatch(did, spent_launches=done + [launch], spent_sessions=totals)
+            self._add_used("agent_usd", max(0, usd - last))
+        return True
+
+    def add_decision_cost(self, key, usd):
+        """Add `usd` (a decision agent's reported cost; nothing when it is not a number >= 0) to budget_used.agent_usd,
+        once per decision key (rsi.decisions.decision_key): STATE decision_costs {key: usd} keeps them. True when it
+        was added."""
+        if not (is_number(usd) and usd >= 0) or key in (self._state.get("decision_costs") or {}):
+            return False
+        with self.transaction():
+            costs = dict(self._state.get("decision_costs") or {})
+            if key in costs:
+                return False
+            costs[key] = usd
+            self._state["decision_costs"] = costs
+            self._add_used("agent_usd", usd)
+        return True
+
     def _register(self, kind, src, checks, fill_only=False):
         self._claims = []  # approvals this registration relies on; consumed only on commit
         self.warnings = []
@@ -805,6 +980,8 @@ class Workspace(object):
                 shutil.copytree(src, staged)
             except OSError as e:  # e.g. a link loop or a dangling link inside a linked directory
                 raise RsiError("cannot copy the source %s into the workspace: %s" % (src, e))
+            if kind == "trainset":  # on the staged copy, before its digest: the registered copy holds the check
+                self._mark_heldout_matches(staged)
             digest = content_sha256(staged)
             for e in self._entries:
                 if e["content_sha256"] == digest:
@@ -843,6 +1020,67 @@ class Workspace(object):
                                      "that directory still holds the labels: delete it by hand (after a `delete` "
                                      "approval when the task requires one)" % (aid, src, aside, e))
         return aid
+
+    def _generated_heldout_matches(self, m, path):
+        """The ids of the rows of trainset `m` (its directory `path`) that the data module generated (meta.source
+        starting with "dgen:") or that are prompt variants (taken as the state they invert to under their spec in m's
+        prompt_variants, rsi.variants.invert_state), whose coarse fingerprint (rsi.rows.coarse_fingerprint: numbers
+        rounded to 4 significant digits) is that of an input of the current evalset or testset. The data module never
+        sees those inputs, so the framework checks them here. [] when the trainset holds no such row or its rows cannot
+        be read (the artifact checks refuse it then)."""
+        try:
+            rel = m["files"]["rows"]["path"]
+            rows_path = os.path.realpath(os.path.join(path, rel))
+            if not _inside(rows_path, os.path.realpath(path)):
+                return []
+            rows = R.read_jsonl(rows_path)
+        except (KeyError, TypeError, OSError, ValueError):
+            return []
+        listed = m.get("prompt_variants")  # not validated yet: whatever it holds, nothing here may fail on it
+        specs = dict((s["id"], s) for s in (listed if isinstance(listed, list) else [])
+                     if isinstance(s, dict) and isinstance(s.get("id"), str))
+        mine = []
+        for r in rows:
+            if not isinstance(r.get("id"), str):
+                continue
+            state = R.state_of(r)
+            if R.is_variant(r):
+                sid = r["meta"]["extra"]["variant"]
+                spec = specs.get(sid) if isinstance(sid, str) else None
+                try:
+                    state = V.invert_state(state, spec) if spec is not None else state
+                except (ValueError, TypeError, AttributeError):  # no rewrite of its seed: the variant checks refuse it
+                    pass
+            elif not R.is_generated(r):
+                continue
+            mine.append((r["id"], state))
+        if not mine:
+            return []
+        held = set()
+        for kind in ("evalset", "testset"):
+            cur = self.current(kind)
+            if cur is not None:
+                held.update(R.coarse_fingerprint(R.state_of(x)) for x in self.rows(cur, OVERLAP_FILE[kind]))
+        return [rid for rid, state in mine if R.coarse_fingerprint(state) in held]
+
+    def _mark_heldout_matches(self, staged):
+        """A staged trainset whose generated or variant rows match held-out inputs (_generated_heldout_matches) gets the
+        failed quality check HELDOUT_CHECK (value: how many rows) and quality.passed false in its manifest, so it
+        registers as evidence and never becomes current. A manifest that is not a trainset's is left to the checks."""
+        try:
+            m = load_manifest(staged)
+        except (OSError, ValueError):
+            return
+        q = m.get("quality") if isinstance(m, dict) else None
+        if not (isinstance(q, dict) and isinstance(q.get("checks"), list)):
+            return
+        ids = self._generated_heldout_matches(m, staged)
+        if not ids:
+            return
+        q["checks"] = [c for c in q["checks"] if not (isinstance(c, dict) and c.get("name") == HELDOUT_CHECK)]
+        q["checks"].append({"name": HELDOUT_CHECK, "value": len(ids), "threshold": 0, "passed": False})
+        q["passed"] = False
+        _write_json(os.path.join(staged, "manifest.json"), m)
 
     @staticmethod
     def _set_aside(kind, src):
@@ -1133,7 +1371,7 @@ class Workspace(object):
         hand-back not processed yet (held for an over_budget approval, or
         handed back) ends unregistered: its candidates were trained, so their
         compute counts in the same save, as a refused candidate's
-        (count_stopped_handback).
+        (count_stopped_handback), and so does its spend file (count_spend).
         """
         with self.transaction():
             self._refuse_if_stopped("`rsi stop`")
@@ -1150,6 +1388,7 @@ class Workspace(object):
             for d in self._state.get("dispatches") or []:
                 if d.get("status") in ("handed_back", "long_job"):
                     self.count_stopped_handback(d)
+                    self.count_spend(d)  # and its spend file (count_spend: once per line)
             reason = "user requested: %s" % quote
             self._state["stopped"] = {"reason": reason, "by": by, "at": now_iso(), "round": self._state["round"]}
             return reason
@@ -1307,7 +1546,7 @@ def _single_use_needed(ws, kind, m, aid):
         return ["task_change"] if ws.current("task") not in (None, aid) and not _was_split_fill(ws, m, aid) else []
     if kind in ("valset", "evalset", "testset", "corpus", "pool"):
         return ["refresh_sets"] if ws.current(kind) not in (None, aid) else []
-    if kind == "delivery" and "predictions_test" in (m.get("files") or {}):
+    if kind in ("delivery", "baseline") and "predictions_test" in (m.get("files") or {}):
         return ["use_testset"]
     if kind == "evaluation" and m.get("uses_testset") is True:
         return ["use_testset"]
@@ -1533,7 +1772,7 @@ def _check_candidate(ws, m, path):
     errors = []
     if m.get("producer") == "data":
         errors.append("producer data: the data module does not train; a new trainset is tested by the round's "
-                      "training-tuning (train) and judge dispatches, so the data module registers no candidate")
+                      "train and judge dispatches, so the data module registers no candidate")
     errors += ws.current_errors("trainset_id", m["trainset_id"], "trainset")
     errors += ws.current_errors("valset_id", m["valset_id"], "valset")
     return errors + _coverage_errors(ws, path, m, "predictions_val", "valset")
@@ -1616,6 +1855,83 @@ def _search_code_version_errors(ok):
                       "configurations of one version of the training code, the default included; changes to the "
                       "train command or its defaults land between rounds, so rerun the trials with one version"
                       % "; ".join("%s (%s)" % (key, ", ".join(ids)) for key, ids in known))
+    return errors
+
+
+def _set_coverage_errors(ws, path, manifest, logical, aid, set_logical):
+    """Predictions in `logical` must cover exactly the ids of logical file `set_logical` of the registered set `aid`."""
+    expected = [r["id"] for r in ws.rows(aid, set_logical)]
+    errors = R.check_predictions(_src_rows(path, manifest, logical), ws.task(), expected)
+    return ["%s: %s (against the %s of %s)" % (logical, e, set_logical, aid) for e in errors]
+
+
+def _check_baseline(ws, m, path):
+    """A baseline's sets are registered (its trainset unless null: a baseline such as zero_shot needs none); its
+    predictions_val cover the ids of its valset's rows and its predictions_eval those of its evalset's inputs.jsonl
+    (registered sets, not necessarily the current ones). Test predictions (a milestone baseline) cover the inputs of
+    the current testset and need a use_testset approval, like a milestone delivery's. reused_from, when set, is a
+    registered baseline of the same name."""
+    errors = []
+    if m["trainset_id"] is not None:
+        errors += ws.ref_errors("trainset_id", m["trainset_id"], "trainset")
+    rid = m["reused_from"]
+    if rid is not None:
+        missing = ws.ref_errors("reused_from", rid, "baseline")
+        if missing:
+            errors += missing
+        elif ws.manifest(rid)["name"] != m["name"]:
+            errors.append("reused_from: %s is the baseline named %r, but this baseline is named %r: a baseline is "
+                          "reused under its own name" % (rid, ws.manifest(rid)["name"], m["name"]))
+    for field, kind, logical, set_logical in (("valset_id", "valset", "predictions_val", "rows"),
+                                              ("evalset_id", "evalset", "predictions_eval", "inputs")):
+        errors += ws.ref_errors(field, m[field], kind) or _set_coverage_errors(ws, path, m, logical, m[field],
+                                                                               set_logical)
+    if "predictions_test" in m["files"]:
+        tid = m["testset_id"]
+        errors += ws.current_errors("testset_id", tid, "testset") or _set_coverage_errors(
+            ws, path, m, "predictions_test", tid, "inputs")
+        errors += ws.approval_errors("use_testset", "predictions_test")
+    return errors
+
+
+def _check_comparison(ws, m, path):
+    """A comparison's candidate is registered, on the comparison's trainset and valset; its evalset is registered; each
+    baseline is a registered baseline listed under its own name, once, on the comparison's valset and evalset, trained
+    on its trainset or on none."""
+    cid = m["candidate_id"]
+    errors = ws.ref_errors("candidate_id", cid, "candidate")
+    if not errors:
+        c = ws.manifest(cid)
+        for field in ("trainset_id", "valset_id"):
+            if c[field] != m[field]:
+                errors.append("%s is %s but candidate %s has %s" % (field, m[field], cid, c[field]))
+    errors += ws.ref_errors("evalset_id", m["evalset_id"], "evalset")
+    listed = {}  # baseline id -> the names it is listed under
+    for name, bid in sorted(m["baselines"].items()):
+        listed.setdefault(bid, []).append(name)
+    for bid, names in sorted(listed.items()):
+        if len(names) > 1:
+            errors.append("baselines: %s is listed under %s: each baseline is listed once, under its own name"
+                          % (bid, ", ".join(names)))
+    for name, bid in sorted(m["baselines"].items()):
+        field = "baselines.%s" % name
+        missing = ws.ref_errors(field, bid, "baseline")
+        if missing:
+            errors += missing
+            continue
+        b = ws.manifest(bid)
+        if b["name"] != name:
+            errors.append("%s: %s is the baseline named %r, but the comparison lists it as %r"
+                          % (field, bid, b["name"], name))
+        for key in ("valset_id", "evalset_id"):
+            if b[key] != m[key]:
+                errors.append("%s: %s has %s %s, but the comparison's %s is %s: a comparison scores every baseline "
+                              "on its own sets (a baseline on an earlier evalset is re-predicted on the new one, a new "
+                              "baseline with reused_from)" % (field, bid, key, b[key], key, m[key]))
+        if b["trainset_id"] not in (None, m["trainset_id"]):
+            errors.append("%s: %s was trained on %s, but the comparison's trainset_id is %s (a baseline in a "
+                          "comparison is trained on its trainset, or on none: trainset_id null)"
+                          % (field, bid, b["trainset_id"], m["trainset_id"]))
     return errors
 
 
@@ -1808,21 +2124,27 @@ def _check_plan(ws, m, path):
 
 # ---- reported numbers recomputed with rsi.metrics (R36) -----------------------
 
-def score_form(labels, predictions, train=None, clusters=None, compare=None):
+def score_form(labels, predictions, train=None, clusters=None, compare=None, baselines_on=None, baselines=()):
     """The `rsi score` command that computes a reported number, quoted in refusals; arguments are
-    the files as `<artifact id>/<file>` (e.g. `<valset-0001>/rows.jsonl`)."""
+    the files as `<artifact id>/<file>` (e.g. `<valset-0001>/rows.jsonl`), `baselines` the baseline directories of
+    `--baselines-on`."""
     parts = ["rsi score --task <task.json> --labels %s --predictions %s" % (labels, predictions)]
-    for option, value in (("--train", train), ("--clusters", clusters), ("--compare", compare)):
+    for option, value in (("--train", train), ("--clusters", clusters), ("--compare", compare),
+                          ("--baselines-on", baselines_on)):
         if value is not None:
             parts.append("%s %s" % (option, value))
+    parts += ["--baseline %s" % b for b in baselines]
     return "`%s`" % " ".join(parts)
 
 
 def unverified_names(kind, m, task):
-    """Names in a candidate or evaluation manifest that rsi does not compute, in order of appearance.
+    """Names in a candidate, baseline, comparison or evaluation manifest that rsi does not compute, in order of
+    appearance.
 
     Registration skips them: unknown metrics and baselines, and for a candidate also
-    the task's unknown baselines (the train gate is checked against the known ones).
+    the task's unknown baselines (the train gate is checked against the known ones). A
+    comparison's metrics_val.candidate holds the primary metric, so an unknown primary (its
+    deltas and strongest then not checked) is among them.
     """
     names = []
 
@@ -1843,6 +2165,13 @@ def unverified_names(kind, m, task):
         baselines(m["baselines_val"])
         for b in task["metrics"]["baselines"]:
             add(b, M.KNOWN_BASELINES)
+    elif kind == "baseline":
+        for n in m["metrics_val"]:
+            add(n, M.KNOWN_METRICS)
+    elif kind == "comparison":
+        for values in m["metrics_val"].values():
+            for n in values:
+                add(n, M.KNOWN_METRICS)
     elif kind == "evaluation" and m["uses_testset"]:
         for n in m.get("metrics_test", {}):
             add(n, M.KNOWN_METRICS)
@@ -1852,6 +2181,10 @@ def unverified_names(kind, m, task):
         baselines(m["metrics"]["baselines"])
         if m["best_before"] is not None:  # a delta for the primary metric is expected (and checked when known)
             add(task["metrics"]["primary"], M.KNOWN_METRICS)
+    if kind == "evaluation":  # ③ Compare's baselines on the evalset, or on the testset at a milestone
+        for b in list((m.get("baselines_eval") or {}).values()) + list((m.get("baselines_test") or {}).values()):
+            for n in list(b["metrics"]) + [b["delta"]["metric"]]:
+                add(n, M.KNOWN_METRICS)
     return names
 
 
@@ -2037,6 +2370,197 @@ def _milestone_numbers(ws, m):
                            score_form("<%s>/labels.jsonl" % tid, "<%s>/predictions_test.jsonl" % did))
 
 
+def latest_comparison(ws, ids, candidate_id, evalset_id):
+    """The latest comparison among the artifact ids `ids` (in registration order) of candidate `candidate_id` on
+    evalset `evalset_id`, or None: the round's comparison an evaluation of that candidate reports the baselines of
+    (rsi.flow.comparison_of, the judge's brief and _check_baselines_eval select it so)."""
+    out = None
+    for a in ids:
+        if candidate_id is not None and ws.entry(a)["kind"] == "comparison":
+            m = ws.manifest(a)
+            if m["candidate_id"] == candidate_id and m["evalset_id"] == evalset_id:
+                out = a
+    return out
+
+
+def milestone_baselines(ws, rnd=None):
+    """The baselines of round `rnd` (default: the current one) carrying predictions_test: the milestone's, the
+    baselines of the best version's comparison scored on the testset inputs (rsi.flow.milestone_baselines)."""
+    arts = ws.state["rounds"][str(ws.state["round"] if rnd is None else rnd)]["artifacts"]
+    return [a for a in arts if ws.entry(a)["kind"] == "baseline" and "predictions_test" in ws.manifest(a)["files"]]
+
+
+def _check_baselines_scored(ws, m, field, set_kind, delivery_file):
+    """③ Compare's baselines in an evaluation, `field`, against those the round expects: on the evalset (set_kind
+    "evalset") every baseline of the round's latest comparison of the evaluated candidate on the evaluation's evalset;
+    on the testset ("testset") every baseline of the round with predictions_test (the milestone's). Each is a key of
+    `field` (else "<field>: missing <id> (<name>)"), no other key is allowed, and each entry's name, its metrics (the
+    baseline's `delivery_file` against the set's labels) and its delta (the paired cluster bootstrap of the primary
+    metric, the delivery's `delivery_file` minus the baseline's, clusters from the set's inputs.jsonl, the task's
+    interval settings) are recomputed with rsi.metrics. A report only: no promotion rule reads them."""
+    did = m["delivery_id"]
+    if not ws.is_kind(did, "delivery"):
+        return []  # refused by _check_evaluation
+    d = ws.manifest(did)
+    if set_kind == "evalset":
+        sid = m["evalset_id"]
+        comp = latest_comparison(ws, ws.state["rounds"][str(ws.state["round"])]["artifacts"], m["candidate_id"], sid)
+        expected = dict((bid, name) for name, bid in ws.manifest(comp)["baselines"].items()) if comp else {}
+        what = ("of %s, this round's comparison of %s on %s" % (comp, m["candidate_id"], sid) if comp
+                else "of a comparison: this round has no comparison of %s on %s" % (m["candidate_id"], sid))
+        same_set = d["evalset_id"] == sid
+    else:
+        sid = d.get("testset_id")
+        expected = dict((a, ws.manifest(a)["name"]) for a in milestone_baselines(ws))
+        what = "of this round with predictions_test (the milestone's baselines scored on the testset inputs)"
+        same_set = True
+    reported = m.get(field) or {}
+
+    def form(*bids):
+        """The `rsi score` command that prints `field` for the baselines `bids` (as the judge's skill says)."""
+        return score_form("<%s>/labels.jsonl" % sid, "<%s>/%s.jsonl" % (did, delivery_file),
+                          clusters="<%s>/inputs.jsonl" % sid, baselines_on=set_kind,
+                          baselines=["<%s>" % b for b in bids])
+
+    missing = [bid for bid in sorted(expected) if bid not in reported]
+    errors = ["%s: missing %s (%s): report every baseline %s, the `%s` that %s prints" % (
+        field, bid, expected[bid], what, field, form(*sorted(expected))) for bid in missing]
+    errors += ["%s.%s: not a baseline %s" % (field, bid, what) for bid in sorted(reported) if bid not in expected]
+    if not (same_set and delivery_file in d["files"] and ws.is_kind(sid, set_kind)):
+        return errors  # refused by _check_evaluation / _check_delivery
+    labels, task = ws.rows(sid, "labels"), ws.task()
+    cand = ws.rows(did, delivery_file)
+    if not _same_ids(cand, labels):
+        return errors
+    primary, ci = task["metrics"]["primary"], M.ci_settings(task)
+    clusters = M.clusters_of(ws.rows(sid, "inputs"))
+    for bid in sorted(set(reported) & set(expected)):
+        r, name, f = reported[bid], expected[bid], "%s.%s" % (field, bid)
+        if r["name"] != name:
+            errors.append("%s.name is %r but %s is the baseline named %r" % (f, r["name"], bid, name))
+        base = ws.rows(bid, delivery_file)
+        if not _same_ids(base, labels):
+            errors.append("%s: the %s of %s do not cover the ids of %s's labels" % (f, delivery_file, bid, sid))
+            continue
+        errors += _verify_metrics(f + ".metrics", r["metrics"], base, labels, task,
+                                  "%s %s against %s labels" % (bid, delivery_file, sid), form(bid))
+        if primary not in M.KNOWN_METRICS:
+            continue
+        source = ("%s minus %s (%s) on %s, paired cluster bootstrap with resamples %d, seed %d, level %r, clusters "
+                  "from the %s inputs" % (did, bid, name, sid, ci["resamples"], ci["seed"], ci["level"], sid))
+        try:
+            want = M.baseline_delta(task, cand, base, labels, clusters)
+        except ValueError as e:
+            errors.append("%s.delta: cannot be recomputed from %s (%s)" % (f, source, e))
+            continue
+        for key in ("delta", "ci_low", "ci_high"):
+            errors += _mismatch("%s.delta.%s" % (f, key), r["delta"][key], want[key], source, form(bid))
+    return errors
+
+
+def _check_baselines_eval(ws, m, path):
+    """An evaluation that is no milestone reports the baselines of the round's comparison on the evalset."""
+    if m["uses_testset"]:
+        return []  # its baselines are on the testset (baselines_eval is refused there by validate_artifact)
+    return _check_baselines_scored(ws, m, "baselines_eval", "evalset", "predictions_eval")
+
+
+def _check_baselines_test(ws, m, path):
+    """A milestone evaluation reports the round's baselines with predictions_test on the testset."""
+    if not m["uses_testset"]:
+        return []  # baselines_test is refused there by validate_artifact
+    return _check_baselines_scored(ws, m, "baselines_test", "testset", "predictions_test")
+
+
+def _check_baseline_numbers(ws, m, path):
+    """A baseline's metrics_val as rsi.metrics computes them from its predictions_val on its valset's rows."""
+    vid = m["valset_id"]
+    if not ws.is_kind(vid, "valset"):
+        return []  # refused by _check_baseline
+    labels = ws.rows(vid, "rows")
+    preds = _src_rows(path, m, "predictions_val")
+    if not _same_ids(preds, labels):
+        return []  # coverage: refused by _check_baseline
+    return _verify_metrics("metrics_val", m["metrics_val"], preds, labels, ws.task(), "predictions_val against %s" % vid,
+                           score_form("<%s>/rows.jsonl" % vid, "<baseline>/predictions_val.jsonl"))
+
+
+def strongest_of(values, higher):
+    """The name with the best value of `values` (name -> number) in the metric's direction; a tie goes to the
+    alphabetically first name; None when there is none. A comparison's strongest baseline: the compare module writes
+    it with this function, and registration recomputes it with it."""
+    best = None
+    for name in sorted(values):
+        if best is None or (values[name] > values[best] if higher else values[name] < values[best]):
+            best = name
+    return best
+
+
+def _check_comparison_numbers(ws, m, path):
+    """A comparison's numbers recomputed with rsi.metrics on the rows of its valset: metrics_val (the candidate's from its
+    predictions_val, each baseline's from its own), deltas_val (the primary metric's paired_delta, candidate minus
+    baseline, clusters from the valset's inputs.jsonl, the task's interval settings) and strongest (the baseline with
+    the best primary metric, a tie to the alphabetically first name). The deltas and strongest are not checked when
+    the primary metric is one rsi does not compute."""
+    vid, cid = m["valset_id"], m["candidate_id"]
+    if not ws.is_kind(vid, "valset"):
+        return []  # refused by _check_comparison (the candidate's valset_id differs)
+    labels = ws.rows(vid, "rows")
+    parts = [(CANDIDATE_KEY, cid, "candidate")] + [(n, b, "baseline") for n, b in sorted(m["baselines"].items())]
+    preds = {}  # metrics_val key -> (artifact id, its predictions_val), for the parts on this valset
+    for key, aid, kind in parts:
+        if ws.is_kind(aid, kind) and ws.manifest(aid)["valset_id"] == vid:
+            rows = ws.rows(aid, "predictions_val")
+            if _same_ids(rows, labels):
+                preds[key] = (aid, rows)
+    task = ws.task()
+    errors = []
+    for key, _aid, _kind in parts:
+        if key in preds and key in m["metrics_val"]:
+            aid, rows = preds[key]
+            errors += _verify_metrics("metrics_val.%s" % key, m["metrics_val"][key], rows, labels, task,
+                                      "%s predictions_val against %s" % (aid, vid),
+                                      score_form("<%s>/rows.jsonl" % vid, "<%s>/predictions_val.jsonl" % aid))
+    primary = task["metrics"]["primary"]
+    if primary not in M.KNOWN_METRICS or CANDIDATE_KEY not in preds:
+        return errors
+    cand = preds[CANDIDATE_KEY][1]
+    ci = M.ci_settings(task)
+    clusters = M.clusters_of(ws.rows(vid, "inputs"))
+    for name, reported in sorted(m["deltas_val"].items()):
+        if name not in preds:
+            continue  # refused by _check_comparison
+        bid, rows = preds[name]
+        source = ("%s minus %s (%s) on %s, paired cluster bootstrap with resamples %d, seed %d, level %r, clusters from "
+                  "the %s inputs" % (cid, bid, name, vid, ci["resamples"], ci["seed"], ci["level"], vid))
+        form = score_form("<%s>/rows.jsonl" % vid, "<%s>/predictions_val.jsonl" % cid,
+                          clusters="<%s>/inputs.jsonl" % vid, compare="<%s>/predictions_val.jsonl" % bid)
+        try:
+            want = M.baseline_delta(task, cand, rows, labels, clusters)
+        except ValueError as e:
+            errors.append("deltas_val.%s: cannot be recomputed from %s (%s)" % (name, source, e))
+            continue
+        for key in ("delta", "ci_low", "ci_high"):
+            errors += _mismatch("deltas_val.%s.%s" % (name, key), reported[key], want[key], source, form)
+    values = {}
+    for name in m["baselines"]:
+        if name not in preds:
+            return errors  # refused by _check_comparison
+        try:
+            values[name] = M.score(primary, preds[name][1], labels, task)
+        except ValueError:
+            return errors  # reported by the metric checks
+    higher = task["metrics"]["higher_is_better"]
+    want = strongest_of(values, higher)
+    if m["strongest"] != want:
+        errors.append("strongest: reported %r, recomputed %r: the baseline with the best %s on %s (%s is better; a tie "
+                      "goes to the alphabetically first name): %s; compute each baseline's numbers with %s"
+                      % (m["strongest"], want, primary, vid, "higher" if higher else "lower",
+                         ", ".join("%s %r" % (n, values[n]) for n in sorted(values)),
+                         score_form("<%s>/rows.jsonl" % vid, "<baseline id>/predictions_val.jsonl")))
+    return errors
+
+
 def _check_record(ws, m, path):
     errors = []
     for aid in m["artifacts"]:
@@ -2056,9 +2580,12 @@ REGISTER_CHECKS = {
     "pool": [_check_refresh, _check_disjoint, _check_corpus_registered, _check_from_corpus],
     "candidate": [_check_attempts, _check_candidate, _check_budget, _check_candidate_numbers],
     "search": [_check_attempts, _check_search],
+    "baseline": [_check_baseline, _check_baseline_numbers],
+    "comparison": [_check_comparison, _check_comparison_numbers],
     "delivery": [_check_delivery],
     "feedback": [_check_feedback],
-    "evaluation": [_check_evaluation, _check_evaluation_numbers, _check_recommendation],
+    "evaluation": [_check_evaluation, _check_evaluation_numbers, _check_baselines_eval, _check_baselines_test,
+                   _check_recommendation],
     "plan": [_check_plan],
     "record": [_check_record],
 }

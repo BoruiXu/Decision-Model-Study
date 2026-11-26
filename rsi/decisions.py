@@ -1,11 +1,12 @@
 """Decision points: where the run makes a choice, how the choice is made, and how it is carried out.
 
-DECISION_POINTS (the decision table of docs/plan.md; options from rsi.flow.DECISION_OPTIONS):
+DECISION_POINTS (the decision table of docs/plan.md; options from rsi.flow.DECISION_OPTIONS, and for a compare
+dispatch also skip: rsi.flow.decision_options):
 
   train_gate_failed    train, data, ask         no candidate of the round passed the train gate, attempts left
   quality_gate_failed  resume_data, ask         the round's (new) trainset failed its quality gate
-  handback_refused     resume, ask              registration refused what a module's latest launch handed back
-  handback_failed      resume, ask              a module's hand-back did not complete its step
+  handback_refused     resume, (skip,) ask      registration refused what a module's latest launch handed back
+  handback_failed      resume, (skip,) ask      a module's hand-back did not complete its step
 
 default_choice(ws, point, context) is the code's choice and why (rsi.flow puts it in the decide action):
 train_gate_failed: back to train (its session of the round: a new search, the next attempt); quality_gate_failed:
@@ -13,37 +14,41 @@ back to the data dispatch (resume_data); handback_refused and handback_failed: b
 return is capped per module and round by the task's flow.max_returns (rsi.flow.returns_used); a choice the cap
 does not allow (allowed()) becomes ask, as does quality_gate_failed with no dispatch record to send back to,
 a long job stopped at flow.max_continues (the dispatch's "capped"), and train_gate_failed when train's latest launch
-registered only experiment records (records_only: trsi said STOP). The candidate reports carry no structured
+registered only experiment records (records_only: trsi said STOP). For a compare dispatch it becomes skip instead,
+capped or not: ③ Compare is report only and never stops the run to ask (skip_compare closes the dispatch and the flow
+goes on without it, to ④, or at the milestone to its judge). The candidate reports carry no structured
 quality flag, so the table's "data when the failures are quality related" is left to an agent or the user.
 
 choose(engine, ws, action): the code's default, or with the task's decisions.<point> "agent" a decision agent's
 choice: the runner's decide() gets a prompt (the situation, the options the caps allow, the code's default, the
 facts) and a JSON schema {choice, reason}; the code checks the answer and falls back to its default when the
 runner has no decision agent or the answer is not one of the allowed options with a reason. With only "ask"
-allowed no agent is called.
+allowed no agent is called. The agent's session cost (total_cost_usd in its log) goes to the agent account of the
+spend ledger once per decision key, and on the decision_agent (or decision_agent_failed) event as cost_usd.
 
 apply(engine, ws, action) is the engine's decide: it records the decision once per decision_key (a rerun after an
 interruption, and the user's answer to the question, reuse the latest decision with that key) and carries it
 out (carry_out), first reading STATE again: when the run was stopped meanwhile (rsi stop from another process,
 e.g. while a decision agent thought) nothing is launched, the failed dispatch is closed and the engine goes on to
-the report. resume / resume_data send the dispatch back to its session with the reason; train and data go
+the report. resume / resume_data send the dispatch back to its session with the reason; skip closes a compare
+dispatch as skipped (skip_compare), which rsi.flow.compare_skipped reads from the decision; train and data go
 to that module (rsi.engine.Engine.send_to, purpose flow.CHOICE_PURPOSE); new_session closes the dispatch and
 makes a fresh one of its module for the step's current part (fresh_purpose: the judge's plan once the round is
 decided, else the dispatch's purpose); close_round and stop are what `rsi close-round` and `rsi stop` do (each in
 one transaction with closing the failed dispatch: close_dispatch only collects the long jobs to end, and
 terminate_after_commit ends them once the transaction is saved; close_round also closes the round's other failed
 dispatches whose long job may still run, as `rsi close-round` does: close_round); ask
-sets STATE waiting to a question whose options are the exits (exit_options): resume, new_session, close_round
-(while the round can be closed), stop, and for train_gate_failed train and data; each said in words of what
-follows (close_round: the judge's plan, or the stop when closing the round meets a stop condition:
+sets STATE waiting to a question whose options are the exits (exit_options): resume, skip (a compare dispatch),
+new_session, close_round (while the round can be closed), stop, and for train_gate_failed train and data; each said
+in words of what follows (close_round: the judge's plan, or the stop when closing the round meets a stop condition:
 Workspace.stop_check_if_closed). Every exit changes the state, so the flow never meets the same question again
 unanswered; a question that no longer applies (its dispatch closed or resumed, the round decided) is stale
 (rsi.flow.stale_waiting) and dropped.
 
 answer(ws, option, by, quote) is `rsi answer`: the option must be one of STATE waiting's options; it records the
 answer as a decision (by the user, with the quote) and clears waiting, in one transaction. What needs no agent
-happens at once: an approval (approve), stop, close_round (the long jobs of the dispatches they close end after
-the save: terminate_after_commit). What needs an agent is carried out by the next
+happens at once: an approval (approve), stop, close_round, skip (the long jobs of the dispatches they close end
+after the save: terminate_after_commit). What needs an agent is carried out by the next
 `rsi run`: at a decision point the flow meets the same decide, whose key the answer carries; a plan's revise is
 read by rsi.flow. With ref (`--ref`, the waiting's id) the answer is refused when another question waits now. A
 milestone yes (or, from the manual flow, a use_testset approval given after the round's decision) is the consent
@@ -61,11 +66,15 @@ transaction that saves the answer. An answer to an over_budget question asked fo
 import os
 
 from rsi import flow as F
-from rsi.rules import flow_settings
+from rsi.report import _clause
+from rsi.rules import flow_settings, is_number
+from rsi.timing import plural
 from rsi.workspace import RsiError, now_iso, parse_utc
 
-POINT_TEXT = {F.TRAIN_GATE_FAILED: "训练门没过", F.QUALITY_GATE_FAILED: "训练集没过质量门",
-              F.HANDBACK_REFUSED: "交回的产物登记被拒", F.HANDBACK_FAILED: "模块的交回没有完成这一步"}
+POINT_TEXT = {F.TRAIN_GATE_FAILED: "the train gate failed",
+              F.QUALITY_GATE_FAILED: "the trainset failed its quality gate",
+              F.HANDBACK_REFUSED: "registration refused what was handed back",
+              F.HANDBACK_FAILED: "the module's hand-back did not complete the step"}
 DECISION_POINTS = dict((p, {"options": F.DECISION_OPTIONS[p], "text": POINT_TEXT[p]}) for p in F.DECISION_OPTIONS)
 MODES = ("code", "agent")  # task decisions.<point>; "code" when absent
 EXITS = ("resume", "new_session", "close_round", "stop")
@@ -93,12 +102,19 @@ def allowed(ws, point, did):
         out = ["resume_data"] if d is not None and F.may_return(ws, "data") else []
     else:
         out = ["resume"] if d is not None and not d.get("capped") and F.may_return(ws, d.get("module")) else []
+        if F.is_compare(d):
+            out.append(F.SKIP)
     return out + ["ask"]
 
 
+def after_skip(d):
+    """Where the flow goes once compare dispatch `d` is skipped: ④ Deliver, or at the milestone its judge."""
+    return "the milestone judge" if F.dispatch_purpose(d) == "milestone_compare" else "④ Deliver"
+
+
 def _returns(ws, module):
-    return "rsi-%s 本轮已退回 %d 次（上限 flow.max_returns = %d）" % (
-        module, F.returns_used(ws, module), flow_settings(ws.task())["max_returns"])
+    return "rsi-%s was sent back %s this round (cap flow.max_returns = %d)" % (
+        module, plural(F.returns_used(ws, module), "time"), flow_settings(ws.task())["max_returns"])
 
 
 def records_only(d):
@@ -118,26 +134,35 @@ def default_choice(ws, point, context):
     if point == F.TRAIN_GATE_FAILED:
         n = records_only(d) if d is not None and d.get("module") == "train" else None
         if n is not None:  # another return would only hand back a record again, until the cap
-            return "ask", ("rsi-train（%s）最近一次启动（第 %d 次）只登记了实验记录，没有新的试验候选或 search（例如 trsi "
-                           "已说 STOP：这次搜索的配置用完了）：再退回它也只会这样，问你" % (d["id"], n))
+            return "ask", ("rsi-train (%s) registered only experiment records in its latest launch (launch %d), no new "
+                           "trial candidates or search (e.g. trsi said STOP: the configs of this search are used up): "
+                           "another return would only do the same, so ask the user" % (d["id"], n))
         if "train" in ok:
-            return "train", "回到 rsi-train 在配置空间里再搜一次（%s）" % _returns(ws, "train")
-        return "ask", "%s，到了上限：问你" % _returns(ws, "train")
+            return "train", "back to rsi-train for another search in the search space; %s" % _returns(ws, "train")
+        return "ask", "%s, at the cap: ask the user" % _returns(ws, "train")
     if point == F.QUALITY_GATE_FAILED:
         if d is None:
-            return "ask", "没有可退回的 rsi-data 派出记录（手工运行的工作区）：问你"
+            return "ask", "no rsi-data dispatch record to send back to (a workspace run by hand): ask the user"
         if "resume_data" in ok:
-            return "resume_data", "%s：退回同一个 rsi-data 会话重做训练集" % _returns(ws, "data")
-        return "ask", "%s，到了上限：问你" % _returns(ws, "data")
+            return "resume_data", "%s: send it back to the same rsi-data session to redo the trainset" % _returns(
+                ws, "data")
+        return "ask", "%s, at the cap: ask the user" % _returns(ws, "data")
     if d is None:
-        return "ask", "没有派出记录可退回：问你"
+        return "ask", "no dispatch record to send back to: ask the user"
     if d.get("capped"):
-        return "ask", "长任务已续跑 %d 次，到了上限 flow.max_continues = %d：要不要接着续跑由你决定" % (
-            int(d.get("continued") or 0), flow_settings(ws.task())["max_continues"])
+        continued = "the long job's session was continued %s, reaching the cap flow.max_continues = %d" % (
+            plural(int(d.get("continued") or 0), "time"), flow_settings(ws.task())["max_continues"])
+        if F.SKIP in ok:  # ③ never blocks the run: no question for the user
+            return F.SKIP, "%s: ③ Compare is report only, so skip it and go on to %s" % (continued, after_skip(d))
+        return "ask", "%s: whether to continue it again is up to the user" % continued
     if "resume" in ok:
-        return "resume", "%s：%s" % (_returns(ws, d.get("module")), "带着登记错误原文退回同一会话重做"
-                                     if point == F.HANDBACK_REFUSED else "退回同一会话重做")
-    return "ask", "%s，到了上限：问你" % _returns(ws, d.get("module"))
+        return "resume", "%s: %s" % (_returns(ws, d.get("module")), "send it back to the same session with the "
+                                     "registration's error text to redo it" if point == F.HANDBACK_REFUSED
+                                     else "send it back to the same session to redo it")
+    if F.SKIP in ok:
+        return F.SKIP, "%s, at the cap: ③ Compare is report only, so skip it and go on to %s" % (
+            _returns(ws, d.get("module")), after_skip(d))
+    return "ask", "%s, at the cap: ask the user" % _returns(ws, d.get("module"))
 
 
 # ---- code or agent ---------------------------------------------------------------------------------
@@ -157,12 +182,12 @@ def choice_schema(options):
 def check_choice(out, options):
     """Why a decision agent's answer cannot be used ([] when it can)."""
     if not isinstance(out, dict):
-        return ["agent 的输出不是 JSON 对象"]
+        return ["the agent's output is not a JSON object"]
     errors = []
     if out.get("choice") not in options:
-        errors.append("choice %r 不在可选项（%s）里" % (out.get("choice"), "、".join(options)))
+        errors.append("choice %r is not one of the options (%s)" % (out.get("choice"), ", ".join(options)))
     if not isinstance(out.get("reason"), str) or not out["reason"].strip():
-        errors.append("reason 为空")
+        errors.append("reason is empty")
     return errors
 
 
@@ -172,62 +197,79 @@ def choose(engine, ws, action):
     point, did = action["point"], action.get("dispatch_id")
     default, why = default_choice(ws, point, {"dispatch_id": did})
     situation = action.get("reason") or ""
-    code_reason = "%s；%s" % (situation, why) if situation else why
+    code_reason = "%s; %s" % (situation, why) if situation else why
     if mode(ws, point) != "agent":
         return default, "code", code_reason
     ok = allowed(ws, point, did)
     if ok == ["ask"]:
         return "ask", "code", code_reason  # nothing for an agent to choose
-    choice, reason, error = agent_choice(engine, ws, action, ok, default, why)
+    choice, reason, error, usd = agent_choice(engine, ws, action, ok, default, why)
     if error:
-        engine.log("decision_agent_failed", point=point, dispatch_id=did, error=error)
-        return default, "code", "%s（agent 判断失败：%s；用代码的默认）" % (code_reason, error)
+        engine.log("decision_agent_failed", point=point, dispatch_id=did, error=error, cost_usd=usd)
+        return default, "code", "%s (the agent gave no usable choice: %s; the code's default is used)" % (
+            code_reason, error)
     return choice, "agent", reason
 
 
 def _choice_text(ws, option, d):
+    if option == F.SKIP:
+        return "skip ③ Compare this time: close %s and go on to %s without it (report only)" % (d["id"], after_skip(d))
     if option in F.CHOICE_PURPOSE:
-        return "交给 rsi-%s（本轮已有它目的为 %s 的会话就退回那个会话，否则新派）" % (option, F.CHOICE_PURPOSE[option])
+        return "hand it to rsi-%s (back to its session of this round with purpose %s if there is one, else a new " \
+            "dispatch)" % (option, F.CHOICE_PURPOSE[option])
     if option in RESUME_CHOICES and d is not None:
-        return "退回 rsi-%s 的同一会话（%s）重做" % (d.get("module"), d["id"])
-    return "问用户"
+        return "send it back to the same rsi-%s session (%s) to redo it" % (d.get("module"), d["id"])
+    return "ask the user"
 
 
 def _facts(engine, ws, action, d):
     lines = []
     if d is not None:
-        lines.append("- 派出 %s：rsi-%s，目的 %s，状态 %s；%s" % (d["id"], d.get("module"), F.dispatch_purpose(d),
-                                                         d.get("status"), _returns(ws, d.get("module"))))
-        lines += ["- 错误：%s" % e for e in d.get("errors") or []]
+        lines.append("- Dispatch %s: rsi-%s, purpose %s, status %s; %s" % (
+            d["id"], d.get("module"), F.dispatch_purpose(d), d.get("status"), _returns(ws, d.get("module"))))
+        lines += ["- Error: %s" % e for e in d.get("errors") or []]
     ids = [e["id"] for e in F.products(ws, d)] if d is not None else []
     ids += [a for a in failing(ws, action["point"]) if a not in ids]
     lines += engine._gates(ws, ids)
     if d is not None:
         notes = engine._last_notes(engine.outdir(d), d)
         if notes:
-            lines.append("- 上次交回的 notes：%s" % notes)
+            lines.append("- Notes of the last hand-back: %s" % notes)
     return lines
 
 
 def decision_prompt(engine, ws, action, options, default, why):
     """What a decision agent is told."""
     point, d = action["point"], _dispatch(ws, action.get("dispatch_id"))
-    lines = ["# RSI 决策点：%s（%s）" % (point, POINT_TEXT[point]), "",
-             "你是 RSI 运行里的决策 agent：从下面的可选项里选一个，并写明理由。工作区 `%s` 只读，不要修改任何文件。"
-             % ws.root, "", "## 情况", "", action.get("reason") or "", "", "## 可选项", ""]
-    lines += ["- `%s`：%s" % (o, _choice_text(ws, o, d)) for o in options]
-    lines += ["", "代码的默认选择：`%s`（%s）。" % (default, why), ""]
+    lines = ["# RSI decision point: %s (%s)" % (point, POINT_TEXT[point]), "",
+             "You are the decision agent of an RSI run: choose one of the options below and give your reason. The "
+             "workspace `%s` is read-only: do not change any file." % ws.root, "", "## Situation", "",
+             action.get("reason") or "", "", "## Options", ""]
+    lines += ["- `%s`: %s" % (o, _choice_text(ws, o, d)) for o in options]
+    lines += ["", "The code's default choice: `%s` (%s)." % (default, why), ""]
     facts = _facts(engine, ws, action, d)
     if facts:
-        lines += ["## 相关事实", ""] + facts + [""]
-    lines += ["## 输出", "", '只输出一个 JSON 对象：{"choice": <上面的可选项之一>, "reason": <理由>}。']
+        lines += ["## Relevant facts", ""] + facts + [""]
+    lines += ["## Output", "", 'Output only one JSON object: {"choice": <one of the options above>, "reason": <your '
+              'reason>}.']
     return "\n".join(lines) + "\n"
 
 
+def session_cost(r):
+    """What a decision agent's session cost: total_cost_usd of the result object in its log (r["log"]), read with
+    the claude runner's parser (rsi.runners.claude.parse_output); None when there is none."""
+    from rsi.runners.claude import parse_output  # rsi.runners imports rsi.briefs, which imports rsi.flow
+    usd = parse_output(r.get("log"))[1].get("total_cost_usd") if r.get("log") else None
+    return usd if is_number(usd) and usd >= 0 else None
+
+
 def agent_choice(engine, ws, action, options, default, why):
-    """(choice, reason, None) from the runner's decision agent, or (None, None, why it gave none). The prompt and
-    the agent's files go to <ws>/work/decisions/<n>-<point>/."""
+    """(choice, reason, None, cost) from the runner's decision agent, or (None, None, why it gave none, cost). Its
+    session's cost (session_cost; None when the log reports none) goes to the agent account once per decision key
+    (Workspace.add_decision_cost), used or not. The prompt and the agent's files go to
+    <ws>/work/decisions/<n>-<point>/."""
     point = action["point"]
+    key = decision_key(ws, action)
     workdir = os.path.join(ws.root, "work", "decisions", "%04d-%s" % (len(ws.decisions()) + 1, point))
     os.makedirs(workdir, exist_ok=True)
     prompt = decision_prompt(engine, ws, action, options, default, why)
@@ -245,14 +287,18 @@ def agent_choice(engine, ws, action, options, default, why):
     except Exception as e:  # an agent never stops the run: the code's default takes over
         r = {"output": None, "error": "%s: %s" % (type(e).__name__, e)}
     if r is None:
-        return None, None, "调用器 %s 没有决策 agent" % engine.runner.name
+        return None, None, "runner %s has no decision agent" % engine.runner.name, None
+    usd = session_cost(r)
+    if usd is not None:
+        ws.add_decision_cost(key, usd)
     errors = check_choice(r.get("output"), options)
     if errors:
-        errors += [x for x in (r.get("error"), "输出在 %s" % r["log"] if r.get("log") else None) if x]
-        return None, None, "；".join(errors)
+        errors += [x for x in (r.get("error"), "output in %s" % r["log"] if r.get("log") else None) if x]
+        return None, None, "; ".join(errors), usd
     out = r["output"]
-    engine.log("decision_agent", point=point, choice=out["choice"], reason=out["reason"], log=r.get("log"))
-    return out["choice"], out["reason"].strip(), None
+    engine.log("decision_agent", point=point, choice=out["choice"], reason=out["reason"], log=r.get("log"),
+               cost_usd=usd)
+    return out["choice"], out["reason"].strip(), None, usd
 
 
 # ---- recording and carrying out ----------------------------------------------------------------------
@@ -304,10 +350,12 @@ def failing(ws, point):
 def _why(action, record):
     """What the receiving session is told about the decision."""
     situation = action.get("reason") or ""
+    lead = "%s. " % _clause(situation) if situation else ""
     if record.get("quote"):
-        return "%s。用户（%s）选了 %s，原话：%s" % (situation, record.get("by"), record["choice"], record["quote"])
+        return "%sThe user (%s) chose %s, in their words: %s" % (lead, record.get("by"), record["choice"],
+                                                                 record["quote"])
     if record.get("by") == "agent":
-        return "%s。决策 agent 选了 %s：%s" % (situation, record["choice"], record.get("reason"))
+        return "%sThe decision agent chose %s: %s" % (lead, record["choice"], record.get("reason"))
     return record.get("reason") or situation
 
 
@@ -325,6 +373,7 @@ def close_dispatch(ws, d, why, context):
     if d.get("status") != "failed":
         return []
     from rsi import engine as E  # rsi.engine imports this module
+    ws.count_spend(d)  # what its spend file gained since it failed (e.g. its long job)
     extra = {}
     if E.long_job_open(ws, d):
         extra["long_job_stop"] = {"result": "pending", "context": context, "at": now_iso()}
@@ -364,7 +413,7 @@ def close_round(ws, reason):
     refusals included: then nothing is saved and no job ended); then those jobs are ended (terminate_after_commit,
     context close). Returns Workspace.close_round's ("keep", None, reason)."""
     with ws.transaction():
-        dids = close_failed_jobs(ws, "关闭本轮（%s）：这次派出不再续" % reason)
+        dids = close_failed_jobs(ws, "round closed (%s): this dispatch is not continued" % reason)
         out = ws.close_round(reason)
     terminate_after_commit(ws, dids, "close")
     return out
@@ -393,20 +442,44 @@ def close_round_now(ws, d, record):
     """close_round: what `rsi close-round` does, quoting the user, in one transaction: the failed dispatch `d` and
     the round's other failed dispatches whose long job may still run are closed, then the round. Returns (result,
     the ids whose long jobs terminate_after_commit ends, context close, once the transaction is saved)."""
-    why = "%s 选了 close_round" % record.get("by")
+    why = "%s chose close_round" % record.get("by")
     with ws.transaction():
         dids = close_dispatch(ws, d, why, "close")
         dids += close_failed_jobs(ws, why)
         if ws.state["rounds"][str(ws.state["round"])]["decision"] is None:
-            ws.close_round("%s 选择关闭本轮：%s" % (record.get("by"), _words(record)))
+            ws.close_round("%s chose to close the round: %s" % (record.get("by"), _words(record)))
     return {"closed_round": ws.state["round"]}, dids
+
+
+SKIPPED = "skipped: ③ Compare is report only"
+
+
+def _close_skipped(ws, d):
+    """Inside a transaction: close compare dispatch `d` as skipped (status done, closed SKIPPED; a failed one through
+    close_dispatch, which also notes a long job that may still run). Returns the ids for terminate_after_commit."""
+    dids = close_dispatch(ws, d, SKIPPED, "close")
+    cur = ws.dispatch(d["id"])
+    if not cur.get("closed"):  # a done dispatch whose step is incomplete (the question at the cap)
+        ws.update_dispatch(d["id"], status="done", closed=SKIPPED, capped=None,
+                           ended_at=cur.get("ended_at") or now_iso())
+    return dids
+
+
+def skip_compare(ws, d, record):
+    """skip: close compare dispatch `d` with status done and closed SKIPPED, in one transaction, then end a long job
+    of it that may still run (terminate_after_commit, context close). The flow goes on without ③ (or without the
+    milestone's compare): rsi.flow.compare_skipped reads the recorded decision. Returns the result."""
+    with ws.transaction():
+        dids = _close_skipped(ws, d)
+    terminate_after_commit(ws, dids, "close")
+    return {"skipped": d["id"], "by": record.get("by")}
 
 
 def stop_now(ws, d, record):
     """stop: what `rsi stop` does, with the user's words, in one transaction with closing the failed dispatch.
     Returns (result, the ids for terminate_after_commit, context stop)."""
     with ws.transaction():
-        dids = close_dispatch(ws, d, "%s 选了 stop" % record.get("by"), "stop")
+        dids = close_dispatch(ws, d, "%s chose stop" % record.get("by"), "stop")
         if not ws.state["stopped"]:
             ws.stop(record.get("by") or "user", _words(record))
     return {"stopped": ws.state["stopped"]["reason"]}, dids
@@ -422,9 +495,10 @@ def new_session(engine, ws, action, d, why, by=None):
         if "candidate_id" in d:
             fresh["candidate_id"] = d["candidate_id"]
         if d.get("errors"):
-            why += "\n\n上一个会话（%s）的问题：\n%s" % (d["id"], "\n".join("- %s" % e for e in d["errors"]))
-        terminate_after_commit(ws, close_dispatch(ws, d, "%s 选了 new_session：%s 不再续，换一个新会话"
-                                                  % (by or "用户", d["id"]), "close"), "close")
+            why += "\n\nWhat went wrong in the previous session (%s):\n%s" % (
+                d["id"], "\n".join("- %s" % e for e in d["errors"]))
+        terminate_after_commit(ws, close_dispatch(ws, d, "%s chose new_session: %s is not continued, a new session "
+                                                  "takes over" % (by or "user", d["id"]), "close"), "close")
     fresh["reason"] = why
     out = engine.dispatch(ws, [fresh], why=(why, failing(ws, action["point"])))
     if d is not None:
@@ -441,6 +515,8 @@ def carry_out(engine, ws, action, record):
     why = _why(action, record)
     if choice in RESUME_CHOICES and d is not None:
         return dict(engine.resume(ws, d, why)), None
+    if choice == F.SKIP and d is not None:
+        return skip_compare(ws, d, record), None
     if choice in F.CHOICE_PURPOSE:
         return dict(engine.send_to(ws, choice, F.CHOICE_PURPOSE[choice], did, why, failing(ws, point))), None
     if choice == "new_session":
@@ -466,6 +542,8 @@ def closable(ws):
 def exit_options(ws, point, d):
     """The options of the question a decision asks the user, each an action that changes the state."""
     opts = ["train", "data"] if point == F.TRAIN_GATE_FAILED else (["resume"] if d is not None else [])
+    if F.is_compare(d):
+        opts.append(F.SKIP)
     if d is not None or point == F.QUALITY_GATE_FAILED:
         opts.append("new_session")
     if closable(ws):
@@ -475,20 +553,25 @@ def exit_options(ws, point, d):
 
 def _exit_text(ws, option, d, step=None):
     if option == "resume":
-        return "resume：把你的原话发回 rsi-%s 的同一会话（%s）重做" % (d.get("module"), d["id"])
+        return "resume: send your words back to the same rsi-%s session (%s) to redo it" % (d.get("module"), d["id"])
+    if option == F.SKIP:
+        return "skip: close %s and go on to %s without it (③ Compare is report only, never a gate)" % (
+            d["id"], after_skip(d))
     if option == "new_session":
-        return "new_session：%s新派一个 rsi-%s 会话（目的 %s），带上你的原话" % (
-            "关掉 %s，" % d["id"] if d is not None and d.get("status") == "failed" else "",
+        return "new_session: %sdispatch a new rsi-%s session (purpose %s) with your words" % (
+            "close %s and " % d["id"] if d is not None and d.get("status") == "failed" else "",
             d.get("module") if d is not None else "data", fresh_purpose(ws, step, d))
     if option in F.CHOICE_PURPOSE:
-        return "%s：把你的原话交给 rsi-%s（本轮已有它目的为 %s 的会话就退回那个会话，否则新派）" % (
-            option, option, F.CHOICE_PURPOSE[option])
+        return "%s: hand your words to rsi-%s (back to its session of this round with purpose %s if there is one, " \
+            "else a new dispatch)" % (option, option, F.CHOICE_PURPOSE[option])
     if option == "close_round":  # the plan follows, unless closing the round meets a stop condition
         stop, why = ws.stop_check_if_closed()
         if stop:
-            return "close_round：关闭第 %d 轮（没有评测，记 keep），然后运行停止（%s）" % (ws.state["round"], why)
-        return "close_round：关闭第 %d 轮（没有评测，记 keep），接着 rsi-judge 写计划" % ws.state["round"]
-    return "stop：停止运行（同 rsi stop，记下你的原话）"
+            return "close_round: close round %d (no evaluation, recorded as keep), then the run stops (%s)" % (
+                ws.state["round"], why)
+        return "close_round: close round %d (no evaluation, recorded as keep), then rsi-judge writes the plan" \
+            % ws.state["round"]
+    return "stop: stop the run (as rsi stop, with your words recorded)"
 
 
 def question(ws, action, record):
@@ -497,18 +580,25 @@ def question(ws, action, record):
     point, did = action["point"], action.get("dispatch_id")
     d = _dispatch(ws, did)
     opts = exit_options(ws, point, d)
-    why = ("决策 agent：%s" % record.get("reason")) if record.get("by") == "agent" else \
+    why = ("decision agent: %s" % record.get("reason")) if record.get("by") == "agent" else \
         default_choice(ws, point, {"dispatch_id": did})[1]
-    errors = [e.splitlines()[0] for e in (d.get("errors") or [])[:3] if e] if d is not None else []
-    text = "%s：%s%s。%s。选一个做法——%s。" % (
-        POINT_TEXT[point], action.get("reason") or "", "（%s）" % "；".join(errors) if errors else "", why,
-        "；".join(_exit_text(ws, o, d, action.get("step")) for o in opts))
+    errors = [_clause(e.splitlines()[0]) for e in (d.get("errors") or [])[:3] if e] if d is not None else []
+    text = "%s: %s%s. %s. Choose one: %s" % (
+        _upper(POINT_TEXT[point]), _clause(action.get("reason") or ""), " (%s)" % "; ".join(errors) if errors else "",
+        _upper(_clause(why)), "; ".join(_exit_text(ws, o, d, action.get("step")) for o in opts))
     return {"kind": "question", "what": point, "ref": did, "question": text, "options": opts}
 
 
+def _upper(text):
+    """`text` with its first letter capitalised (it starts a sentence), unless it starts with a module's name
+    (rsi-data, ...), which stays as it is."""
+    return text if text.startswith("rsi-") else text[:1].upper() + text[1:]
+
+
 def ask_reason(w):
-    text = "在等你回答%s：%s（可选：%s）回答后再运行 rsi run。" % (
-        "（问题 %s）" % w["id"] if w.get("id") else "", w.get("question"), " / ".join(w.get("options") or []))
+    text = "Waiting for the user to answer%s: %s (options: %s). Run rsi run again after the answer." % (
+        " question %s" % w["id"] if w.get("id") else "", _clause(w.get("question")),
+        " / ".join(w.get("options") or []))
     return " ".join(text.split())
 
 
@@ -617,7 +707,7 @@ def _answer(ws, option, by, quote, qid, logged, ends):
                            % (option, w.get("what") or "it", ", ".join(options)))
         what, ref, kind = w.get("what"), w.get("ref"), w.get("kind")
         rec = {"point": what or "question", "options": options, "choice": option, "by": by, "quote": quote,
-               "reason": "用户的回答", "kind": kind, "ref": ref, "question": w.get("question"),
+               "reason": "the user's answer", "kind": kind, "ref": ref, "question": w.get("question"),
                "question_id": w.get("id")}
         effect = "rsi run goes on"
         if kind == "approval":
@@ -648,6 +738,9 @@ def _answer(ws, option, by, quote, qid, logged, ends):
             elif option == "stop":
                 ends.append((stop_now(ws, d, rec)[1], "stop"))
                 effect = "the run is stopped"
+            elif option == F.SKIP and d is not None:
+                ends.append((_close_skipped(ws, d), "close"))
+                effect = "%s is closed as skipped; rsi run goes on without it" % ref
             else:
                 effect = "rsi run carries out %s" % option
         elif what == F.CHECKIN and ref:

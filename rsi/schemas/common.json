@@ -3,12 +3,13 @@
   "required": ["kind", "id", "task_id", "task_version", "round", "producer", "created_at", "parents", "files"],
   "properties": {
     "kind": {"type": "string", "enum": ["trainset", "valset", "evalset", "testset", "corpus", "pool", "candidate",
-                                        "search", "delivery", "feedback", "evaluation", "plan", "record"]},
+                                        "search", "baseline", "comparison", "delivery", "feedback", "evaluation",
+                                        "plan", "record"]},
     "id": {"type": ["string", "null"]},
     "task_id": {"type": "string", "minLength": 1},
     "task_version": {"type": "integer", "minimum": 1},
     "round": {"type": "integer", "minimum": 1},
-    "producer": {"type": "string", "enum": ["orchestrator", "data", "train", "tune", "deliver", "judge"]},
+    "producer": {"type": "string", "enum": ["orchestrator", "data", "train", "tune", "compare", "deliver", "judge"]},
     "created_at": {"type": "string", "minLength": 1},
     "parents": {"type": "array", "items": {"type": "string"}},
     "files": {

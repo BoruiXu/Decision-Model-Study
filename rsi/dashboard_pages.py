@@ -1,19 +1,20 @@
 """The four progress pages: the overview <ws>/dashboard.html and, under <ws>/dashboard/,
-rounds.html (轮次与产物), events.html (事件记录) and report.html (运行报告).
+rounds.html (Rounds & artifacts), events.html (Events) and report.html (Run report).
 
 The overview holds the pauses waiting for the user, the workflow diagram (rsi.dashboard.
-flow_states; the current stage's node adds the first fact of its module's progress.json), three cards: the best version
+flow_states; the current stage's node adds the first fact of its module's progress.json, and ③'s node, once done, the
+round's strongest baseline and the candidate's delta over it on the valset), three cards: the best version
 (and the round's best candidate on the validation set), how far the stop conditions are, and what the
 run waits for (with the agents running and, when the run asks the user, the options and the exact
-`rsi answer` commands), then the live panels (spec §4, §5): 现在在做什么 (each open dispatch, rsi.live.open_dispatches,
-and its progress.json), agent 的判断 (the latest hand-backs' notes and questions, rsi.live.handback_notes), GPU (the
-latest snapshot <ws>/work/gpus.json; rendering never runs nvidia-smi) and 最近事件 (the events page's latest lines).
-The rounds page lists each round's dispatches and the events page merges
-work/run.jsonl (dispatch, return, decision, answer, ask) with the registrations. render_pages builds every page from rsi.dashboard's derivations, reads only what
-that module allows and writes nothing (rsi.dashboard.write_dashboard writes the pages). Each page
-is one self-contained HTML file with the same top bar and tabs; it reloads itself and keeps its
-scroll position and opened sections across reloads. Workspace text is escaped; the run report
-goes through rsi.markdown.to_html, which escapes it itself.
+`rsi answer` commands), then the live panels (spec §4, §5): What is running now (each open dispatch,
+rsi.live.open_dispatches, and its progress.json), Agent judgement (the latest hand-backs' notes and questions,
+rsi.live.handback_notes), GPU (the latest snapshot <ws>/work/gpus.json; rendering never runs nvidia-smi) and Recent
+events (the events page's latest lines).
+The rounds page lists each round's dispatches and the events page merges work/run.jsonl (dispatch, return, decision,
+answer, ask) with the registrations. render_pages builds every page from rsi.dashboard's derivations, reads only what
+that module allows and writes nothing (rsi.dashboard.write_dashboard writes the pages). Each page is one self-contained
+HTML file with the same top bar and tabs; it reloads itself and keeps its scroll position and opened sections across
+reloads. Workspace text is escaped; the run report goes through rsi.markdown.to_html, which escapes it itself.
 """
 import datetime
 import html
@@ -26,42 +27,47 @@ from rsi import gpus as G
 from rsi import live as L
 from rsi import timing
 from rsi.markdown import to_html
-from rsi.report import _num, _rounds, best_scores
-from rsi.rules import completed_rounds, flow_settings, is_number, stop_settings
+from rsi.report import _num, _rounds, best_scores, round_comparison
+from rsi.rules import amount_text, completed_rounds, flow_settings, is_number, ledger, stop_settings
+from rsi.timing import plural
 from rsi.workspace import parse_utc
 
 OVERVIEW, ROUNDS, EVENTS, REPORT = D.PAGES
-TABS = ((OVERVIEW, "概览"), (ROUNDS, "轮次与产物"), (EVENTS, "事件记录"), (REPORT, "运行报告"))
+TABS = ((OVERVIEW, "Overview"), (ROUNDS, "Rounds & artifacts"), (EVENTS, "Events"), (REPORT, "Run report"))
 EVENTS_SHOWN = 200  # most recent events listed on the events page
-RECENT_SHOWN = 10  # most recent events listed on the overview (最近事件)
-NOTES_SHOWN = 300  # characters of a hand-back's notes shown before its <details> (agent 的判断)
+RECENT_SHOWN = 10  # most recent events listed on the overview (Recent events)
+NOTES_SHOWN = 300  # characters of a hand-back's notes shown before its <details> (Agent judgement)
 NOTES_MAX = 20000  # characters of a hand-back's notes shown at most when expanded (after the first NOTES_SHOWN)
 QUESTIONS_SHOWN, QUESTION_CHARS = 5, 500  # a hand-back's questions listed, and the characters of each
-HANDBACK_STATUS = {"ok": "交回", "long_job": "长任务", "failed": "失败"}
-GPU_STALE_REFRESHES = 3  # a GPU snapshot older than this many flow.page_refresh_seconds is marked 已过时
+HANDBACK_STATUS = {"ok": "hand-back", "long_job": "long job", "failed": "failed"}
+GPU_STALE_REFRESHES = 3  # a GPU snapshot older than this many flow.page_refresh_seconds is marked stale
 NODE_LINE_CHARS = 18  # characters of a node's fourth line (the stage's progress fact)
 CELL_NOWRAP = 40  # a progress table cell up to this long stays on one line (the table scrolls sideways)
-DISPATCH_STATUS = {"pending": "待启动", "running": "运行中", "handed_back": "已交回", "long_job": "长任务", "failed": "失败", "done": "完成"}
-DECIDERS = {"code": "代码", "agent": "决策 agent"}
+DISPATCH_STATUS = {"pending": "not launched yet", "running": "running", "handed_back": "handed back",
+                   "long_job": "long job", "failed": "failed", "done": "done"}
+DECIDERS = {"code": "code", "agent": "decision agent"}
 
-KIND_NAMES = {"task": "任务定义", "trainset": "训练集", "valset": "验证集", "evalset": "评测集",
-              "testset": "测试集", "candidate": "候选模型", "search": "调优搜索", "delivery": "交付包",
-              "feedback": "执行反馈", "evaluation": "评测报告", "plan": "下一轮计划", "record": "实验记录",
-              "corpus": "语料", "pool": "训练池"}
+KIND_NAMES = {"task": "task definition", "trainset": "trainset", "valset": "valset", "evalset": "evalset",
+              "testset": "testset", "candidate": "candidate model", "search": "tuning search",
+              "baseline": "baseline model", "comparison": "baseline comparison", "delivery": "delivery package",
+              "feedback": "execution feedback", "evaluation": "evaluation report", "plan": "next-round plan",
+              "record": "experiment record", "corpus": "corpus", "pool": "pool"}
 # Who registered an artifact, by its producer's stage (rsi.dashboard.stage_of; the orchestrator has none).
-PRODUCER_NAMES = {"orchestrator": "顶层", "data": "数据", "train": "训练调优", "deliver": "交付", "judge": "评测与决策"}
+PRODUCER_NAMES = {"orchestrator": "orchestrator", "data": "data module", "train": "train module",
+                  "compare": "compare module", "deliver": "deliver module", "judge": "judge module"}
 
 # Workflow diagram: node key, left x, width; one row of nodes centred at FLOW_Y; title and second line per key.
-NODES = (("task", 10, 100), ("data", 141, 112), ("train", 284, 150), ("deliver", 465, 136), ("judge", 632, 160),
-         ("check", 823, 132), ("stop", 986, 100))
-NODE_H, FLOW_W, FLOW_H, FLOW_Y, LOOP_Y = 64, 1100, 140, 46, 104
-NODE_H4 = 80  # a node with a fourth line (the current stage's progress: _node_lines)
-TITLES = dict(D.STEP_NAMES, task="任务接入", check="顶层核对", stop="停止与交付")
-SUBTITLES = dict(((m, D._skill(m)) for m in D.MODULES), task="顶层", check="升级 · 停止 · 批准", stop="运行报告")
+NODES = (("task", 10, 100), ("data", 126, 152), ("train", 294, 152), ("compare", 462, 152), ("deliver", 630, 152),
+         ("judge", 798, 164), ("check", 978, 150), ("stop", 1156, 120))
+NODE_H, FLOW_W, FLOW_H, FLOW_Y, LOOP_Y = 64, 1288, 140, 46, 104
+NODE_H4 = 80  # a node with a fourth line (the current stage's progress: _node_lines; ③'s _compare_node_line)
+TITLES = dict(D.STEP_NAMES, task="Task intake", check="Top-level check", stop="Stop & deliver")
+SUBTITLES = dict(((m, D._skill(m)) for m in D.MODULES), task="orchestrator", check="promote · stop · approve",
+                 stop="run report")
 FILL = {"done": "#CEE5CC", "current": "#FBE5D6", "wait": "#FFF3C0", "fail": "#FFE3F1", "skip": "#FFFFFF",
         "todo": "#FFFFFF"}
-LEGEND = (("done", "本轮已完成"), ("current", "当前步骤"), ("wait", "等你回答"), ("fail", "门没过"),
-          ("todo", "未开始 / 本轮不经过"))
+LEGEND = (("done", "done this round"), ("current", "current step"), ("wait", "waiting for the user"),
+          ("fail", "gate failed"), ("todo", "not started / skipped this round"))
 
 
 def _e(x):
@@ -104,10 +110,11 @@ def _last_change(ws):
 
 def _ask(questions):
     items = "".join("<li>%s%s</li>" % (_e(q["text"]), ' <span class="since">%s</span>'
-                                       % _e("（自 %s 起）" % D._since(q["since"])) if q["since"] else "")
+                                       % _e("(since %s)" % D._since(q["since"])) if q["since"] else "")
                     for q in questions)
     return ('<section id="ask" class="banner"><h2>%s</h2><ul>%s</ul><p class="since">%s</p></section>'
-            % (_e("⏸ 等你在 Claude 里回答"), items, _e("页面只读，回答请回到 Claude 会话。")))
+            % (_e("⏸ Waiting for the user to answer in Claude"), items,
+               _e("This page is read-only; answer in the Claude session.")))
 
 
 def _short(session):
@@ -121,13 +128,13 @@ def _agents_html(ws):
     def line(a, what):
         return '<li><b>%s</b> <span class="sub">%s</span></li>' % (
             _e("rsi-%s" % a["module"]),
-            _e("%s%s · 会话 %s · 自 %s 起 · 运行器 %s" % (
+            _e("%s%s · session %s · since %s · runner %s" % (
                 a["id"], what, _short(a["session"]), D._since(a["started"]), a["runner"] or "—")))
     items = "".join(line(a, "") for a in D.running_agents(ws))
-    items += "".join(line(a, " 长任务等待标记") for a in D.waiting_long_jobs(ws))
+    items += "".join(line(a, " long job waiting for its marker") for a in D.waiting_long_jobs(ws))
     for a in D.pending_agents(ws):  # after a stop rsi run closes them instead of launching them
-        what = ("%s 停止时未启动（rsi run 关闭它，不再启动）" % a["id"] if ws.state["stopped"]
-                else "%s 待启动 · 运行器 %s" % (a["id"], a["runner"] or "—"))
+        what = ("%s not launched at the stop (rsi run closes it and does not launch it)" % a["id"]
+                if ws.state["stopped"] else "%s not launched yet · runner %s" % (a["id"], a["runner"] or "—"))
         items += '<li><b>%s</b> <span class="sub">%s</span></li>' % (_e("rsi-%s" % a["module"]), _e(what))
     return '<ul class="agents">%s</ul>' % items if items else ""
 
@@ -144,22 +151,22 @@ def _answer_html(ws, questions):
     recorded = bool(w) and (w.get("what"), w.get("ref")) == (q.get("what"), q.get("ref")) and w.get("id")
     from rsi.briefs import rsi_command
     ref = " --ref %s" % shlex.quote(w["id"]) if recorded else ""
-    cmds = "\n".join("%s answer %s %s%s --by <你的名字> --quote \"<用户原话>\"" % (rsi_command(), shlex.quote(ws.root),
-                                                                              shlex.quote(o), ref)
-                     for o in opts)
-    notes = [] if recorded else ["引擎还没有记下这个问题：先运行 rsi run，它停在这个问题上时会给出问题的 id（--ref）。"]
+    cmds = "\n".join("%s answer %s %s%s --by <your name> --quote \"<user's words>\"" % (
+        rsi_command(), shlex.quote(ws.root), shlex.quote(o), ref) for o in opts)
+    notes = [] if recorded else ["The engine has not recorded this question yet: run rsi run first; when it stops at "
+                                 "this question it gives the question's id (--ref)."]
     if q.get("what") == "plan" and q.get("ref"):
-        notes.append("批准计划也可以用 %s approve %s plan --ref %s --by <你的名字> --quote \"<用户原话>\"（效果同 approve）。"
-                     % (rsi_command(), shlex.quote(ws.root), q["ref"]))
-    notes.append("回答后运行 rsi run 接着走。")
+        notes.append("The plan can also be approved with %s approve %s plan --ref %s --by <your name> --quote "
+                     "\"<user's words>\" (same effect as approve)." % (rsi_command(), shlex.quote(ws.root), q["ref"]))
+    notes.append("After answering, run rsi run to go on.")
     return ('<div class="answer"><div class="sub">%s</div><ul class="opts">%s</ul><pre class="cmd">%s</pre>%s</div>'
-            % (_e("可选项："), "".join("<li><code>%s</code></li>" % _e(o) for o in opts), _e(cmds),
+            % (_e("Options:"), "".join("<li><code>%s</code></li>" % _e(o) for o in opts), _e(cmds),
                "".join('<div class="sub">%s</div>' % _e(n) for n in notes)))
 
 
 def _node_lines(states, ds):
     """The fourth line of the current (or waiting) stage nodes: the first fact of the progress.json of an open
-    dispatch of the stage (rsi.live.open_dispatches `ds`), else for an open long job 「长任务 · 检查 c 次」."""
+    dispatch of the stage (rsi.live.open_dispatches `ds`), else for an open long job "long job · c check-ins"."""
     out = {}
     for want_fact in (True, False):
         for x in ds:
@@ -171,13 +178,32 @@ def _node_lines(states, ds):
                 text = "%s %s" % facts[0]
                 out[k] = text if len(text) <= NODE_LINE_CHARS else text[:NODE_LINE_CHARS] + "…"
             elif not want_fact and x["status"] == "long_job":
-                out[k] = "长任务 · 检查 %d 次" % x["checkins"]
+                out[k] = "long job · " + plural(x["checkins"], "check-in")
     return out
 
 
-def _flow(states, lines=None):
-    """The workflow diagram; `lines`: stage -> the fourth line of its node (_node_lines)."""
+def _compare_node_line(ws, states):
+    """The fourth line of ③'s node once it is done this round: the strongest baseline of the round's comparison
+    (rsi.report.round_comparison) and the candidate's delta over it on the valset ("vs gbdt Δ+0.031"), at most
+    NODE_LINE_CHARS long (a long name is cut, never the delta); None without one (③ off, skipped, or no baseline
+    compared)."""
+    comp = round_comparison(ws, ws.state["round"]) if states.get("compare", {}).get("state") == "done" else None
+    m = ws.manifest(comp) if comp is not None else {}
+    d = (m.get("deltas_val") or {}).get(m.get("strongest"))
+    if not d:
+        return None
+    delta, name = "Δ%+.3f" % d["delta"], m["strongest"]
+    room = NODE_LINE_CHARS - len(delta) - len("vs  ")
+    if len(name) > room:
+        name = name[:max(room - 1, 1)] + "…"
+    return "vs %s %s" % (name, delta)
+
+
+def _flow(states, lines=None, titles=None):
+    """The workflow diagram; `lines`: stage -> the fourth line of its node (_node_lines); `titles`: node key -> its
+    title where it differs from TITLES (③ Compare (off): rsi.dashboard.stage_title)."""
     lines = lines or {}
+    titles = dict(TITLES, **(titles or {}))
     box = dict((k, (x, w)) for k, x, w in NODES)
 
     def height(k):
@@ -196,15 +222,16 @@ def _flow(states, lines=None):
         return '<polyline class="ln" points="%s" marker-end="url(#ah)"/>' % " ".join("%g,%g" % p for p in points)
 
     mid, keys = FLOW_Y, [k for k, _x, _w in NODES]
-    out = ['<svg class="flow" viewBox="0 0 %d %d" role="img" aria-label="%s">' % (FLOW_W, FLOW_H, _e("工作流")),
+    out = ['<svg class="flow" viewBox="0 0 %d %d" role="img" aria-label="%s">' % (FLOW_W, FLOW_H, _e("Workflow")),
            '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
            'orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#222"/></marker></defs>']
     out += [line([(right(a), mid), (left(b), mid)]) for a, b in zip(keys, keys[1:])]
-    out += ['<text class="note" x="%g" y="%g">%s</text>' % ((right("check") + left("stop")) / 2.0, mid - 8, _e("停止")),
+    out += ['<text class="note" x="%g" y="%g">%s</text>' % ((right("check") + left("stop")) / 2.0, mid - 8, _e("stop")),
             line([(centre("check"), mid + height("check") / 2.0), (centre("check"), LOOP_Y), (centre("data"), LOOP_Y),
                   (centre("data"), mid + height("data") / 2.0)]),
             '<text class="note" x="%g" y="%d">%s</text>' % ((centre("check") + centre("data")) / 2.0, LOOP_Y + 18,
-                                                            _e("继续：下一轮从计划指定的入口模块开始"))]
+                                                            _e("Continue: the next round starts at the entry module "
+                                                               "the plan names"))]
     for k, x, w in NODES:
         state, text = states[k]["state"], states[k]["text"]
         cx, h = x + w / 2.0, height(k)
@@ -212,7 +239,7 @@ def _flow(states, lines=None):
         out.append('<g id="n-%s" data-state="%s"><rect x="%g" y="%g" width="%g" height="%d" rx="10" fill="%s" '
                    'stroke="#222" stroke-width="%s"/>' % (k, state, x, mid - h / 2.0, w, h, FILL[state],
                                                           "2.2" if state in ("current", "wait") else "1"))
-        out.append('<text class="t1" x="%g" y="%g">%s</text>' % (cx, mid - 9 - up, _e(TITLES[k])))
+        out.append('<text class="t1" x="%g" y="%g">%s</text>' % (cx, mid - 9 - up, _e(titles[k])))
         out.append('<text class="t2" x="%g" y="%g">%s</text>' % (cx, mid + 7 - up, _e(SUBTITLES[k])))
         out.append('<text class="t3" x="%g" y="%g">%s</text>' % (cx, mid + 23 - up, _e(text)))
         if k in lines:
@@ -220,7 +247,7 @@ def _flow(states, lines=None):
         out.append("</g>")
     out.append("</svg>")
     legend = "".join('<span><i class="sw %s"></i>%s</span>' % (k, _e(label)) for k, label in LEGEND)
-    return ('<section id="flow" class="card"><h2>工作流</h2><div class="flowwrap">%s</div>'
+    return ('<section id="flow" class="card"><h2>Workflow</h2><div class="flowwrap">%s</div>'
             '<div class="legend">%s</div></section>' % ("".join(out), legend))
 
 
@@ -261,13 +288,13 @@ def _spark(points, target):
     def y(v):
         return top + (hi - v) / (hi - lo) * (h - top - bottom)
 
-    out = ['<svg class="spark" viewBox="0 0 %d %d" role="img" aria-label="%s">' % (w, h, _e("各版本的主指标"))]
+    out = ['<svg class="spark" viewBox="0 0 %d %d" role="img" aria-label="%s">' % (w, h, _e("Primary metric by version"))]
     if is_number(target):
         out.append('<line class="target" x1="%g" y1="%.1f" x2="%g" y2="%.1f"/>' % (side, y(target), w - side, y(target)))
     coords = [(x(i), y(v), name, v) for i, (name, v) in enumerate(points) if is_number(v)]
     out.append('<polyline class="ln" points="%s"/>' % " ".join("%.1f,%.1f" % (cx, cy) for cx, cy, _n, _v in coords))
     for cx, cy, name, v in coords:
-        out.append('<circle cx="%.1f" cy="%.1f" r="3.2"><title>%s</title></circle>' % (cx, cy, _e("%s：%s" % (name, _num(v)))))
+        out.append('<circle cx="%.1f" cy="%.1f" r="3.2"><title>%s</title></circle>' % (cx, cy, _e("%s: %s" % (name, _num(v)))))
     for i in sorted(set([0, n - 1])):
         out.append('<text x="%.1f" y="%d">%s</text>' % (x(i), h - 4, _e(points[i][0])))
     out.append("</svg>")
@@ -279,66 +306,73 @@ def _best_card(ws, task):
     m = task["metrics"]
     primary, higher = m["primary"], m["higher_is_better"]
     target = stop_settings(task)["target"]
-    direction = "越高越好" if higher else "越低越好"
-    goal = "目标 %s" % _num(target) if is_number(target) else "目标未设"
+    direction = "higher is better" if higher else "lower is better"
+    goal = "target %s" % _num(target) if is_number(target) else "no target set"
     rb = L.round_best_val(ws)  # the round in progress, on the validation set
     round_best = "" if rb is None else '<div class="sub">%s%s%s</div>' % (
-        _e("本轮验证集最好：%s %s（" % (primary, _num(rb[1]))), _art(ws, OVERVIEW, rb[0]), _e("）"))
+        _e("Best on the valset this round: %s %s (" % (primary, _num(rb[1]))), _art(ws, OVERVIEW, rb[0]), _e(")"))
     if s["best"] is None:
-        body = '<div class="big none">还没有版本</div><div class="sub">%s</div>' % _e(
-            "第一次升级后产生 V1 · %s（评测集，%s） · %s" % (primary, direction, goal))
+        body = '<div class="big none">No version yet</div><div class="sub">%s</div>' % _e(
+            "The first promotion makes V1 · %s (evalset, %s) · %s" % (primary, direction, goal))
         body += round_best
     else:
         value = ws.best_primary()
         best = ws.version(s["best"])
         sc = best_scores(ws)
-        measure = "%s（评测集 %s，%s）" % (primary, sc["evalset_id"], direction)
+        measure = "%s (evalset %s, %s)" % (primary, sc["evalset_id"], direction)
         body = '<div class="big">%s</div>' % _e("%s · %s" % (s["best"], _num(value)))
         body += '<div class="sub">%s %s</div>' % (_e("%s · %s ·" % (measure, goal)), _art(ws, OVERVIEW, best["evaluation_id"]))
         if sc["refreshed"]:  # its score is on an earlier evalset: say what it scores on the current one
             cur = sc["current"]
             if cur is None or cur["value"] is None:
-                body += '<div class="sub">%s</div>' % _e("当前评测集 %s 上还没有它的成绩（等它重新交付后的评测）"
-                                                         % sc["current_evalset"])
+                body += '<div class="sub">%s</div>' % _e("No score on the current evalset %s yet (waiting for the "
+                                                         "evaluation after its re-delivery)" % sc["current_evalset"])
             else:
                 body += '<div class="sub">%s%s%s%s%s</div>' % (
-                    _e("在当前评测集 %s 上：%s（" % (sc["current_evalset"], _num(cur["value"]))),
-                    _art(ws, OVERVIEW, cur["evaluation_id"]), _e("，用重新交付的 "),
-                    _art(ws, OVERVIEW, cur["delivery_id"]) if cur["delivery_id"] else _e("交付"), _e(" 算）"))
+                    _e("On the current evalset %s: %s (" % (sc["current_evalset"], _num(cur["value"]))),
+                    _art(ws, OVERVIEW, cur["evaluation_id"]), _e(", computed with the re-delivered "),
+                    _art(ws, OVERVIEW, cur["delivery_id"]) if cur["delivery_id"] else _e("delivery"), _e(")"))
             if is_number(target):
-                body += '<div class="sub">%s</div>' % _e("停止条件的目标仍按 %s 上的成绩判断" % sc["evalset_id"])
+                body += '<div class="sub">%s</div>' % _e("The stop target is still judged by the score on %s"
+                                                         % sc["evalset_id"])
         body += round_best
         if is_number(value) and is_number(target):
-            body += _meter("距目标", _toward(value, target, higher), 1, "%s / %s" % (_num(value), _num(target)),
-                           alarm=False)
+            body += _meter("Toward the target", _toward(value, target, higher), 1,
+                           "%s / %s" % (_num(value), _num(target)), alarm=False)
         points = []
         for v in s["versions"]:
             x = ws.manifest(v["evaluation_id"])["metrics"]["candidate"].get(primary)
             points.append((v["version"], x if is_number(x) else None))
         body += _spark(points, target)
-    return '<section id="best" class="card"><h2>当前最佳</h2>%s</section>' % body
+    return '<section id="best" class="card"><h2>Current best</h2>%s</section>' % body
 
 
 def _stop_card(ws, task, ds):
     """`ds`: the open dispatches (rsi.live.open_dispatches); the round's of ② are attempts in progress."""
     s = ws.state
     st = stop_settings(task)
-    used, budget = s["budget_used"]["compute_hours"], task["budget"]["compute_hours"]
     attempts, limit = len(ws.attempts()), ws.attempt_limit()
     going = sum(1 for x in ds if x["stage"] == "train" and x["round"] == s["round"])
     done = completed_rounds(s)
-    body = _meter("已完成轮数", done, st["max_rounds"], "%d / %d" % (done, st["max_rounds"]))
-    body += _meter("连续未升级", s["no_promotion_streak"], st["patience"],
+    body = _meter("Rounds completed", done, st["max_rounds"], "%d / %d" % (done, st["max_rounds"]))
+    body += _meter("Rounds without promotion", s["no_promotion_streak"], st["patience"],
                    "%d / %d" % (s["no_promotion_streak"], st["patience"]))
-    body += _meter("本轮尝试", attempts, limit, "%d / %d" % (attempts, limit) + ("（%d 次进行中）" % going if going else ""),
+    body += _meter("Attempts this round", attempts, limit,
+                   "%d / %d" % (attempts, limit) + (" (%d in progress)" % going if going else ""),
                    alarm=not ws.passed_candidates())  # used up with a candidate through the gate is no alarm
-    body += _meter("评测集使用", s["eval_use_count"], task["eval_use_limit"],
+    body += _meter("Evalset uses", s["eval_use_count"], task["eval_use_limit"],
                    "%d / %d" % (s["eval_use_count"], task["eval_use_limit"]))
-    body += _meter("算力", used, budget, "%s / %s 小时" % (_num(used), _num(budget)) if is_number(budget)
-                   else "%s 小时 · 无上限" % _num(used))
+    for key, label, used, budget in ledger(task, s):  # the spend ledger: GPU hours, and what has a budget or a use
+        if key == "compute_hours" or budget is not None or used:
+            body += _meter(label[:1].upper() + label[1:], used, budget,
+                           "%s / %s" % (amount_text(key, used), _num(budget)) if budget is not None
+                           else "%s · no limit" % amount_text(key, used))
+    if ws.spend_problems():
+        body += '<div class="sub">%s</div>' % _e("Spend-file problems: %s (see the events page)"
+                                                 % plural(ws.spend_problems(), "line"))
     if not s["stopped"] and ws.stop_check()[0]:
-        body += '<div class="sub">%s</div>' % _e("停止条件已满足")
-    return '<section id="stop" class="card"><h2>离停止还有多远</h2>%s</section>' % body
+        body += '<div class="sub">%s</div>' % _e("A stop condition is met")
+    return '<section id="stop" class="card"><h2>How far from the stop</h2>%s</section>' % body
 
 
 def _now_card(ws, progress, questions):
@@ -349,11 +383,11 @@ def _now_card(ws, progress, questions):
         since = D._local(s["stopped"].get("at"))
         text = D.stopped_texts(ws, action)[1]
         if os.path.isfile(os.path.join(ws.root, D.REPORT_FILE)):
-            detail = '<a href="%s">查看运行报告 →</a>%s' % (_href(OVERVIEW, REPORT), " " + _e(text) if text else "")
+            detail = '<a href="%s">View the run report →</a>%s' % (_href(OVERVIEW, REPORT), " " + _e(text) if text else "")
         else:
             detail = _e(text)
     else:
-        prefix = "下一步 %s：" % where  # a next step's sentence repeats the lead first: keep the action
+        prefix = "Next %s: " % where  # a next step's sentence repeats the lead first: keep the action
         detail = _e(what[len(prefix):] if key in D.NEXT_STEPS and not questions and what.startswith(prefix)
                     else what)
         if key == "plan" or questions:
@@ -362,11 +396,11 @@ def _now_card(ws, progress, questions):
             since = None  # a running module's sentence names its start; a hand-back time is unknown
         else:
             since = _last_change(ws)
-    return ('<section id="now" class="card"><h2>现在在等什么</h2><div class="wait-now">%s</div>'
+    return ('<section id="now" class="card"><h2>What the run waits for</h2><div class="wait-now">%s</div>'
             '<div class="detail">%s</div>%s%s<div class="sub">%s</div></section>'
             % (_e(D.now_lead(ws, progress, questions, (key, where, what, action))), detail,
                _agents_html(ws), _answer_html(ws, questions),
-               _e("自 %s 起" % since) if since else ""))
+               _e("since %s" % since) if since else ""))
 
 
 # ---- the live panels (spec §4, §5): read while `rsi run` waits and rewrites the pages ----------------
@@ -378,14 +412,15 @@ def _clock(dt, now):
 
 
 def _ago(seconds):
-    return timing.format_duration(seconds) + "前"
+    return timing.format_duration(seconds) + " ago"
 
 
 def _progress_html(p, now):
     """A module's progress.json as shown (rsi.progress.dispatch_progress, None when there is none): summary, facts,
     table, notes, the stale warning, when it was updated and the file's problems."""
     if p is None:
-        return '<div class="sub">%s</div>' % _e("模块还没有写进度（输出目录里没有 progress.json）。")
+        return '<div class="sub">%s</div>' % _e("The module has not written its progress yet (no progress.json in the "
+                                                "output directory).")
     out = []
     if p.get("summary"):
         out.append('<div class="psum">%s</div>' % _e(p["summary"]))
@@ -404,13 +439,13 @@ def _progress_html(p, now):
     if p.get("notes"):
         out.append('<ul class="pnotes">%s</ul>' % "".join("<li>%s</li>" % _e(n) for n in p["notes"]))
     if p.get("stale"):
-        out.append('<div class="warn">%s</div>' % _e("进度 %d 分钟没有更新：模块可能卡住了，或者不再写 progress.json。"
-                                                     % int(p["age_s"] // 60)))
+        out.append('<div class="warn">%s</div>' % _e("No progress update for %s: the module may be stuck, or no longer "
+                                                     "writes progress.json." % plural(int(p["age_s"] // 60), "minute")))
     if p.get("updated_at") is not None:
-        out.append('<div class="sub">%s</div>' % _e("进度更新于 %s（%s）" % (
+        out.append('<div class="sub">%s</div>' % _e("Progress updated %s (%s)" % (
             _clock(p["updated_at"], now), _ago(p["age_s"]))))
     if p.get("problems"):
-        out.append('<div class="note">%s</div>' % _e("progress.json 的问题：" + "；".join(p["problems"])))
+        out.append('<div class="note">%s</div>' % _e("Problems in progress.json: " + "; ".join(p["problems"])))
     return "".join(out)
 
 
@@ -420,30 +455,31 @@ def _doing_block(x, now):
     head = '<div class="dhead"><b>%s</b> %s <span class="chip%s">%s</span></div>' % (
         _e(x["stage_name"]), _e("%s · %s" % (x["id"], x["skill"])),
         " run" if status in ("running", "long_job") else "", _e(DISPATCH_STATUS.get(status, status)))
-    bits = ["第 %d 次启动（%s）" % (x["launches"], L.MODE_WORDS.get(x["mode"], x["mode"]))]
+    bits = ["launch %d (%s)" % (x["launches"], L.MODE_WORDS.get(x["mode"], x["mode"]))]
     if x["since"] is not None:
-        bits.append("这次启动于 %s" % _clock(x["since"], now))
-    bits.append("退回 %d 次" % x["returns"])
+        bits.append("this launch at %s" % _clock(x["since"], now))
+    bits.append(plural(x["returns"], "return"))
     if x["checkin_limit"] is not None:
-        bits.append("定时检查 %d / %d" % (x["checkins"], x["checkin_limit"]))
+        bits.append("check-ins %d / %d" % (x["checkins"], x["checkin_limit"]))
     elif x["checkins"]:
-        bits.append("定时检查 %d 次（不再检查）" % x["checkins"])
+        bits.append("%s (no more)" % plural(x["checkins"], "check-in"))
     if x["checkin_due"] is not None and not x["question_id"]:
-        bits.append("下次检查 %s" % _clock(x["checkin_due"], now))
+        bits.append("next check-in %s" % _clock(x["checkin_due"], now))
     if status == "long_job" and x["marker"]:
-        bits.append("完成标记 %s（%s）" % (os.path.basename(x["marker"]),  # the now card names the whole path
-                                         "已出现" if x["marker_done"] else "还没出现"))
+        bits.append("completion marker %s (%s)" % (os.path.basename(x["marker"]),  # the now card names the whole path
+                                                   "present" if x["marker_done"] else "not yet written"))
     out = [head, '<div class="sub">%s</div>' % _e(" · ".join(bits))]
     if x["question_id"]:
-        out.append('<div class="warn">%s</div>' % _e("⏸ 等你回答（%s）：见上方的问题和「现在在等什么」。" % x["question_id"]))
+        out.append('<div class="warn">%s</div>' % _e("⏸ Waiting for the user (%s): see the question above and \"What "
+                                                     "the run waits for\"." % x["question_id"]))
     out.append(_progress_html(x["progress"], now))
     return '<div class="dblock">%s</div>' % "".join(out)
 
 
 def _doing_card(ds, now):
-    body = "".join(_doing_block(x, now) for x in ds) or '<p class="empty">%s</p>' % _e("现在没有在跑的模块。")
-    return ('<section id="doing" class="card"><h2>现在在做什么<span class="hint">%s</span></h2>%s</section>'
-            % (_e("打开的派出和模块写的进度（progress.json）"), body))
+    body = "".join(_doing_block(x, now) for x in ds) or '<p class="empty">%s</p>' % _e("No module is running now.")
+    return ('<section id="doing" class="card"><h2>What is running now<span class="hint">%s</span></h2>%s</section>'
+            % (_e("open dispatches and the progress their modules write (progress.json)"), body))
 
 
 def _judgement_card(ws, now):
@@ -451,31 +487,33 @@ def _judgement_card(ws, now):
     for h in L.handback_notes(ws):
         notes = h["notes"]
         head = '<div class="hbh"><span class="t">%s</span> <b>%s</b> %s <span class="chip">%s</span></div>' % (
-            _e(_clock(h["at"], now)), _e("rsi-%s" % h["module"]), _e("%s · 第 %d 次交回" % (h["dispatch_id"], h["launch"])),
-            _e(HANDBACK_STATUS.get(h["status"], h["status"] or "状态不明")))
+            _e(_clock(h["at"], now)), _e("rsi-%s" % h["module"]), _e("%s · hand-back %d" % (h["dispatch_id"], h["launch"])),
+            _e(HANDBACK_STATUS.get(h["status"], h["status"] or "status unknown")))
         if not notes.strip():
-            body = '<div class="sub">%s</div>' % _e("（没有写 notes）")
+            body = '<div class="sub">%s</div>' % _e("(no notes written)")
         elif len(notes) <= NOTES_SHOWN:
             body = '<div class="hbn">%s</div>' % _e(notes)
         else:  # the first NOTES_SHOWN characters, then the rest inside <details>
             rest = notes[NOTES_SHOWN:]
             if len(rest) > NOTES_MAX:
-                rest = rest[:NOTES_MAX] + "…（太长，只显示前 %d 字）" % (NOTES_SHOWN + NOTES_MAX)
+                rest = rest[:NOTES_MAX] + "… (too long; only the first %d characters are shown)" % (NOTES_SHOWN + NOTES_MAX)
             body = ('<div class="hbn">%s</div><details id="%s"><summary>%s</summary><div class="hbn">%s</div></details>'
                     % (_e(notes[:NOTES_SHOWN] + "…"),
                        _e("hb-%s-%d-%d" % (h["dispatch_id"], h["launch"], int(h["at"].timestamp()))),
-                       _e("展开其余 %d 字（共 %d 字）" % (len(notes) - NOTES_SHOWN, len(notes))), _e(rest)))
+                       _e("Show the other %s (%d in all)" % (plural(len(notes) - NOTES_SHOWN, "character"),
+                                                              len(notes))), _e(rest)))
         qs = h["questions"]
         if qs:
             more = len(qs) - QUESTIONS_SHOWN
             body += '<div class="qhead">%s</div><ul class="qs">%s</ul>%s' % (
-                _e("问题："), "".join("<li>%s</li>" % _e(q if len(q) <= QUESTION_CHARS else q[:QUESTION_CHARS] + "…")
-                                     for q in qs[:QUESTIONS_SHOWN]),
-                '<div class="sub">%s</div>' % _e("另有 %d 条" % more) if more > 0 else "")
+                _e("Questions:"), "".join("<li>%s</li>" % _e(q if len(q) <= QUESTION_CHARS else q[:QUESTION_CHARS] + "…")
+                                          for q in qs[:QUESTIONS_SHOWN]),
+                '<div class="sub">%s</div>' % _e("%d more" % more) if more > 0 else "")
         items.append('<li class="hb">%s%s</li>' % (head, body))
-    body = '<ul class="hbs">%s</ul>' % "".join(items) if items else '<p class="empty">%s</p>' % _e("还没有交回。")
-    return ('<section id="judgement" class="card"><h2>agent 的判断<span class="hint">%s</span></h2>%s</section>'
-            % (_e("最近 %d 份交回，新的在前" % len(items) if items else "模块交回时写的 notes 和问题"), body))
+    body = '<ul class="hbs">%s</ul>' % "".join(items) if items else '<p class="empty">%s</p>' % _e("No hand-backs yet.")
+    return ('<section id="judgement" class="card"><h2>Agent judgement<span class="hint">%s</span></h2>%s</section>'
+            % (_e("the latest %s, newest first" % plural(len(items), "hand-back") if items
+                  else "the notes and questions modules write in their hand-backs"), body))
 
 
 def _gb(mib):
@@ -492,7 +530,7 @@ def _gpu_tile(g):
         return sum(p["memory_mib"] for p in ps if is_number(p.get("memory_mib")))
 
     def held(ps):  # the memory processes `ps` hold, in words ([N/A] for every one of them: unknown)
-        return "%s GB" % _gb(mib(ps)) if any(is_number(p.get("memory_mib")) for p in ps) else "占用未知"
+        return "%s GB" % _gb(mib(ps)) if any(is_number(p.get("memory_mib")) for p in ps) else "memory unknown"
 
     ours = [p for p in procs if p.get("owner") == "ours"]
     others = [p for p in procs if p.get("owner") == "other"]
@@ -503,20 +541,21 @@ def _gpu_tile(g):
         rest = max(0.0, min(100.0 - mine, 100.0 * (used - mib(ours)) / total))
         bar = '<span class="ours" style="width:%.1f%%"></span><span class="other" style="width:%.1f%%"></span>' % (
             mine, rest)
-    lines = ["显存 %s / %s GB · 利用率 %s" % (_gb(used), _gb(total), "%d%%" % util if is_number(util) else "未知")]
+    lines = ["GPU memory %s / %s GB · utilization %s" % (_gb(used), _gb(total),
+                                                          "%d%%" % util if is_number(util) else "unknown")]
     if not procs:
-        lines.append("没有计算进程")
+        lines.append("no compute processes")
     if ours:
-        lines.append("本用户 %d 个进程 · %s" % (len(ours), held(ours)))
+        lines.append("this user: %s · %s" % (plural(len(ours), "process", "processes"), held(ours)))
     if others:
         users = {}
         for p in others:
             users.setdefault(str(p.get("user") or "?"), []).append(p)
-        lines.append("其他用户：" + "、".join("%s %s" % (u, held(ps)) for u, ps in sorted(users.items())))
+        lines.append("other users: " + ", ".join("%s %s" % (u, held(ps)) for u, ps in sorted(users.items())))
     if unknown:
-        lines.append("未知属主 %d 个进程 · %s" % (len(unknown), held(unknown)))
+        lines.append("unknown owner: %s · %s" % (plural(len(unknown), "process", "processes"), held(unknown)))
     return '<div class="gpu%s"><b>%s</b> <span class="sub">%s</span><div class="track">%s</div>%s</div>' % (
-        " busy" if others or unknown else "", _e("卡 %s" % g.get("index")), _e(g.get("name") or ""), bar,
+        " busy" if others or unknown else "", _e("GPU %s" % g.get("index")), _e(g.get("name") or ""), bar,
         "".join('<div>%s</div>' % _e(t) for t in lines))
 
 
@@ -524,34 +563,37 @@ def _gpu_body(snap, problem, task, now):
     """(hint, body) of the GPU panel for snapshot `snap` (rsi.gpus.load_snapshot: None with `problem` None when there
     is none yet, with `problem` the reason the file cannot be read)."""
     refresh = flow_settings(task)["page_refresh_seconds"]
-    every = "rsi run 等待时每 %s 秒采一次" % _num(refresh)
+    every = "rsi run takes a snapshot every %s while it waits" % plural(refresh, "second")
     if problem is not None:
-        return "", '<p class="empty">%s</p>' % _e("GPU 快照读不了（%s %s）：下一次采集会重写它。" % (G.GPU_FILE, problem))
+        return "", '<p class="empty">%s</p>' % _e("The GPU snapshot cannot be read (%s %s): the next one rewrites it."
+                                                  % (G.GPU_FILE, problem))
     if snap is None:
-        return "", '<p class="empty">%s</p>' % _e("还没有 GPU 信息：%s。" % every)
+        return "", '<p class="empty">%s</p>' % _e("No GPU information yet: %s." % every)
     at = parse_utc(snap.get("at"))
     age = None if at is None else (now - at).total_seconds()
-    when = "采集时间不明" if at is None else "采于 %s（%s）" % (_clock(at, now), _ago(age))
+    when = "time taken unknown" if at is None else "taken %s (%s)" % (_clock(at, now), _ago(age))
     if snap.get("status") == "missing":
-        return _e(when), '<p class="empty">%s</p>' % _e("这台机器没有 nvidia-smi，GPU 信息不可用。")
+        return _e(when), '<p class="empty">%s</p>' % _e("This machine has no nvidia-smi; no GPU information.")
     out = []
     if age is not None and age > GPU_STALE_REFRESHES * refresh:
-        out.append('<div class="warn">%s</div>' % _e("已过时：最近一次快照是 %s的（%s）。" % (_ago(age), every)))
+        out.append('<div class="warn">%s</div>' % _e("Stale: the latest snapshot is from %s (%s)." % (_ago(age), every)))
     if snap.get("status") != "ok":
-        out.append('<div class="note">%s</div>' % _e("nvidia-smi 出错（%s）：%s" % (when, snap.get("error") or "原因不明")))
+        out.append('<div class="note">%s</div>' % _e("nvidia-smi failed (%s): %s" % (when, snap.get("error")
+                                                                                     or "reason unknown")))
     cards = dict((g["index"], g) for g in snap.get("gpus") or []
                  if isinstance(g, dict) and isinstance(g.get("index"), int) and not isinstance(g.get("index"), bool))
     ids = (task.get("resources") or {}).get("gpu_ids")
     shown = list(ids) if ids else sorted(cards)
     if cards or snap.get("status") == "ok":
         tiles = [_gpu_tile(cards[i]) if i in cards else
-                 '<div class="gpu off"><b>%s</b><div class="track"></div>%s</div>' % (_e("卡 %s" % i), _e("没有这张卡"))
+                 '<div class="gpu off"><b>%s</b><div class="track"></div>%s</div>' % (_e("GPU %s" % i), _e("no such GPU"))
                  for i in shown]
         out.append('<div class="gpus">%s</div>' % "".join(tiles) if tiles else
-                   '<p class="empty">%s</p>' % _e("快照里没有卡。"))
-        out.append('<div class="gkey"><span><i class="ours"></i>本用户（rsi run 的用户）</span>'
-                   '<span><i class="other"></i>其他用户和未知</span></div>')
-    hint = "%s · %s" % ("任务的 resources.gpu_ids：%s" % "、".join(str(i) for i in ids) if ids else "全部卡", when)
+                   '<p class="empty">%s</p>' % _e("No GPUs in the snapshot."))
+        out.append('<div class="gkey"><span><i class="ours"></i>this user (the one running rsi run)</span>'
+                   '<span><i class="other"></i>other users and unknown</span></div>')
+    hint = "%s · %s" % ("the task's resources.gpu_ids: %s" % ", ".join(str(i) for i in ids) if ids else "all GPUs",
+                        when)
     return _e(hint), "".join(out)
 
 
@@ -560,7 +602,7 @@ def _gpu_card(ws, task, now):
         snap, problem = G.load_snapshot(ws.root)
         hint, body = _gpu_body(snap, problem, task, now)
     except Exception as e:  # a snapshot cut off or edited by hand never breaks the page
-        hint, body = "", '<p class="empty">%s</p>' % _e("GPU 快照读不了（%s：%s）。" % (type(e).__name__, e))
+        hint, body = "", '<p class="empty">%s</p>' % _e("The GPU snapshot cannot be read (%s: %s)." % (type(e).__name__, e))
     return '<section id="gpus" class="card"><h2>GPU<span class="hint">%s</span></h2>%s</section>' % (hint, body)
 
 
@@ -570,19 +612,23 @@ def _recent_card(ws, task, now):
         dt = parse_utc(at)
         items.append('<li><span class="t">%s</span><span class="dot %s"></span><span>%s <span class="who">· %s</span>'
                      '</span></li>' % (_e(_clock(dt, now) if dt else "—"), cls, text, _e(source)))
-    body = '<ul class="tl recent">%s</ul>' % "".join(items) if items else '<p class="empty">%s</p>' % _e("还没有事件。")
-    return ('<section id="recent" class="card"><h2>最近事件</h2>%s<p class="more"><a href="%s">%s</a></p></section>'
-            % (body, _e(_href(OVERVIEW, EVENTS)), _e("全部事件 →")))
+    body = '<ul class="tl recent">%s</ul>' % "".join(items) if items else '<p class="empty">%s</p>' % _e("No events yet.")
+    return ('<section id="recent" class="card"><h2>Recent events</h2>%s<p class="more"><a href="%s">%s</a></p></section>'
+            % (body, _e(_href(OVERVIEW, EVENTS)), _e("All events →")))
 
 
 def _overview(ws, task, progress, questions, now):
-    """The overview (spec §4): the questions, the workflow, the three cards, then 现在在做什么, agent 的判断 and GPU,
-    and 最近事件. `now`: the generation time (naive: local)."""
+    """The overview (spec §4): the questions, the workflow, the three cards, then What is running now, Agent judgement
+    and GPU, and Recent events. `now`: the generation time (naive: local)."""
     now = now.astimezone()
     ds = L.open_dispatches(ws, now)
     states = D.flow_states(ws, progress)
     parts = [_ask(questions)] if questions else []
-    parts.append(_flow(states, _node_lines(states, ds)))
+    lines = _node_lines(states, ds)
+    compare = _compare_node_line(ws, states)
+    if compare and "compare" not in lines:
+        lines["compare"] = compare
+    parts.append(_flow(states, lines, dict((m, D.stage_title(ws, m)) for m in D.MODULES)))
     parts.append('<div class="grid">%s%s%s</div>' % (_best_card(ws, task), _stop_card(ws, task, ds),
                                                       _now_card(ws, progress, questions)))
     parts.append(_doing_card(ds, now))
@@ -594,27 +640,28 @@ def _overview(ws, task, progress, questions, now):
 # ---- rounds and artifacts -----------------------------------------------------------------------
 
 def _gate(ws, e, primary):
-    """(css class, short Chinese result) of an artifact's gate or role, ("", "") when it has none."""
+    """(css class, short result) of an artifact's gate or role, ("", "") when it has none."""
     kind = e["kind"]
     if kind not in ("trainset", "candidate", "search", "evaluation", "plan"):
         return "", ""
     m = ws.manifest(e["id"])
     if kind == "trainset":
         if m["quality"]["passed"] is True:
-            return "ok", "质量门通过"
+            return "ok", "quality gate passed"
         failed = [c["name"] for c in m["quality"]["checks"] if not c["passed"]]
-        return "bad", "质量门没过" + ("（%s）" % "、".join(failed) if failed else "")
+        return "bad", "quality gate failed" + (" (%s)" % ", ".join(failed) if failed else "")
     if kind == "candidate":
         val = "val %s %s" % (primary, _num(m["metrics_val"].get(primary)))
-        return ("ok", "训练门通过 · " + val) if m["train_gate"]["passed"] is True else ("bad", "训练门没过 · " + val)
+        return ("ok", "train gate passed · " + val) if m["train_gate"]["passed"] is True \
+            else ("bad", "train gate failed · " + val)
     if kind == "search":
         delta = m["gain_vs_default"]["delta"]
-        return "ok", "调优门通过 · 增益 %s" % ("%+.4g" % delta if is_number(delta) else "无")
+        return "ok", "tune gate passed · gain %s" % ("%+.4g" % delta if is_number(delta) else "n/a")
     if kind == "evaluation":
         if m.get("uses_testset") is True:
-            return "", "里程碑评测（test）"
-        return "", "评测集 %s %s" % (primary, _num(m["metrics"]["candidate"].get(primary)))
-    return "", "入口 %s" % m.get("entry_module")
+            return "", "milestone evaluation (test)"
+        return "", "evalset %s %s" % (primary, _num(m["metrics"]["candidate"].get(primary)))
+    return "", "entry %s" % m.get("entry_module")
 
 
 def _chip(ws, e, primary):
@@ -644,61 +691,66 @@ def _module_note(ws, module, progress):
     if p["state"] == "running":
         who = _busy_skills(ws, module, D.running_agents(ws) + D.waiting_long_jobs(ws))
         if stopped:
-            text = "%s 停止后仍在运行" % who if records else "停止时未交回"
+            text = "%s still running after the stop" % who if records else "not handed back at the stop"
         else:
-            text = "%s 进行中：输出目录自 %s 起还没有交回产物" % (who, D._since(p["since"]))
+            text = "%s in progress: no artifact in the output directory since %s" % (who, D._since(p["since"]))
     elif p["state"] == "pending":
-        text = "停止时未启动" if stopped else "%s 待启动" % _busy_skills(ws, module, D.pending_agents(ws))
+        text = "not launched at the stop" if stopped else "%s not launched yet" % _busy_skills(ws, module,
+                                                                                               D.pending_agents(ws))
     elif p["state"] == "unregistered":
         held = D.held_handbacks(ws, module)
         # answered: the flow's own test (the overview's answer going back comes from it)
         answered = bool(held) and all(F.question_answered(ws, d) for d in held)
         if stopped and not records:
-            head = "停止时未交回"
+            head = "not handed back at the stop"
         elif stopped:
-            head = "交回未登记（%s）" % ("停止时你的回答还没送回" if answered else "停止时还在等你回答" if held else "运行已停止")
+            head = "handed back, not registered (%s)" % (
+                "the user's answer was not sent back at the stop" if answered
+                else "still waiting for the user at the stop" if held else "the run has stopped")
         else:
-            head = "交回未登记" + ("（已回答，等 rsi run 送回）" if answered else "（等你回答它的提问）" if held else "")
-        text = head + ("：" + "、".join(p["pending"]) if p["pending"] else "")
+            head = "handed back, not registered" + (" (answered; waiting for rsi run to send the answer back)"
+                                                    if answered else " (waiting for the user to answer its questions)"
+                                                    if held else "")
+        text = head + (": " + ", ".join(p["pending"]) if p["pending"] else "")
     else:
         text = ""
-    old = "；".join("未登记（已被 %s 取代）：%s" % (aid, name) for name, aid in sorted(p["superseded"].items()))
-    text = "；".join(t for t in (text, old) if t)
+    old = "; ".join("not registered (superseded by %s): %s" % (aid, name) for name, aid in sorted(p["superseded"].items()))
+    text = "; ".join(t for t in (text, old) if t)
     return '<div class="note">%s</div>' % _e(text) if text else ""
 
 
 def _verdict(d):
     if d.get("decision") == "promote":
-        return "升级 %s" % d.get("version")
-    return "关闭（没有评测）" if d.get("evaluation_id") is None else "保留"
+        return "promote %s" % d.get("version")
+    return "closed (no evaluation)" if d.get("evaluation_id") is None else "keep"
 
 
 def _decision(ws, n, r, need_approval):
     d = r["decision"]
     if d is None:
         pending = ws.evaluations(n)
-        text = "<b>%s</b>" % _e("未判定" + ("（%s 待判定）" % "、".join(pending) if pending else ""))
+        text = "<b>%s</b>" % _e("undecided" + (" (%s to decide)" % ", ".join(pending) if pending else ""))
     else:
         bits = [_e(d.get("reason") or "—"), _e(D._local(d.get("at")))]
         ev = d.get("evaluation_id")
         if ev is not None:
-            bits.append("评测 " + _art(ws, ROUNDS, ev))
+            bits.append("evaluation " + _art(ws, ROUNDS, ev))
         text = '<b>%s</b> <span class="sub">%s</span>' % (_e(_verdict(d)), " · ".join(bits))
     plan = r.get("plan_id")
     if plan is None:
-        plan_html = "无"
+        plan_html = "none"
     else:
-        approval = ("已批准" if F.plan_approved(ws, plan) else "未批准") if need_approval else "无需批准"
-        plan_html = "%s%s" % (_art(ws, ROUNDS, plan), _e("（%s）" % approval))
-    return '%s<br><span class="sub">下一轮计划：%s</span>' % (text, plan_html)
+        approval = ("approved" if F.plan_approved(ws, plan) else "not approved") if need_approval else "no approval needed"
+        plan_html = "%s%s" % (_art(ws, ROUNDS, plan), _e(" (%s)" % approval))
+    return '%s<br><span class="sub">Next-round plan: %s</span>' % (text, plan_html)
 
 
-def _timed(prefix, dur, suffix, start, cls):
-    """A duration label. While it is still running it carries data-start (UTC ISO); the page script
-    recomputes it from the browser clock on load, because the file is only rewritten by rsi commands."""
+def _timed(prefix, dur, suffix, start, cls, approx=False):
+    """A duration label. While it is still running it carries data-start (UTC ISO), and data-approx when its
+    start is approximated (`approx`); the page script recomputes it from the browser clock on load, because the
+    file is only rewritten by rsi commands."""
     if start is None:
         return '<span class="%s">%s</span>' % (cls, _e(prefix + dur + suffix))
-    approx = dur.startswith("约")
     return '<span class="%s" data-start="%s" data-prefix="%s" data-suffix="%s"%s>%s</span>' % (
         cls, _e(start), _e(prefix), _e(suffix), ' data-approx="1"' if approx else "",
         _e(prefix + dur + suffix))
@@ -706,32 +758,34 @@ def _timed(prefix, dur, suffix, start, cls):
 
 def _elapsed_label(ws, now):
     p = timing.elapsed_parts(ws, now)
-    return "" if p is None else _timed(p[0], p[1], p[2], p[3], "chip time")
+    return "" if p is None else _timed(p[0], p[1], p[2], p[3], "chip time", p[4])
 
 
 def _round_time_label(win, now, running_chip=False):
-    """`running_chip`: the round's status chip already says 进行中 or the round is decided (it stays the
-    current round until `rsi next`), so only "已 N 分钟" is shown."""
+    """`running_chip`: the round's status chip already says "in progress" or the round is decided (it stays the
+    current round until `rsi next`), so only "N minutes so far" is shown."""
     p = timing.round_parts(win, now)
     if p is None:
         return ""
-    prefix = "已 " if running_chip and p[0].startswith("进行中") else p[0]
-    return _timed(prefix, p[1], "", p[2], "chip time")
+    if running_chip and p[0] == timing.OPEN_ROUND:
+        return _timed("", p[1], timing.SO_FAR, p[2], "chip time", p[3])
+    return _timed(p[0], p[1], "", p[2], "chip time", p[3])
 
 
 # The launches in the same session that are no return (a dispatch record's counters), as the rounds page names them.
-SESSION_COUNTERS = (("followups", "继续"), ("continued", "长任务收尾"), ("answered", "送回回答"))
+SESSION_COUNTERS = (("followups", "follow-up", "follow-ups"), ("continued", "long-job wrap-up", "long-job wrap-ups"),
+                    ("answered", "answer sent back", "answers sent back"))
 
 
 def _dispatch_line(d):
     """One dispatch of the round: id, module, purpose, session, returns (and the other launches in its session),
     status."""
     status = d.get("status")
-    more = "".join(" · %s %d 次" % (name, int(d.get(k) or 0)) for k, name in SESSION_COUNTERS if d.get(k))
+    more = "".join(" · " + plural(int(d.get(k) or 0), one, many) for k, one, many in SESSION_COUNTERS if d.get(k))
     return ('<div class="disp"><b>%s</b> %s <span class="sub">%s</span> <span class="chip%s">%s</span></div>'
             % (_e(d.get("id")), _e("rsi-%s" % d.get("module")),
-               _e("目的 %s · 会话 %s · 退回 %d 次%s" % (d.get("purpose") or "—", _short(d.get("session")),
-                                                  int(d.get("returns") or 0), more)),
+               _e("purpose %s · session %s · %s%s" % (d.get("purpose") or "—", _short(d.get("session")),
+                                                     plural(int(d.get("returns") or 0), "return"), more)),
                " run" if status in ("running", "long_job") else " ok" if status == "done" else "",
                _e(DISPATCH_STATUS.get(status, status))))
 
@@ -742,22 +796,22 @@ def _round_block(ws, n, r, progress, primary, need_approval, latest, win, now):
     arts = [ws.entry(a) for a in r["artifacts"]]
     d = r["decision"]
     if d is not None:
-        verdict = ("ok" if d.get("decision") == "promote" else "", _verdict(d).split("（")[0])
+        verdict = ("ok" if d.get("decision") == "promote" else "", _verdict(d).split(" (")[0])
     elif current:
-        verdict = ("stop", "已停止") if s["stopped"] else ("run", "进行中")
+        verdict = ("stop", "stopped") if s["stopped"] else ("run", "in progress")
     else:
-        verdict = ("", "未判定")
-    summary = ('<summary><span class="rn">第 %d 轮</span><span class="chip">%s</span><span class="chip %s">%s</span>'
+        verdict = ("", "undecided")
+    summary = ('<summary><span class="rn">Round %d</span><span class="chip">%s</span><span class="chip %s">%s</span>'
                '<span class="chip">%s</span>%s</summary>'
-               % (n, _e("入口 %s" % r.get("entry")), verdict[0], _e(verdict[1]),
-                  _e("尝试 %d / %d" % (len(ws.attempts(n)), ws.attempt_limit())),
-                  _round_time_label(win, now, d is not None or verdict[1] == "进行中")))
+               % (n, _e("entry %s" % r.get("entry")), verdict[0], _e(verdict[1]),
+                  _e("attempts %d / %d" % (len(ws.attempts(n)), ws.attempt_limit())),
+                  _round_time_label(win, now, d is not None or verdict[1] == "in progress")))
     body = []
     if current and F.attempts_exhausted(ws, r):
         body.append('<p class="warn">%s</p>' % _e(D._close_round_text(ws)))
     tasks = [e for e in arts if e["kind"] == "task"]
     if tasks:
-        body.append(_row("任务接入", "".join(_chip(ws, e, primary) for e in tasks)))
+        body.append(_row("Task intake", "".join(_chip(ws, e, primary) for e in tasks)))
     for m in D.MODULES:
         mine = D._step_artifacts(ws, m, arts)
         trials = [e for e in mine if _is_trial(e)]
@@ -765,21 +819,21 @@ def _round_block(ws, n, r, progress, primary, need_approval, latest, win, now):
         if trials:
             ends = trials[0]["id"] + ("" if len(trials) == 1 else " … " + trials[-1]["id"])
             cell += ('<details class="trials" id="round-%d-trials"><summary>%s</summary><div>%s</div></details>'
-                     % (n, _e("%d 个试验候选（%s）" % (len(trials), ends)),
+                     % (n, _e("%s (%s)" % (plural(len(trials), "trial candidate"), ends)),
                         "".join(_chip(ws, e, primary) for e in trials)))
         if current:
             cell += _module_note(ws, m, progress)
-        body.append(_row(D.STEP_NAMES[m], cell or '<span class="sub">本轮没有</span>'))
+        body.append(_row(D.stage_title(ws, m), cell or '<span class="sub">none this round</span>'))
     dispatches = ws.dispatches(rnd=n)
     if dispatches:
-        body.append(_row("派出的 agent", "".join(_dispatch_line(d) for d in dispatches)))
+        body.append(_row("Dispatched agents", "".join(_dispatch_line(d) for d in dispatches)))
     others = [e for e in arts if e["kind"] not in ("task", "record") and D.stage_of(e["producer"]) is None]
     if others:
-        body.append(_row("其他", "".join(_chip(ws, e, primary) for e in others)))
+        body.append(_row("Other", "".join(_chip(ws, e, primary) for e in others)))
     records = [e for e in arts if e["kind"] == "record"]
     if records:
-        body.append(_row("实验记录", "".join(_chip(ws, e, primary) for e in records)))
-    body.append(_row("判定", _decision(ws, n, r, need_approval), "decision"))
+        body.append(_row("Experiment records", "".join(_chip(ws, e, primary) for e in records)))
+    body.append(_row("Decision", _decision(ws, n, r, need_approval), "decision"))
     return '<details class="round" id="round-%d"%s>%s<div class="round-body">%s</div></details>' % (
         n, " open" if latest else "", summary, "".join(body))
 
@@ -796,15 +850,15 @@ def _rounds_page(ws, task, progress, now):
 # ---- events and the run report ------------------------------------------------------------------
 
 def _is_trial(e):
-    """A candidate of ② (训练调优): every one is a trial of a search (an old workspace's tune trials too)."""
+    """A candidate of ② (Train & tune): every one is a trial of a search (an old workspace's tune trials too)."""
     return e["kind"] == "candidate" and D.stage_of(e["producer"]) == "train"
 
 
 def _who(by, quote=None):
-    """Who decided: 代码, 决策 agent or 用户 <name> (with the user's words)."""
+    """Who decided: code, decision agent or user <name> (with the user's words)."""
     if by in DECIDERS:
         return DECIDERS[by]
-    return "用户 %s%s" % (by, "：“%s”" % quote if quote else "")
+    return "user %s%s" % (by, ": “%s”" % quote if quote else "")
 
 
 def _log_order(evs):
@@ -840,9 +894,9 @@ def _module_of_dispatch(ws, did):
 
 
 def _when_ended(ev):
-    """How a long_job_* event came about: 停止时 (a stop; older events have no context) or 关闭派出时 (a decision or
-    `rsi close-round` closed its dispatch)."""
-    return "关闭派出时" if ev.get("context") == "close" else "停止时"
+    """How a long_job_* event came about: "at the stop" (a stop; older events have no context) or "when its dispatch
+    was closed" (a decision or `rsi close-round` closed its dispatch)."""
+    return "when its dispatch was closed" if ev.get("context") == "close" else "at the stop"
 
 
 def _run_events(ws, evs=None):
@@ -858,54 +912,66 @@ def _run_events(ws, evs=None):
         kind, did, at = ev["event"], ev.get("dispatch_id"), ev.get("at") or ""
         text = cls = None
         if kind == "launch" and ev.get("mode") == "first":
-            text, cls = "派出 rsi-%s（%s，%s，会话 %s）" % (ev.get("module"), did, ev.get("runner") or "—",
-                                                       _short(ev.get("session"))), "agent"
+            text, cls = "Dispatched rsi-%s (%s, %s, session %s)" % (ev.get("module"), did, ev.get("runner") or "—",
+                                                                   _short(ev.get("session"))), "agent"
         elif kind == "resume":
             if ev.get("mode") == "continue":
-                text = "续跑 %s（长任务收尾，会话 %s）" % (did, _short(ev.get("session")))
+                text = "Resumed %s (long-job wrap-up, session %s)" % (did, _short(ev.get("session")))
             else:
                 returns[did] = returns.get(did, 0) + 1
-                text = "退回 %s（第 %d 次，会话 %s，%s）" % (did, returns[did], _short(ev.get("session")), ev.get("feedback"))
+                text = "Returned %s (return %d, session %s, %s)" % (did, returns[did], _short(ev.get("session")),
+                                                                    ev.get("feedback"))
             cls = "agent"
         elif kind == "followup":
-            text, cls = "继续 %s（交回的第二部分，不算退回，会话 %s，%s）" % (did, _short(ev.get("session")),
-                                                                ev.get("feedback")), "agent"
+            text, cls = "Continued %s (second part of the hand-back, not a return, session %s, %s)" % (
+                did, _short(ev.get("session")), ev.get("feedback")), "agent"
         elif kind == "resume_with_answer":
-            text, cls = "把你的回答送回 %s（会话 %s，%s）" % (did, _short(ev.get("session")), ev.get("feedback")), "agent"
+            text, cls = "Sent the user's answer back to %s (session %s, %s)" % (did, _short(ev.get("session")),
+                                                                               ev.get("feedback")), "agent"
         elif kind == "asked":
             held = ev.get("held") or []
-            text = "rsi-%s（%s）交回时提问：等你回答，%s" % (
+            text = "rsi-%s (%s) asked in its hand-back: waiting for the user; %s" % (
                 _module_of_dispatch(ws, did) or "?", did,
-                "交回的 %s 暂不登记" % "、".join(str(h) for h in held) if held else "这次没有交回产物")
+                "held unregistered: %s" % ", ".join(str(h) for h in held) if held
+                else "no artifact was handed back this time")
             cls = "approve"
         elif kind == "agent_stopped":
-            text, cls = "停止时终止了 agent %s" % did, "stop"
+            text, cls = "Terminated agent %s at the stop" % did, "stop"
         elif kind == "long_job_stopped":
-            text, cls = "%s终止了长任务 %s（pid %s）" % (_when_ended(ev), did, ev.get("pid")), "stop"
+            text, cls = "Terminated long job %s (pid %s) %s" % (did, ev.get("pid"), _when_ended(ev)), "stop"
         elif kind == "long_job_gone" and not ev.get("orphan"):  # an orphan pid file whose process ended: no line
-            text, cls = "%s长任务 %s 的进程已不在（pid %s）" % (_when_ended(ev), did, ev.get("pid")), "stop"
+            text, cls = "Long job %s: its process was already gone (pid %s) %s" % (did, ev.get("pid"),
+                                                                                  _when_ended(ev)), "stop"
         elif kind == "long_job_left":
-            text, cls = "%s没能终止长任务 %s：%s，可能仍在运行" % (_when_ended(ev), did, ev.get("why")), "stop"
+            text, cls = "Could not terminate long job %s %s: %s; it may still be running" % (
+                did, _when_ended(ev), D._clause(ev.get("why"))), "stop"
         elif kind == "closed":
-            text = "关闭派出 %s（%s%s）" % (did, "运行已停止" if ev.get("why") == "stopped" else ev.get("why") or "—",
-                                       "，没有启动" if ev.get("launched") is False else "")
+            text = "Closed dispatch %s (%s%s)" % (did, "the run has stopped" if ev.get("why") == "stopped"
+                                                  else D._clause(ev.get("why") or "—"),
+                                                  ", never launched" if ev.get("launched") is False else "")
             cls = "stop"
         elif kind == "fresh_session":
-            text, cls = "新会话接手 %s：%s" % (did, ev.get("why")), "agent"
+            text, cls = "Fresh session took over %s: %s" % (did, ev.get("why")), "agent"
         elif kind == "decision" and not ev.get("reused"):
             by = ev.get("by")
-            text = "决策 %s → %s（%s%s）" % (ev.get("point"), ev.get("choice"), _who(by, ev.get("quote")),
-                                          "；" + str(ev["reason"]) if ev.get("reason") else "")
+            text = "Decision %s → %s (%s%s)" % (ev.get("point"), ev.get("choice"), _who(by, ev.get("quote")),
+                                               "; " + D._clause(ev["reason"]) if ev.get("reason") else "")
             cls = "decide"
+        elif kind == "spend_invalid":
+            counted = sorted((ev.get("counted") or {}).items())
+            text, cls = "Spend file of %s, line %s: %s (counted: %s)" % (
+                did, ev.get("line"), ev.get("error"), ", ".join("%s %s" % (k, _num(v)) for k, v in counted) or "nothing"
+            ), "stop"
         elif kind == "decision_agent_failed":
-            text, cls = "决策 agent 没给出可用的答案（%s %s）：改用代码的默认" % (ev.get("point"), ev.get("error")), "decide"
+            text, cls = "The decision agent gave no usable answer (%s %s): using the code's default" % (
+                ev.get("point"), ev.get("error")), "decide"
         elif kind == "answer":
-            text = "回答 %s：%s（%s）" % (ev.get("point"), ev.get("choice"), _who(ev.get("by"), ev.get("quote")))
+            text = "Answer %s: %s (%s)" % (ev.get("point"), ev.get("choice"), _who(ev.get("by"), ev.get("quote")))
             cls, last_ask = "approve", None
         elif kind == "action" and isinstance(ev.get("action"), dict) and ev["action"].get("type") == "ask":
             question = ev["action"].get("question")
             if question != last_ask:
-                text, cls = "向用户提问：%s" % question, "approve"
+                text, cls = "Asked the user: %s" % question, "approve"
             last_ask = question
         if text is not None:
             out.append((at, cls, _e(text), "rsi answer" if kind == "answer" else "rsi run", i))
@@ -945,14 +1011,14 @@ def _timeline(ws, task, page):
             j += 1
         if j > i:
             run = entries[i:j + 1]
-            text = "%s%s … %s%s" % (_e("登记 %d 个试验候选（" % len(run)), _art(ws, page, run[0]["id"]),
-                                    _art(ws, page, run[-1]["id"]), _e("）"))
+            text = "%s%s … %s%s" % (_e("Registered %d trial candidates (" % len(run)), _art(ws, page, run[0]["id"]),
+                                    _art(ws, page, run[-1]["id"]), _e(")"))
             events.append((run[-1].get("registered_at") or "", "trial", text, PRODUCER_NAMES["train"],
                            seq.get(("reg", run[-1]["id"]))))
         else:
             _cls, gate = _gate(ws, e, primary)
-            text = "%s %s%s" % (_e("登记" + KIND_NAMES.get(e["kind"], e["kind"])), _art(ws, page, e["id"]),
-                                _e("（%s）" % gate) if gate else "")
+            text = "%s %s%s" % (_e("Registered " + KIND_NAMES.get(e["kind"], e["kind"])), _art(ws, page, e["id"]),
+                                _e(" (%s)" % gate) if gate else "")
             who = D.stage_of(e["producer"]) or e["producer"]
             events.append((e.get("registered_at") or "", "record" if e["kind"] == "record" else "reg", text,
                            PRODUCER_NAMES.get(who, e["producer"]), seq.get(("reg", e["id"]))))
@@ -960,14 +1026,14 @@ def _timeline(ws, task, page):
     for a in s["approvals"]:
         ref = a.get("ref")
         ref = " " + (_art(ws, page, ref) if ref in known else _e(ref)) if ref else ""
-        text = "%s%s%s" % (_e("批准 %s" % a.get("what")), ref, _e("（%s：“%s”）%s" % (
-            a.get("by"), a.get("quote"), "；用于 %s" % a["used_by"] if a.get("used_by") else "")))
-        events.append((a.get("at") or "", "approve", text, "审批", seq.get(("approve", a.get("what"), a.get("quote")))))
+        text = "%s%s%s" % (_e("Approved %s" % a.get("what")), ref, _e(" (%s: “%s”)%s" % (
+            a.get("by"), a.get("quote"), "; used by %s" % a["used_by"] if a.get("used_by") else "")))
+        events.append((a.get("at") or "", "approve", text, "approval", seq.get(("approve", a.get("what"), a.get("quote")))))
     events += _run_events(ws, evs)
     for n, r in _rounds(ws):
         d = r["decision"]
         if d is not None:
-            text = "第 %d 轮判定：%s（%s）" % (n, _verdict(d), d.get("reason") or "—")
+            text = "Round %d decided: %s (%s)" % (n, _verdict(d), D._clause(d.get("reason") or "—"))
             events.append((d.get("at") or "", "decide", _e(text)) + _decision_source(d, seq))
     stopped = s["stopped"]
     if stopped:
@@ -977,7 +1043,7 @@ def _timeline(ws, task, page):
             source = "rsi stop"
         else:  # the stop condition, found by the next step: rsi run's when its run log holds one
             source = "rsi run" if seq.get(("next",)) is not None else "rsi next"
-        events.append((stopped.get("at") or "", "stop", _e("运行停止：%s" % stopped.get("reason")), source,
+        events.append((stopped.get("at") or "", "stop", _e("Run stopped: %s" % stopped.get("reason")), source,
                        seq.get(("stop",)) or seq.get(("next",))))
     # By time, and within a second by the run log's order (events it does not record go after those it does).
     big = len(evs) + 1
@@ -992,25 +1058,25 @@ def _events_page(ws, task):
     items, day = [], None
     for at, cls, text, source, _seq in events[:EVENTS_SHOWN]:
         dt = _when(at)
-        date = dt.strftime("%Y-%m-%d") if dt else "时间不明"
+        date = dt.strftime("%Y-%m-%d") if dt else "time unknown"
         if date != day:
             items.append('<li class="day">%s</li>' % _e(date))
             day = date
         items.append('<li><span class="t">%s</span><span class="dot %s"></span><span>%s <span class="who">· %s</span>'
                      '</span></li>' % (_e(dt.strftime("%H:%M:%S") if dt else "—"), cls, text, _e(source)))
     note = "" if len(events) <= EVENTS_SHOWN else '<p class="sub">%s</p>' % _e(
-        "共 %d 条，只列最近的 %d 条。" % (len(events), EVENTS_SHOWN))
-    return '<section id="events" class="card"><h2>事件记录（新的在前）</h2><ul class="tl">%s</ul>%s</section>' % (
+        "%d events in all; only the latest %d are listed." % (len(events), EVENTS_SHOWN))
+    return '<section id="events" class="card"><h2>Events (newest first)</h2><ul class="tl">%s</ul>%s</section>' % (
         "".join(items), note)
 
 
 def _report_page(ws):
     path = os.path.join(ws.root, D.REPORT_FILE)
     if not os.path.isfile(path):
-        return '<section id="report" class="card"><p class="empty">还没有运行报告（停止时生成）。</p></section>'
+        return '<section id="report" class="card"><p class="empty">No run report yet (it is written at the stop).</p></section>'
     with open(path, encoding="utf-8", errors="replace") as f:
         text = f.read()
-    return ('<section id="report" class="card"><p class="sub">原文：<a href="%s">%s</a></p><div class="md">%s</div>'
+    return ('<section id="report" class="card"><p class="sub">Source: <a href="%s">%s</a></p><div class="md">%s</div>'
             '</section>' % (_e(_href(REPORT, D.REPORT_FILE)), _e(D.REPORT_FILE), to_html(text)))
 
 
@@ -1179,13 +1245,14 @@ if(n&&w.scrollWidth>w.clientWidth){var a=w.getBoundingClientRect(),b=n.getBoundi
 if(b.left<a.left||b.right>a.right){w.scrollLeft+=b.left-a.left-(a.width-b.width)/2;}}}catch(e){}
 function restore(){var y=get(key);if(y!==null){window.scrollTo(0,parseInt(y,10)||0);}}
 function save(){put(key,String(window.scrollY||window.pageYOffset||0));}
-function fmt(s){s=Math.max(0,Math.floor(s));if(s<60){return "不到 1 分钟";}
-if(s<3600){return Math.floor(s/60)+" 分钟";}
-if(s<86400){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h+" 小时"+(m?" "+m+" 分":"");}
-return Math.floor(s/86400)+" 天 "+Math.floor(s%86400/3600)+" 小时";}
+function pl(k,w){return k+" "+w+(k===1?"":"s");}
+function fmt(s){s=Math.max(0,Math.floor(s));if(s<60){return "under a minute";}
+if(s<3600){return pl(Math.floor(s/60),"minute");}
+if(s<86400){var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return pl(h,"hour")+(m?" "+pl(m,"minute"):"");}
+return pl(Math.floor(s/86400),"day")+" "+pl(Math.floor(s%86400/3600),"hour");}
 try{var ts=document.querySelectorAll("[data-start]");
 for(var j=0;j<ts.length;j++){var t=ts[j],b=Date.parse(t.getAttribute("data-start"));
-if(!isNaN(b)){t.textContent=(t.getAttribute("data-prefix")||"")+(t.getAttribute("data-approx")?"约 ":"")
+if(!isNaN(b)){t.textContent=(t.getAttribute("data-prefix")||"")+(t.getAttribute("data-approx")&&Date.now()-b>=60000?"about ":"")
 +fmt((Date.now()-b)/1000)+(t.getAttribute("data-suffix")||"");}}}catch(e){}
 restore();window.addEventListener("load",restore);
 window.addEventListener("scroll",save);window.addEventListener("pagehide",save);
@@ -1194,15 +1261,16 @@ window.addEventListener("scroll",save);window.addEventListener("pagehide",save);
 
 
 def _status_label(ws, questions):
-    """The top bar's status chip: the questions waiting for the user, the stop, "● 运行中" only while an `rsi run`
+    """The top bar's status chip: the questions waiting for the user, the stop, "● running" only while an `rsi run`
     works on the workspace (holds work/run.lock), else what the run waits for (rsi.dashboard.idle_label)."""
     s = ws.state
     if questions:  # once stopped only the notes can hold questions
-        return '<span class="chip ask">%s</span>' % ("⏸ 等你回答（已停止）" if s["stopped"] else "⏸ 等你回答")
+        return '<span class="chip ask">%s</span>' % ("⏸ waiting for the user (stopped)" if s["stopped"]
+                                                     else "⏸ waiting for the user")
     if s["stopped"]:
-        return '<span class="chip stop">■ 已停止</span>'
+        return '<span class="chip stop">■ stopped</span>'
     if D.run_active(ws):
-        return '<span class="chip run">● 运行中</span>'
+        return '<span class="chip run">● running</span>'
     return '<span class="chip idle">%s</span>' % _e(D.idle_label(ws))
 
 
@@ -1211,20 +1279,20 @@ def _frame(ws, page, title, body, now, questions, label):
     s = ws.state
     tabs = "".join('<a%s href="%s">%s</a>' % (' class="on"' if rel == page else "", _e(_href(page, rel)), _e(name))
                    for rel, name in TABS)
-    head = "%s%s · %s" % ("⏸ 需要你回答 · " if questions else "", title, s["task_id"])
+    head = "%s%s · %s" % ("⏸ Waiting for the user · " if questions else "", title, s["task_id"])
     return "".join([
-        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n",
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n",
         '<meta http-equiv="refresh" content="%d">\n' % D.REFRESH_SECONDS,
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n',
         "<title>%s</title>\n<style>%s</style>\n</head>\n<body>\n" % (_e(head), STYLE),
         '<header class="top"><div class="wrap"><div class="bar"><div class="title"><h1>%s</h1>'
         '<span class="ver">%s</span><span class="chip">%s</span>%s%s</div><div class="updated">%s</div></div>'
         '<nav class="tabs">%s</nav></div></header>\n'
-        % (_e(s["task_id"]), _e("v%d" % s["task_version"]), _e("第 %d 轮" % s["round"]), label, _elapsed_label(ws, now),
-           _e("更新于 %s · 每 %d 秒自动刷新" % (D._show(now), D.REFRESH_SECONDS)), tabs),
+        % (_e(s["task_id"]), _e("v%d" % s["task_version"]), _e("round %d" % s["round"]), label, _elapsed_label(ws, now),
+           _e("Updated %s · reloads every %s" % (D._show(now), plural(D.REFRESH_SECONDS, "second"))), tabs),
         '<main><div class="wrap">\n%s\n</div></main>\n' % body,
         "<footer><div class=\"wrap\">%s</div></footer>\n" % _e(
-            "由 rsi 生成 · 只读页面，回答和操作都在 Claude 里进行 · 工作区 %s" % ws.root),
+            "Generated by rsi · read-only page; answers and actions happen in Claude · workspace %s" % ws.root),
         "<script>%s</script>\n</body>\n</html>\n" % SCRIPT,
     ])
 
@@ -1236,9 +1304,9 @@ def render_pages(ws, now=None):
     task = ws.task()
     progress = D.module_progress(ws)
     questions = D.pending_questions(ws, progress)
-    bodies = ((OVERVIEW, "RSI 进度", _overview(ws, task, progress, questions, now)),
-              (ROUNDS, "轮次与产物", _rounds_page(ws, task, progress, now)),
-              (EVENTS, "事件记录", _events_page(ws, task)),
-              (REPORT, "运行报告", _report_page(ws)))
+    bodies = ((OVERVIEW, "RSI progress", _overview(ws, task, progress, questions, now)),
+              (ROUNDS, "Rounds & artifacts", _rounds_page(ws, task, progress, now)),
+              (EVENTS, "Events", _events_page(ws, task)),
+              (REPORT, "Run report", _report_page(ws)))
     label = _status_label(ws, questions)
     return dict((rel, _frame(ws, rel, title, body, now, questions, label)) for rel, title, body in bodies)

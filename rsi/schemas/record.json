@@ -4,7 +4,7 @@
                "automation", "artifacts"],
   "properties": {
     "kind": {"type": "string", "enum": ["record"]},
-    "module": {"type": "string", "enum": ["data", "train", "tune", "deliver", "judge", "orchestrator"]},
+    "module": {"type": "string", "enum": ["data", "train", "tune", "compare", "deliver", "judge", "orchestrator"]},
     "owner": {"type": "string", "minLength": 1},
     "failure": {"type": "string"},
     "hypothesis": {"type": "string"},

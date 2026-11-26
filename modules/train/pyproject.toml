@@ -1,7 +1,7 @@
 [project]
 name = "trsi"
-version = "1.4.3"
-description = "trsi: the training-tuning module's command line: search the training configuration of a OneJev decision model through onejev-harness (ojh) and pack each trial as a framework candidate."
+version = "1.5.0"
+description = "trsi: the train module's command line: search the training configuration of a OneJev decision model through onejev-harness (ojh) and pack each trial as a framework candidate."
 requires-python = ">=3.10"
 dependencies = ["pyyaml>=6"]
 

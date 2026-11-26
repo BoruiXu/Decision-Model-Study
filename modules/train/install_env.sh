@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install every library a training run needs into the onejev-harness (ojh) venv, then check the environment end to
 # end. Safe to rerun: on a ready machine it changes nothing. The train agent runs it, without asking, when a run
-# fails on a missing or incompatible library (SKILL.md, 常见错误).
+# fails on a missing or incompatible library (SKILL.md, "Common mistakes").
 #
 # Usage: install_env.sh --ojh <onejev-harness repo> --machine <machine.yaml> [--env-file <ojh-env.sh>]
 #                       [--cache-root DIR] [--check] [--no-gpu-test]
@@ -16,17 +16,21 @@
 #   1. base venv: <ojh>/setup.sh when <ojh>/.venv is missing. An existing venv is never rebuilt, and torch, triton,
 #      transformers and fla keep their versions: every install pins their installed versions too.
 #   2. pyyaml and pytest
-#   3. causal-conv1d 1.7.0: the release wheel for torch major.minor, CUDA major, C++ ABI and Python tag; a source
+#   3. numpy, scikit-learn, xgboost (the compare module and data generation): ../common/install_deps.sh with this
+#      venv, the protected versions and constraints.txt as constraints; not required (training does not need them,
+#      ③ Compare is a report): a failure only warns, but a protected version it moved fails
+#   4. causal-conv1d 1.7.0: the release wheel for torch major.minor, CUDA major, C++ ABI and Python tag; a source
 #      build when that fails and nvcc's CUDA major is torch's; else a warning (training then takes the slower path)
-#   4. tilelang 0.1.15 when a GPU has compute capability >= 9.0, and CUDA_HOME, PATH (nvcc's bin first) and
+#   5. tilelang 0.1.15 when a GPU has compute capability >= 9.0, and CUDA_HOME, PATH (nvcc's bin first) and
 #      TILELANG_CACHE_DIR in the machine config's env: written only after the GPU test passes with the new values,
 #      or, with a warning, when the test cannot run (--no-gpu-test, no usable GPU); backup machine.yaml.bak-<time>
 #      first; left alone when right
-#   5. checks: imports; a tiny forward + backward through fla's chunk_gated_delta_rule (joey-1's op) and
+#   6. checks: imports; a tiny forward + backward through fla's chunk_gated_delta_rule (joey-1's op) and
 #      causal_conv1d_fn on a free GPU, run with the machine config's env; ojh doctor --no-network
 # Installs use <ojh>/constraints.txt; uv (PATH, $OJH_TOOLS_DIR/uv/uv, <ojh>/.tools/uv/uv, <dir of machine.yaml>/
 # tools/uv/uv), else the venv's pip. Exit 0: every required item ok (--check: and nothing to do); 1: a required
-# item failed (--check: or something would be done); 2: usage. causal-conv1d and pytest are not required.
+# item failed (--check: or something would be done); 2: usage. causal-conv1d, pytest and step 3's libraries are not
+# required.
 set -uo pipefail
 
 CAUSAL_CONV1D_VERSION=1.7.0
@@ -127,7 +131,7 @@ say "  cache root  $CACHE_ROOT"
 say "  log         ${LOG:-(none with --check)}"
 
 # ---- 1. base venv ----
-say "[1/5] base venv ($OJH/.venv)"
+say "[1/6] base venv ($OJH/.venv)"
 if [ -x "$VENV_PY" ] && "$VENV_PY" -c 'import sys' >/dev/null 2>&1; then
   ok "venv exists ($("$VENV_PY" --version 2>&1)); never rebuilt here"
 elif [ -e "$OJH/.venv" ] || [ -L "$OJH/.venv" ]; then
@@ -191,11 +195,16 @@ install() {  # install <requirement or pip option>...; NO_REPO_CONSTRAINTS=1 lea
   say "  \$ ${INSTALL[*]} ${cons[*]} $*"
   "${INSTALL[@]}" "${cons[@]}" "$@" 2>&1 | sed 's/^/    | /'
   local rc=${PIPESTATUS[0]}
+  protected_kept "$*" || rc=1
+  return "$rc"
+}
+
+protected_kept() {  # protected_kept <what ran>: probe again; failed (status 1) for each protected version it moved
+  local d o before after rc=0
   run_helper "$VENV_PY" "$HELPER" probe || true
-  local d o before after
   for d in "${PROTECTED[@]}"; do
     o="ORIG_V_$(upname "$d")"; before="${!o:-}"; after="$(ver "$d")"
-    if [ "$before" != "$after" ]; then failed "$d changed from ${before:-none} to ${after:-none} by: $*"; rc=1; fi
+    if [ "$before" != "$after" ]; then failed "$d changed from ${before:-none} to ${after:-none} by: $1"; rc=1; fi
   done
   return "$rc"
 }
@@ -208,7 +217,7 @@ else
 fi
 
 # ---- 2. pyyaml, pytest ----
-say "[2/5] pyyaml, pytest"
+say "[2/6] pyyaml, pytest"
 for d in pyyaml pytest; do
   why="trsi needs it"; [ "$d" = pytest ] && why="trsi's tests need it"
   if [ -n "$(ver "$d")" ]; then ok "$d $(ver "$d")"; continue; fi
@@ -220,8 +229,38 @@ for d in pyyaml pytest; do
   else warn "pytest not installed (only trsi's tests need it)"; fi
 done
 
-# ---- 3. causal-conv1d ----
-say "[3/5] causal-conv1d $CAUSAL_CONV1D_VERSION"
+# ---- 3. the compare module's and data generation's libraries ----
+say "[3/6] numpy, scikit-learn, xgboost (the compare module and data generation; ../common/install_deps.sh)"
+DEPS="$(cd "$HERE/../common" 2>/dev/null && pwd)/install_deps.sh"
+DEPS_WHY="not required: training does not need them; ③ Compare and the data module's generation (dgen diagnose, smote, borderline, filter) fail without them"
+if [ ! -f "$DEPS" ]; then
+  warn "$DEPS not found: numpy, scikit-learn, xgboost not checked ($DEPS_WHY)"
+elif [ "$CHECK" = 1 ]; then
+  bash "$DEPS" --python "$VENV_PY" --check 2>&1 | indent
+  if [ "${PIPESTATUS[0]}" = 0 ]; then ok "numpy, scikit-learn, xgboost (install_deps.sh --check: nothing to do)"
+  else would "install modules/common/requirements.txt (install_deps.sh; $DEPS_WHY)"; fi
+else
+  deps_run() {  # deps_run <install_deps.sh options>...: its output indented; DEPS_OUT holds it; status its exit code
+    local f="$CACHE_ROOT/tmp/install_deps-$STAMP-$$.txt" rc
+    UV="$UV" bash "$DEPS" --python "$VENV_PY" "$@" 2>&1 | tee "$f" | indent
+    rc=${PIPESTATUS[0]}
+    DEPS_OUT="$(cat "$f")"; rm -f "$f"
+    return "$rc"
+  }
+  if [ -f "$OJH/constraints.txt" ]; then
+    deps_run --constraint "$PROTECT" --constraint "$OJH/constraints.txt" || { say "  again without constraints.txt"; deps_run --constraint "$PROTECT"; }
+  else
+    deps_run --constraint "$PROTECT"
+  fi
+  rc=$?
+  if ! protected_kept "install_deps.sh"; then :   # a moved torch & co. is failed, as for every install
+  elif [ "$rc" != 0 ]; then warn "numpy, scikit-learn, xgboost not installed (install_deps.sh exit $rc: $(printf '%s\n' "$DEPS_OUT" | grep -E '^  (missing|wrong|failed)' | sed 's/^  //' | paste -sd ';' -); $DEPS_WHY)"
+  elif printf '%s\n' "$DEPS_OUT" | grep -q '^result: ready'; then ok "numpy, scikit-learn, xgboost (install_deps.sh: nothing to do)"
+  else changed "installed modules/common/requirements.txt (install_deps.sh)"; fi
+fi
+
+# ---- 4. causal-conv1d ----
+say "[4/6] causal-conv1d $CAUSAL_CONV1D_VERSION"
 wheel_name() {  # the release wheel for this venv's torch, CUDA, C++ ABI, Python and platform
   local tmm cu
   [[ "${P_TORCH:-}" =~ ^([0-9]+)\.([0-9]+) ]] || return 1; tmm="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
@@ -270,8 +309,8 @@ else
   fi
 fi
 
-# ---- 4. tilelang on Hopper ----
-say "[4/5] tilelang $TILELANG_VERSION (needed on GPUs with compute capability >= $HOPPER_CAP)"
+# ---- 5. tilelang on Hopper ----
+say "[5/6] tilelang $TILELANG_VERSION (needed on GPUs with compute capability >= $HOPPER_CAP)"
 run_helper "$VENV_PY" "$HELPER" gpus --machine "$MACHINE" || true
 CVD="${CUDA_VISIBLE_DEVICES-}"
 GPU_DESC="CUDA_VISIBLE_DEVICES=$CVD (set by the caller)"
@@ -354,8 +393,8 @@ if [ "$NEED_TILELANG" = 1 ]; then
   esac
 fi
 
-# ---- 5. checks ----
-say "[5/5] checks"
+# ---- 6. checks ----
+say "[6/6] checks"
 names=torch,transformers,fla,causal_conv1d,yaml
 [ "$NEED_TILELANG" = 0 ] || names="$names,tilelang"
 run_helper with_gpu "$VENV_PY" "$HELPER" run-env --machine "$MACHINE" -- "$VENV_PY" "$HELPER" imports --names "$names" || true

@@ -1,88 +1,94 @@
-# 评测与计划类产物：evaluation、plan
+# Evaluation and plan artifacts: evaluation, plan
 
-两类产物由 judge 产出，目录里有 `manifest.json`，公共字段见 README.md。校验由 `rsi/artifacts.py` 的 `validate_artifact` 完成（额外字段之外不允许出现未列出的字段）。id 只检查是字符串，是否已登记、是否与 STATE 一致、评测集使用次数，在登记时核对。「主指标」指任务定义里的 `metrics.primary`。
+Both kinds are produced by judge, and their directories hold a `manifest.json` with the common fields of README.md. Validation is done by `validate_artifact` in `rsi/artifacts.py`: the manifest is checked against the common fields plus the kind's extra fields (no fields that are not listed). Ids are only checked to be strings; whether they are registered, whether they agree with STATE, and the evalset's use count are checked at registration. "Primary metric" means `metrics.primary` in the task definition.
 
-## 归因与模块对应
+## Attributions and modules
 
-`failures` 和 `issues` 里每一项都写一个归因和一个模块，两者必须按下表对应（`rsi/rules.py` 的 `MODULE_OF`，由 `check_attribution` 检查）。归因不在表中也报错。
+Every item in `failures` and `issues` gives one attribution and one module, which must match by the table below (`MODULE_OF` in `rsi/rules.py`, checked by `check_attribution`). An attribution not in the table is an error too.
 
-| 归因 | 模块 | 含义 |
+| Attribution | Module | Meaning |
 |---|---|---|
-| `data_coverage` | `data` | 训练数据没覆盖到出错的输入 |
-| `label_noise` | `data` | 标签本身有噪声 |
-| `label_definition` | `data` | 标签定义不合适或有歧义 |
-| `model_capacity` | `train` | 模型能力不足 |
-| `calibration` | `train` | 概率没有校准 |
-| `config` | `train` | 超参数或训练配置不合适 |
-| `runtime` | `deliver` | 交付包运行时的问题（延迟、成本、与离线不一致） |
+| `data_coverage` | `data` | The training data does not cover the inputs that go wrong |
+| `label_noise` | `data` | The labels themselves are noisy |
+| `label_definition` | `data` | The label definition is unsuitable or ambiguous |
+| `model_capacity` | `train` | The model lacks capacity |
+| `calibration` | `train` | The probabilities are not calibrated |
+| `config` | `train` | Hyperparameters or the training config are unsuitable |
+| `runtime` | `deliver` | Problems of the delivery package at runtime (latency, cost, disagreement with offline) |
 
 ## `evaluation`
 
-对一个交付做评测，并给出是否升级的建议。额外字段：
+Evaluates one delivery and recommends whether to promote. Extra fields:
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `kind` | 固定 `"evaluation"` | 产物类别 |
-| `delivery_id` | string | 被评测的 delivery |
-| `candidate_id` | string | 被评测的候选 |
-| `evalset_id` | string | 使用的评测集 |
-| `best_before` | null 或 object | 当前最佳版本，`{"version", "evaluation_id"}`；还没有最佳版本时为 null |
-| `metrics` | object | `candidate`（指标 → 数值）、`best`（null 或指标 → 数值）、`baselines`（基线名 → 指标） |
-| `deltas` | object | 指标 → `{"delta", "ci_low", "ci_high"}`，候选相对当前最佳的差值和置信区间 |
-| `recommendation` | object | `decision`（`promote` 或 `keep`）、`reason` |
-| `failures` | 列表 | 每项 `issue`、`evidence`、`attribution`、`module` |
-| `uses_testset` | bool | 这次评测是否用了封存 test；为 true 时是里程碑评测，见下 |
-| `metrics_test` | object，仅里程碑评测 | 指标名 → number，封存 test 上的成绩；`uses_testset` 为 true 时必填且含主指标，为 false 时不允许出现 |
+| `kind` | always `"evaluation"` | Artifact kind |
+| `delivery_id` | string | The delivery evaluated |
+| `candidate_id` | string | The candidate evaluated |
+| `evalset_id` | string | The evalset used |
+| `best_before` | null or object | The current best version, `{"version", "evaluation_id"}`; null while there is no best version |
+| `metrics` | object | `candidate` (metric → value), `best` (null or metric → value), `baselines` (baseline name → metrics) |
+| `deltas` | object | metric → `{"delta", "ci_low", "ci_high"}`, the candidate's difference from the current best and its confidence interval |
+| `recommendation` | object | `decision` (`promote` or `keep`), `reason` |
+| `failures` | list | Each item `issue`, `evidence`, `attribution`, `module` |
+| `uses_testset` | bool | Whether this evaluation used the sealed testset; true means a milestone evaluation, see below |
+| `metrics_test` | object, milestone evaluations only | metric name → number, the results on the sealed testset; required and holding the primary metric when `uses_testset` is true, not allowed when it is false |
+| `baselines_eval` | object, optional; not in a milestone evaluation | ③ Compare's baselines on the evalset (report only, never read by the promotion rule): baseline id → `{"name", "metrics", "delta"}`, `name` the baseline's name, `metrics` (metric name → number, holding the primary metric) its `predictions_eval` against the evalset labels, `delta` `{"metric", "delta", "ci_low", "ci_high"}` the primary metric of the delivery's `predictions_eval` minus the baseline's, with its interval; required to cover the round's comparison, see below |
+| `baselines_test` | object, milestone evaluations only, optional | The same shape on the sealed testset: the milestone baselines' `predictions_test` against the testset labels, and the milestone delivery's `predictions_test` minus each one's |
 
-必备文件：`report`（人读的评测报告）。目录内检查：
+Required file: `report` (the evaluation report for people). Checks inside the directory:
 
-- `metrics.candidate` 含主指标。
-- `best_before` 非 null 时（有当前最佳版本），`metrics.best` 非 null 且含主指标，`deltas` 含主指标；缺了就拒绝，升级规则不会因为缺数而悄悄得出 keep。
-- `uses_testset` 为 true 时有 `metrics_test` 且含主指标；为 false 时没有 `metrics_test`。
-- 每个 failure 的 `attribution` 与 `module` 一致。
+- `metrics.candidate` holds the primary metric.
+- When `best_before` is not null (there is a current best version), `metrics.best` is not null and holds the primary metric, and `deltas` holds the primary metric; missing ones are refused, so the promotion rule never quietly arrives at keep for want of numbers.
+- When `uses_testset` is true, there is a `metrics_test` holding the primary metric; when it is false, there is no `metrics_test`.
+- `baselines_eval` only when `uses_testset` is false, `baselines_test` only when it is true; in each entry `metrics` holds the primary metric and `delta.metric` is the primary metric.
+- Each failure's `attribution` matches its `module`.
 
-**登记时重算。** 指标、对照组、差值和区间的定义见 task.md 的「指标的定义」。judge 用 `rsi score` 算出这些数，原样写进 manifest：
+**Recomputed at registration.** The definitions of metrics, baselines, deltas and intervals are in "Metric definitions" of task.md. judge computes these numbers with `rsi score` and writes them into the manifest as they are:
 
-- `metrics.candidate`、`metrics.baselines`、`deltas[主指标]`：`rsi score --task <task.json> --labels <evalset>/labels.jsonl --predictions <delivery>/predictions_eval.jsonl --train <trainset>/rows.jsonl --clusters <evalset>/inputs.jsonl --compare <best-delivery>/predictions_eval.jsonl`，打印的 `metrics`、`baselines`、`delta` 分别对应这三处（`<trainset>` 是被评测候选的 `trainset_id` 所指的训练集；没有最佳版本时不加 `--compare`）。
-- `metrics.best`：同样的命令，`--predictions` 换成最佳版本的 `predictions_eval.jsonl`。
+- `metrics.candidate`, `metrics.baselines`, `deltas[primary metric]`: `rsi score --task <task.json> --labels <evalset>/labels.jsonl --predictions <delivery>/predictions_eval.jsonl --train <trainset>/rows.jsonl --clusters <evalset>/inputs.jsonl --compare <best-delivery>/predictions_eval.jsonl`, whose printed `metrics`, `baselines` and `delta` go into these three places (`<trainset>` is the trainset named by the evaluated candidate's `trainset_id`; without a best version, leave out `--compare`).
+- `metrics.best`: the same command with `--predictions` replaced by the best version's `predictions_eval.jsonl`.
 
-登记时代码按同样的定义重算下面几项，差超过 1e-9 就拒绝，错误信息给出字段、报告值、重算值和该用的 `rsi score` 命令：
+At registration the code recomputes the items below by the same definitions and refuses a difference over 1e-9, the error giving the field, the reported value, the recomputed value and the `rsi score` command to use:
 
-- `metrics.candidate` 里每个已知指标：`delivery_id` 的 `predictions_eval` 对 `evalset_id` 的标签。
-- `metrics.baselines` 里每个已知基线的每个已知指标：基线用被评测候选的 `trainset_id` 所指训练集的行算，分组取自评测集的 `inputs.jsonl`。
-- `best_before` 非 null 时，`metrics.best` 里每个已知指标，以及 `deltas[主指标]` 的 `delta`、`ci_low`、`ci_high`（任务的 `metrics.ci` 设置，簇取自评测集的 `inputs.jsonl`）。最佳版本一侧的预测是：最佳版本自己的 delivery，当它的 `evalset_id` 与这份评测相同；否则是这份评测 `parents` 里列出的、候选是最佳版本的候选、评测集是当前评测集的 delivery。两者都没有时拒绝登记，要先把最佳版本在当前评测集上打包交付（见下）。
+- Each known metric in `metrics.candidate`: the `predictions_eval` of `delivery_id` against the labels of `evalset_id`.
+- Each known metric of each known baseline in `metrics.baselines`: the baseline computed with the rows of the trainset named by the evaluated candidate's `trainset_id`, the groups taken from the evalset's `inputs.jsonl`.
+- When `best_before` is not null, each known metric in `metrics.best`, and the `delta`, `ci_low` and `ci_high` of `deltas[primary metric]` (with the task's `metrics.ci` settings, the clusters taken from the evalset's `inputs.jsonl`). The predictions on the best version's side are: the best version's own delivery, when its `evalset_id` is the same as this evaluation's; otherwise the delivery listed in this evaluation's `parents` whose candidate is the best version's candidate and whose evalset is the current evalset. Without either, registration refuses, and the best version must first be packaged and delivered on the current evalset (see below).
 
-`deltas` 里主指标以外的项、`failures`、报告文件不核对。不认识的指标名和基线名跳过，`rsi register` 在输出行末尾加 `(not verified: <名字>)`；主指标是未知指标时 `deltas` 不核对。
+**③ Compare's baselines on the evalset** (`baselines_eval`). When this round holds a `comparison` of the evaluated candidate whose `evalset_id` equals the evaluation's (the latest one, when there are several: `rsi.workspace.latest_comparison`), each baseline it lists must be a key of `baselines_eval`; a missing one is refused with `baselines_eval: missing <id> (<name>)`, and a key that is not a baseline of that comparison is refused (without such a comparison, any key is). The judge's brief gives each of them as `baseline_eval_<id>` (the baseline directory), and the comparison as `comparison`. The judge does not assemble the numbers: `rsi score --task <task.json> --labels <evalset>/labels.jsonl --predictions <delivery>/predictions_eval.jsonl --clusters <evalset>/inputs.jsonl --baselines-on evalset --baseline <baseline dir>` (one `--baseline` per baseline) prints the whole `baselines_eval` object, which goes into the evaluation as it is. Registration recomputes each entry by the same definitions (the `rsi.metrics.score` and `rsi.metrics.baseline_delta` that `rsi.metrics.baselines_scored` assembles for `rsi score`): `name` must be the baseline's; each known metric in `metrics` from the baseline's `predictions_eval` against the evalset labels; `delta`'s `delta`, `ci_low` and `ci_high` the paired cluster bootstrap of the primary metric, the delivery's `predictions_eval` minus the baseline's, clusters from the evalset's `inputs.jsonl`, the task's `metrics.ci` settings (`rsi.metrics.baseline_delta`, as a comparison's `deltas_val`). A mismatch is refused with that command. These numbers are a report: no gate and no promotion decision reads them. When the primary metric is one `rsi` does not compute, `rsi score --baselines-on` refuses and the judge computes the entries itself (said in the report; registration checks the known metrics only); when it is undefined on the set (e.g. `auc` on labels of one class), neither the candidate's metrics nor any delta can be computed, so the whole evaluation fails as it would without ③, the judge hands back `failed` naming the cause, and the evalset needs a refresh.
 
-登记时另外核对：`recommendation.decision` 必须等于升级规则（`rsi/rules.py` 的 `decide_promotion`，见 task.md 的 `promotion_rule`）对这份评测得出的结论，不一致就拒绝登记，错误信息给出规则的结论和理由。规则读的数就是上面核对过的数，所以升级判定建立在代码核对过的数上。每登记一份（里程碑评测除外），当前评测集的使用次数 `eval_use_count` 加 1；已到 `eval_use_limit` 时拒绝登记，要先刷新评测集。
+Items of `deltas` other than the primary metric, `failures` and the report file are not checked. Unknown metric and baseline names are skipped, and `rsi register` appends `(not verified: <names>)` to its output line; when the primary metric is an unknown metric, `deltas` is not checked.
 
-评测集刷新后，最佳版本原来那份 evaluation 和 delivery 都在旧评测集上。在新评测集上评测时，`best_before` 仍写最佳版本和它原来的 evaluation；`metrics.best` 和 `deltas` 用最佳版本的候选在当前评测集上的新 delivery 算，并把这份 delivery 的 id 写进公共字段 `parents`，登记时据此核对（没有这份 delivery 就拒绝登记）。已知限制：停止条件的 `target` 仍按最佳版本原来那份 evaluation 的主指标判断（旧评测集上的成绩）；按评测集分别记录成绩留待以后。
+Registration also checks: `recommendation.decision` must equal what the promotion rule (`decide_promotion` in `rsi/rules.py`, see `promotion_rule` in task.md) concludes for this evaluation, and a mismatch is refused, the error giving the rule's conclusion and reason. The numbers the rule reads are those checked above, so promotion decisions rest on numbers the code has checked. Each registration (except a milestone evaluation) adds 1 to the current evalset's use count `eval_use_count`; at `eval_use_limit` registration refuses, and the evalset must be refreshed first.
 
-### 里程碑评测
+After an evalset refresh, the best version's original evaluation and delivery are both on the old evalset. When evaluating on the new evalset, `best_before` still gives the best version and its original evaluation; `metrics.best` and `deltas` are computed with a new delivery of the best version's candidate on the current evalset, whose id goes into the common field `parents`, by which registration checks them (without such a delivery, registration refuses). Known limitation: the stop condition's `target` is still judged by the primary metric of the best version's original evaluation (its result on the old evalset); recording results per evalset is left for later.
 
-`uses_testset` 为 true 的 evaluation 是里程碑评测：运行将要停止时，用封存 test 验证当前最佳版本，它不做升级判定。登记时核对：
+### Milestone evaluation
 
-- 当前已有最佳版本，`candidate_id` 是当前最佳版本的候选，`best_before` 写当前最佳版本。
-- `delivery_id` 所指的 delivery 有 `predictions_test`；本轮有一次未用过的 `use_testset` 审批（deliver 跑 test 预测那次审批已被那份 delivery 用掉，这里要另一次）。
-- `recommendation.decision` 必须是 `keep`，不按升级规则核对。
-- `metrics_test` 里每个已知指标按 task.md 的「指标的定义」重算：这份 delivery 的 `predictions_test` 对它的 `testset_id` 的标签，用 `rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl` 算；不一致就拒绝登记。里程碑评测的 `metrics`、`deltas` 不核对。
-- 不检查、也不增加评测集使用次数。
+An evaluation with `uses_testset` true is a milestone evaluation: as the run is about to stop, it checks the current best version on the sealed testset, and it makes no promotion decision. Registration checks:
 
-`metrics`、`deltas`、`recommendation` 仍按评测集写（候选就是最佳版本，差值通常为 0），test 上的成绩只写在 `metrics_test`。`rsi promote` 拒绝里程碑评测（milestone evaluations are not promotion decisions）；`rsi next` 检查本轮有没有未判定的评测时不算它。judge 不为它写 `plan`。
+- There is a current best version, `candidate_id` is the current best version's candidate, and `best_before` gives the current best version.
+- The delivery `delivery_id` names has `predictions_test`; this round has a `use_testset` approval not yet used (the approval of deliver's run on the testset was used by that delivery, so another one is needed here).
+- `recommendation.decision` must be `keep`, and is not checked against the promotion rule.
+- Each known metric in `metrics_test` is recomputed by "Metric definitions" in task.md: this delivery's `predictions_test` against the labels of its `testset_id`, computed with `rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl`; a mismatch is refused. The `metrics` and `deltas` of a milestone evaluation are not checked.
+- ③ Compare's baselines on the testset (`baselines_test`): each baseline with `predictions_test` registered in this round (`rsi.workspace.milestone_baselines`: the milestone's compare step scored the baselines of the best version's comparison on the testset inputs) must be a key (`baselines_test: missing <id> (<name>)`), and no other key is allowed. The milestone judge's brief gives each as `baseline_test_<id>`, and `rsi score --task <task.json> --labels <testset>/labels.jsonl --predictions <delivery>/predictions_test.jsonl --clusters <testset>/inputs.jsonl --baselines-on testset --baseline <baseline dir>` (one `--baseline` per baseline) prints the whole `baselines_test` object; registration recomputes it the same way on the testset (each baseline's `predictions_test` against the labels of the delivery's `testset_id`, the milestone delivery's `predictions_test` minus it, clusters from the testset's `inputs.jsonl`). A milestone evaluation has no `baselines_eval` (the round's evaluation reports them on the evalset). Report only.
+- The evalset's use count is neither checked nor increased.
+
+`metrics`, `deltas` and `recommendation` are still written on the evalset (the candidate is the best version, so the delta is usually 0), and the results on the testset go only into `metrics_test`. `rsi promote` refuses a milestone evaluation (milestone evaluations are not promotion decisions); `rsi next` does not count it when checking whether this round has an evaluation without a decision. judge writes no `plan` for it.
 
 ## `plan`
 
-根据评测结果给出下一轮计划。额外字段：
+The next round's plan, from the evaluation's results. Extra fields:
 
-| 字段 | 类型 | 说明 |
+| Field | Type | Description |
 |---|---|---|
-| `kind` | 固定 `"plan"` | 产物类别 |
-| `evaluation_id` | string 或 null | 计划所依据的 evaluation；只有本轮由 `rsi close-round` 关闭时可以为 null |
-| `issues` | 列表 | 每项 `issue`、`evidence`、`attribution`、`module`、`change`、`expected` |
-| `entry_module` | 枚举 `data`、`train`、`deliver`（旧计划里的 `tune` 照常读，等同 `train`） | 下一轮从哪个模块进入 |
+| `kind` | always `"plan"` | Artifact kind |
+| `evaluation_id` | string or null | The evaluation the plan rests on; may be null only when this round was closed by `rsi close-round` |
+| `issues` | list | Each item `issue`, `evidence`, `attribution`, `module`, `change`, `expected` |
+| `entry_module` | enum `data`, `train`, `deliver` (an old plan's `tune` is read as usual, the same as `train`) | The module the next round enters at |
 
-`expected` 的子字段：`metric`（预期改善的指标）、`direction`（`up` 或 `down`）、`size`（预期幅度，number）。
+The sub-fields of `expected`: `metric` (the metric expected to improve), `direction` (`up` or `down`), `size` (the expected size, a number).
 
-无必备文件。目录内检查：每个 issue 的归因与模块一致；`entry_module` 必须是 `issues` 中出现的某个模块。
+No required files. Checks inside the directory: each issue's attribution matches its module; `entry_module` must be one of the modules that appear in `issues`.
 
-登记时另外核对 `evaluation_id`：非 null 时必须是已登记的 evaluation；为 null 时，本轮必须是由 `rsi close-round` 关闭的（没有可评测的候选，本轮判定的 `evaluation_id` 为 null），否则拒绝。关闭的轮次没有 evaluation，judge 根据本轮的候选（例如训练门没过的原因）、search 和实验记录写计划，格式不变。
+Registration also checks `evaluation_id`: when not null, it must be a registered evaluation; when null, this round must have been closed by `rsi close-round` (no candidate to evaluate, the round's decision having a null `evaluation_id`), otherwise it is refused. A closed round has no evaluation, and judge writes the plan from this round's candidates (e.g. why they failed the train gate), searches and experiment records, in the same format.

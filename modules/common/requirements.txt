@@ -1,0 +1,13 @@
+# The libraries modules/compare and modules/data/dgen import beyond the standard library. install_deps.sh installs
+# them into the environment of a given Python (the onejev-harness venv, Python 3.11) and checks each one.
+# - numpy: a range: numpy stays as installed (the venv's, torch's) unless a pinned package needs a newer one;
+# - scikit-learn: the version onejev-harness itself pins;
+# - xgboost: 3.2.0, the last release for Python 3.11 (3.3 and later need 3.12). On Linux it requires
+#   nvidia-nccl-cu12 without a version, which torch's CUDA build already brings;
+# - pyyaml: for trsi (modules/train), whose card choice and model.predict code compare's GPU baselines use; a lower
+#   bound, as modules/train/pyproject.toml has it (onejev-harness depends on pyyaml without a version, so its venv
+#   has it already).
+numpy>=1.24.1,<3
+scikit-learn==1.9.1
+xgboost==3.2.0
+pyyaml>=6

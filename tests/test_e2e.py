@@ -182,12 +182,12 @@ class Walk(unittest.TestCase):
         self.assertIn(out, self.ok(run_rsi("report", self.ws, "--out", out)))
         with open(out, encoding="utf-8") as f:
             report = f.read()
-        head = report[:report.index("## 任务")]
-        self.assertIn("没有产生可发布的版本", head)
+        head = report[:report.index("## Task")]
+        self.assertIn("No releasable version was produced", head)
         for rnd in (1, 2, 3):
-            self.assertIn("- 第 %d 轮：keep，closed without evaluation: no candidate passed the train gate" % rnd,
+            self.assertIn("- Round %d: keep; closed without evaluation: no candidate passed the train gate" % rnd,
                           head)
-        self.assertIn("当前最佳：无", report)
+        self.assertIn("Current best: none", report)
         self.assertIn("3 rounds in a row without promotion reached patience 3", report)
 
     def test_promote_without_evaluation_refused(self):

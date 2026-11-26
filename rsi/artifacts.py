@@ -7,6 +7,7 @@ import re
 from rsi import datasplit as DS
 from rsi import rows as R
 from rsi import space as S
+from rsi import variants as V
 from rsi.rules import EPS, check_attribution, is_number
 from rsi.schema import load_schema, validate
 
@@ -21,6 +22,8 @@ ARTIFACT_FILES = {
     "pool": ["rows"],
     "candidate": ["predictions_val"],
     "search": [],
+    "baseline": ["predictions_val", "predictions_eval"],
+    "comparison": ["report"],
     "delivery": ["predictions_eval", "predictions_val"],
     "feedback": ["trace"],
     "evaluation": ["report"],
@@ -168,7 +171,11 @@ def _check_full(kind):
             full = _read(path, manifest, "rows")
             if not full:
                 return [_empty_error(kind, manifest, "rows")]
-            errors = R.check_full_rows(full, task) + _test_split_errors(full)
+            # Only a trainset holds prompt-variant rows, checked against their seeds and the specs it lists.
+            variants = (manifest.get("prompt_variants") or []) if kind == "trainset" else None
+            errors = R.check_full_rows(full, task, variants) + _test_split_errors(full)
+            if kind == "trainset":
+                errors += V.check_variant_rows(full, variants, task)
             if kind == "valset":
                 errors += _inputs_match_rows(_read(path, manifest, "inputs"), full, task)
         except (ValueError, OSError) as e:
@@ -291,19 +298,19 @@ def _trace_errors(path, manifest, task, logical="trace"):
         return [str(e)]
 
 
-def _predict_errors(path, manifest):
-    """model.predict: an executable file inside the candidate directory, called as
-    `<candidate dir>/<model.predict> --inputs <inputs.jsonl> --out <predictions.jsonl>`."""
+def _predict_errors(path, manifest, kind="candidate"):
+    """model.predict: an executable file inside the `kind` (candidate or baseline) directory, called as
+    `<dir>/<model.predict> --inputs <inputs.jsonl> --out <predictions.jsonl>`."""
     rel = manifest["model"]["predict"]
     fp, err = _confined(path, rel, "model.predict")
     if err:
-        return [err + " (the prediction entry lives in the candidate directory and loads files elsewhere "
-                      "only through `external` entries)"]
+        return [err + " (the prediction entry lives in the %s directory and loads files elsewhere "
+                      "only through `external` entries)" % kind]
     if not os.path.isfile(fp):
-        return ["model.predict: %s not found in the candidate directory" % rel]
+        return ["model.predict: %s not found in the %s directory" % (rel, kind)]
     if not os.access(fp, os.X_OK):
-        return ["model.predict: %s is not executable (callers run `<candidate dir>/%s --inputs <inputs.jsonl> "
-                "--out <predictions.jsonl>`; chmod +x it)" % (rel, rel)]
+        return ["model.predict: %s is not executable (callers run `<%s dir>/%s --inputs <inputs.jsonl> "
+                "--out <predictions.jsonl>`; chmod +x it)" % (rel, kind, rel)]
     return []
 
 
@@ -420,6 +427,75 @@ def _tune_gate_errors(manifest, task, ok):
     return errors
 
 
+# The key of the candidate's metrics in a comparison's metrics_val; every other key is a baseline name.
+CANDIDATE_KEY = "candidate"
+
+
+def _check_baseline(path, manifest, task):
+    """A baseline of ③ Compare: valid prediction rows, metrics_val holding the primary metric, model.predict (when
+    given) an executable in the directory, and testset_id set exactly when predictions_test is there (a milestone
+    baseline). Whether the ids cover the sets is checked at registration."""
+    errors = _required_files("baseline", manifest)
+    if errors:
+        return errors
+    primary = task["metrics"]["primary"]
+    if primary not in manifest["metrics_val"]:
+        errors.append("metrics_val: missing primary metric '%s'" % primary)
+    if "model" in manifest:
+        errors += _predict_errors(path, manifest, "baseline")
+    test = "predictions_test" in manifest["files"]
+    if test and manifest["testset_id"] is None:
+        errors.append("testset_id: null, but predictions_test is there: a baseline with test predictions names the "
+                      "testset whose inputs they are on")
+    elif not test and manifest["testset_id"] is not None:
+        errors.append("testset_id: %s, but there is no predictions_test: testset_id is set exactly when "
+                      "predictions_test is there" % manifest["testset_id"])
+    for logical in ("predictions_val", "predictions_eval", "predictions_test"):
+        if logical in manifest["files"]:
+            errors += _pred_errors(path, manifest, task, logical)
+    return errors
+
+
+def _check_comparison(path, manifest, task):
+    """A comparison of ③ Compare: metrics_val holds the candidate (with the primary metric) and each name in
+    baselines, deltas_val only names in baselines, each delta of the primary metric, no name is both in baselines and
+    in skipped, and strongest is a name in baselines (null exactly when there is none). Its numbers are recomputed at
+    registration."""
+    errors = _required_files("comparison", manifest)
+    if errors:
+        return errors
+    primary = task["metrics"]["primary"]
+    names = sorted(manifest["baselines"])
+    metrics = manifest["metrics_val"]
+    if CANDIDATE_KEY in manifest["baselines"]:
+        errors.append("baselines: no baseline may be named %s (metrics_val.%s holds the candidate's metrics)"
+                      % (CANDIDATE_KEY, CANDIDATE_KEY))
+    if primary not in metrics[CANDIDATE_KEY]:
+        errors.append("metrics_val.%s: missing primary metric '%s'" % (CANDIDATE_KEY, primary))
+    for name in names:
+        if name not in metrics:
+            errors.append("metrics_val: missing baseline '%s' (metrics_val holds the candidate and each name in "
+                          "baselines)" % name)
+    for name in sorted(set(metrics) - set(names) - set([CANDIDATE_KEY])):
+        errors.append("metrics_val.%s: not a name in baselines (%s)" % (name, ", ".join(names) or "none"))
+    for name, d in sorted(manifest["deltas_val"].items()):
+        if name not in manifest["baselines"]:
+            errors.append("deltas_val.%s: not a name in baselines (%s)" % (name, ", ".join(names) or "none"))
+        if d["metric"] != primary:
+            errors.append("deltas_val.%s.metric is %r but the primary metric is %r: the deltas are of the primary "
+                          "metric" % (name, d["metric"], primary))
+    for name in sorted(set(names) & set(manifest["skipped"])):
+        errors.append("skipped.%s: also in baselines: a baseline is either compared or skipped" % name)
+    strongest = manifest["strongest"]
+    if strongest is None and names:
+        errors.append("strongest: null, but baselines names %s: strongest is the baseline with the best %s on the "
+                      "valset" % (", ".join(names), primary))
+    elif strongest is not None and strongest not in manifest["baselines"]:
+        errors.append("strongest: %r is not a name in baselines (%s; null when there is none)"
+                      % (strongest, ", ".join(names) or "none"))
+    return errors
+
+
 EXTERNAL_PREFIX = "external:"
 
 
@@ -494,8 +570,29 @@ def _check_evaluation(path, manifest, task):
             errors.append("metrics_test: missing primary metric '%s'" % primary)
     elif "metrics_test" in manifest:
         errors.append("metrics_test: only allowed when uses_testset is true")
+    errors += _baselines_scored_errors(manifest, primary)
     for i, f in enumerate(manifest["failures"]):
         errors += ["failures[%d]: %s" % (i, e) for e in check_attribution(f["attribution"], f["module"])]
+    return errors
+
+
+def _baselines_scored_errors(manifest, primary):
+    """③ Compare's baselines in an evaluation: baselines_eval (on the evalset) only in an evaluation that is no
+    milestone, baselines_test (on the testset) only in a milestone evaluation (uses_testset); each entry's metrics hold
+    the primary metric and its delta is of the primary metric. Which baselines and their numbers: registration."""
+    errors = []
+    field, other = ("baselines_test", "baselines_eval") if manifest["uses_testset"] else \
+        ("baselines_eval", "baselines_test")
+    if other in manifest:
+        errors.append("%s: only allowed when uses_testset is %s (a milestone evaluation reports the baselines on the "
+                      "testset in baselines_test, the round's evaluation on the evalset in baselines_eval)"
+                      % (other, "true" if other == "baselines_test" else "false"))
+    for bid, b in sorted((manifest.get(field) or {}).items()):
+        if primary not in b["metrics"]:
+            errors.append("%s.%s.metrics: missing primary metric '%s'" % (field, bid, primary))
+        if b["delta"]["metric"] != primary:
+            errors.append("%s.%s.delta.metric is %r but the primary metric is %r: the delta is of the primary metric"
+                          % (field, bid, b["delta"]["metric"], primary))
     return errors
 
 
@@ -517,6 +614,8 @@ KIND_CHECKS = {
     "pool": _check_full("pool"),
     "candidate": _check_candidate,
     "search": _check_search,
+    "baseline": _check_baseline,
+    "comparison": _check_comparison,
     "delivery": _check_delivery,
     "feedback": _check_feedback,
     "evaluation": _check_evaluation,

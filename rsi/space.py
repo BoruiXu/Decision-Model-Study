@@ -1,6 +1,6 @@
 """The task's search space and a candidate's config_request (stdlib only).
 
-A task's `search_space` maps configuration paths to what the training-tuning module may try. Its keys are
+A task's `search_space` maps configuration paths to what the train module may try. Its keys are
 base, recipe, seed, max_steps, overrides.onejev.<flag> and overrides.lora.<field>; each value is exactly one of
 
   - a non-empty list of allowed values;
@@ -73,7 +73,7 @@ def check_space(space, where="$.search_space"):
                 errors.append("%s.dead: expected {value: reason}" % at)
         elif _range(value) and key in LISTED_PATHS:
             errors.append("%s: %s takes a non-empty list of allowed values or {\"values\", \"dead\"}, not a range "
-                          "{\"min\", \"max\"} (the training-tuning module tries each value)" % (at, key))
+                          "{\"min\", \"max\"} (the train module tries each value)" % (at, key))
         elif _range(value):
             if not (is_number(value["min"]) and is_number(value["max"])):
                 errors.append("%s: min and max must be numbers" % at)

@@ -56,7 +56,7 @@ class TestSnapshot(unittest.TestCase):
 
         snap = snapshot(run=hangs, which=SMI)
         self.assertEqual(snap["status"], "error")
-        self.assertIn("超时", snap["error"])
+        self.assertIn("timed out", snap["error"])
         snap = snapshot(run=lambda args, **kw: subprocess.CompletedProcess(args, 9, "", "NVML: driver not loaded\n"),
                         which=SMI)
         self.assertEqual(snap["status"], "error")
@@ -101,10 +101,10 @@ class TestSnapshot(unittest.TestCase):
         snap = snapshot(run=run, which=SMI)
         self.assertLess(time.monotonic() - start, 3)
         self.assertEqual((snap["status"], killed, waits), ("error", ["/usr/bin/nvidia-smi"], [SMI_TIMEOUT_S, 1]))
-        self.assertIn("超时", snap["error"])
+        self.assertIn("timed out", snap["error"])
         snap = snapshot(run=run, which=SMI)  # the first one still runs: no new one
         self.assertEqual((snap["status"], len(started)), ("error", 1))
-        self.assertIn("上一次 nvidia-smi 仍未结束", snap["error"])
+        self.assertIn("the previous nvidia-smi has not ended", snap["error"])
         started[0].ended = True  # once it has ended, the next snapshot runs nvidia-smi again
         snapshot(run=run, which=SMI)
         self.assertEqual(len(started), 2)
@@ -119,7 +119,7 @@ class TestSnapshot(unittest.TestCase):
             with open(path, "w") as f:
                 f.write("{half")
             self.assertIsNone(read_snapshot(root))
-            self.assertIn("不是合法的 JSON", load_snapshot(root)[1])  # unreadable, not absent
+            self.assertIn("not valid JSON", load_snapshot(root)[1])  # unreadable, not absent
             os.remove(path)
             self.assertEqual(load_snapshot(root), (None, None))
 

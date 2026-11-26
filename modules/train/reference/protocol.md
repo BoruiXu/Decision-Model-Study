@@ -1,26 +1,26 @@
-# 怎么比较训练方案，为什么这样
+# How to compare training configs, and why
 
-## 规则
+## Rules
 
-1. **探针**：候选先只跑探针种子（种子 0），用它的候选的 `metrics_val` 里的主指标（打包时用 harness 选中的 checkpoint，经 `model.predict` 在验证集上跑出预测，`rsi score` 算出），和当前方案的种子 0 比。高过 `probe_margin` 才补其余种子，否则不接受。
-2. **接受**：所有种子跑完后，平均比当前方案（同样的种子）高过 `accept_margin`，且 ECE、Brier 的平均变差不超过护栏，才接受。
-3. **预算**：每个试验按它的候选的 `cost.compute_hours`（harness 记的卡时，即训练墙钟 × 卡数，加打分时间）记账，失败的试验按 harness 记的卡时照记。起点的种子也记（每个训练过的试验都是框架登记的候选）；用 `trsi adopt` 接过来的已登记候选不再记，它在自己那一轮记过。预算是简报的 `budget_left.compute_hours`，已花加上下一个种子的预计花费超过它，就不再启动。
-4. **不重跑**：同一基座、同一配方内容、同样的 overrides、同一种子、同一份环境 exp.yaml 的试验，只训练一次；别的 run 用到时直接复用，但照样记账。
+1. **Probe**: a candidate first runs only the probe seed (seed 0); the primary metric in its candidate's `metrics_val` (at packing, the checkpoint the harness chose runs `model.predict` on the valset, and `rsi score` computes the metric from those predictions) is compared with the incumbent's seed 0. Only when it beats it by more than `probe_margin` are the other seeds added; otherwise it is not accepted.
+2. **Accept**: once all seeds have run, it is accepted only when its mean beats the incumbent's (on the same seeds) by more than `accept_margin` and the mean worsening of ECE and Brier is within the guards.
+3. **Budget**: each trial is booked at its candidate's `cost.compute_hours` (the GPU hours the harness records, i.e. training wall-clock × GPUs, plus scoring time); a failed trial is booked at the GPU hours the harness recorded all the same. The start's seeds are booked too (every trained trial is a candidate the framework registers); a registered candidate taken over with `trsi adopt` is not booked again, as it was booked in its own round. The budget is the brief's `budget_left.compute_hours`; when the spent hours plus the next seed's expected cost would exceed it, nothing more is launched.
+4. **No reruns**: a trial with the same base, the same recipe content, the same overrides, the same seed and the same environment exp.yaml trains only once; another run that needs it reuses it directly, but still books it.
 
-门槛来自任务的 `search`（`probe_margin`、`accept_margin`），没写时是 0.035。默认的 0.035 来自 Elliptic：同一配方换 3 个种子，验证 AUPRC 的标准差是 0.0175，0.035 是它的 2 倍。换任务时，起点的 3 个种子跑完后，用实际的标准差核对门槛；不合适就在 `record` 里写明建议的值，并写进交回的 `questions`：改门槛是改任务定义，由用户批准。
+The margins come from the task's `search` (`probe_margin`, `accept_margin`), 0.035 when not set. The default 0.035 comes from Elliptic: over 3 seeds of the same recipe, the standard deviation of the validation AUPRC is 0.0175, and 0.035 is twice that. On another task, once the start's 3 seeds have run, check the margins against the actual standard deviation; when they do not fit, write the suggested values in the `record` and in the hand-back's `questions`: changing the margins is changing the task definition, which the user approves.
 
-## 为什么不用别的办法（都是在 Elliptic 上量过的）
+## Why not other methods (all measured on Elliptic)
 
-- **短跑筛选**：同一批选项用两个种子各筛一次，两次排名的相关只有 0.08。筛选说比团队配方高 0.04–0.13 的 4 个选项，完整训练后是 −0.083 到 +0.002，一个都没赢。短训练偏爱"前期学得快"的改动。
-- **小数据环境**：只用 1/4 训练数据，6 个配方的排名和完整训练的相关只有 0.09–0.37，种子之间的波动是完整训练的 2.2 倍。
-- **一个种子 + 按行 bootstrap**：种子之间约九成的差异来自训练本身（初始化、数据顺序、挑哪个保存点），验证集行数有限只占约一成。按行重抽看不到前者，会把换种子的偶然好运当成改进。
-- **3 个种子看小改进**：要有八成把握看出 +0.01，每边约需 38 个种子。所以 3 个种子只用来确认大改进；小改进在这个预算下分不出来，直接不接受。
+- **Short-run screening**: screening the same options twice with two seeds gave rankings correlated at only 0.08. The 4 options a screening put 0.04–0.13 above the team recipe came out at −0.083 to +0.002 after full training; not one won. Short trainings favour changes that "learn fast early".
+- **A small-data setting**: with only 1/4 of the training data, the ranking of 6 recipes correlated with full training at only 0.09–0.37, and the seed-to-seed variation was 2.2 times that of full training.
+- **One seed + row bootstrap**: about nine tenths of the difference between seeds comes from the training itself (initialization, data order, which checkpoint is chosen), and only about a tenth from the limited number of valset rows. Resampling rows cannot see the former, and takes a seed's lucky draw for an improvement.
+- **3 seeds for small improvements**: to see +0.01 with 80% power takes about 38 seeds per side. So 3 seeds only confirm big improvements; small improvements cannot be told apart within this budget and are simply not accepted.
 
-替身（短跑、小数据、小模型）以后换了任务可以重新量：在至少 5 个配方上，和完整训练的排名相关 ≥ 0.8 才值得用。
+Stand-ins (short runs, small data, small models) can be measured again on a later task: they are worth using only when their ranking correlates with full training at ≥ 0.8 over at least 5 recipes.
 
-## 比较两个版本的 Skill
+## Comparing two versions of the Skill
 
-- 同样的预算（例如 100 卡时），看预算用完时找到的最好方案（`report.md` 的"最好方案随卡时"表）。
-- 两个版本共用同一份试验记录（同一个 `<outdir>/trsi/`），已经跑过的试验直接复用，但照价记账。
-- 判断者要用新会话、只看当时的证据，不能带着已经知道的结果去选。
-- 在一个任务上改 Skill，在另一个任务上只检验；改进在没参与修改的任务上也成立，才算方法变好了。
+- With the same budget (e.g. 100 GPU hours), look at the best config found when the budget runs out (the "Best scheme against compute hours" table of `report.md`).
+- The two versions share one trial record (the same `<outdir>/trsi/`); trials already run are reused directly, but booked at their price.
+- The judge must be a new session that sees only the evidence of the time, never choosing with the results already known.
+- Change the Skill on one task and only test it on another; the method counts as better only when the improvement also holds on the task that took no part in the change.

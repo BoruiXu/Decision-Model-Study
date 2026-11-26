@@ -5,15 +5,15 @@ from rsi.markdown import to_html
 
 class TestMarkdown(unittest.TestCase):
     def test_headings_paragraphs_lists(self):
-        h = to_html("# 标题\n\n一行\n二行\n\n- 甲\n* 乙\n\n#### 小标题")
-        self.assertIn("<h1>标题</h1>", h)
-        self.assertIn("<p>一行 二行</p>", h)
-        self.assertIn("<ul><li>甲</li><li>乙</li></ul>", h)
-        self.assertIn("<h4>小标题</h4>", h)
+        h = to_html("# Title\n\nline one\nline two\n\n- first\n* second\n\n#### Subtitle")
+        self.assertIn("<h1>Title</h1>", h)
+        self.assertIn("<p>line one line two</p>", h)
+        self.assertIn("<ul><li>first</li><li>second</li></ul>", h)
+        self.assertIn("<h4>Subtitle</h4>", h)
 
     def test_table(self):
-        h = to_html("| 轮次 | 判定 |\n|---|---|\n| 1 | promote V1 |")
-        self.assertIn("<th>轮次</th>", h)
+        h = to_html("| Round | Decision |\n|---|---|\n| 1 | promote V1 |")
+        self.assertIn("<th>Round</th>", h)
         self.assertIn("<td>promote V1</td>", h)
         self.assertNotIn("---", h)
         h = to_html("| a | b |\n|---|---|\n| x \\| y | z |")  # an escaped pipe stays in its cell
@@ -21,18 +21,18 @@ class TestMarkdown(unittest.TestCase):
         self.assertIn("<td>z</td>", h)
 
     def test_code_and_inline(self):
-        h = to_html("```\na < b\n```\n\n用 `rsi next` 和 **注意**")
+        h = to_html("```\na < b\n```\n\nuse `rsi next` and **note**")
         self.assertIn("<pre><code>a &lt; b</code></pre>", h)
         self.assertIn("<code>rsi next</code>", h)
-        self.assertIn("<b>注意</b>", h)
+        self.assertIn("<b>note</b>", h)
 
     def test_links(self):
-        h = to_html("[报告](REPORT.md) [站点](https://example.org) [坏](javascript:alert(1)) [据](data:text/html,x)")
-        self.assertIn('<a href="REPORT.md">报告</a>', h)
-        self.assertIn('<a href="https://example.org">站点</a>', h)
+        h = to_html("[report](REPORT.md) [site](https://example.org) [bad](javascript:alert(1)) [dat](data:text/html,x)")
+        self.assertIn('<a href="REPORT.md">report</a>', h)
+        self.assertIn('<a href="https://example.org">site</a>', h)
         self.assertNotIn('href="javascript', h)
         self.assertNotIn('href="data:', h)
-        self.assertIn("坏", h)
+        self.assertIn("bad", h)
         h = to_html("[x](/\\evil.com)")  # a backslash target is no link
         self.assertNotIn("href", h)
         self.assertIn("x", h)

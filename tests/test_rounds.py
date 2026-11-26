@@ -439,33 +439,33 @@ class TestReport(LoopCase):
         before = self.files_on_disk()
         out = self.report()
         self.assertEqual(self.files_on_disk(), before)
-        self.assertTrue(out.startswith("# RSI 运行报告：spam-check\n"), out[:80])
-        self.assertNotIn("没有产生可发布的版本", out)
-        for section in ("## 任务", "## 停止状态", "## 各轮", "## 版本", "## 里程碑评测", "## 实验记录",
-                        "## 尝试次数和预算"):
+        self.assertTrue(out.startswith("# RSI run report: spam-check\n"), out[:80])
+        self.assertNotIn("No releasable version was produced", out)
+        for section in ("## Task", "## Stop status", "## Rounds", "## Versions", "## Milestone evaluations",
+                        "## Experiment records", "## Attempts and budget"):
             self.assertIn(section, out)
-        for text in ("- 任务：spam-check v1（task-0001）", "- 决策类型：binary", "- 主指标：auc（越高越好）",
-                     "- 目标：未设",
-                     "- 已停止（第 2 轮",
+        for text in ("- Task: spam-check v1 (task-0001)", "- Decision type: binary",
+                     "- Primary metric: auc (higher is better)", "- Target: not set",
+                     "- Stopped (round 2",
                      "user requested: ship V1",
                      "| 1 | data | promote V1 | no best version yet and the candidate passed its train gate "
                      "| evaluation-0001 |",
-                     "| 2 | data | keep | closed without evaluation: no candidate passed the train gate | 无 |",
+                     "| 2 | data | keep | closed without evaluation: no candidate passed the train gate | none |",
                      "| V1 | candidate-0001 | delivery-0001 | evaluation-0001 | 1 |",
-                     "当前最佳：V1，auc 1（evaluation-0001）",
-                     "- 模型包：%s" % os.path.join(self.wsdir, "artifacts", "delivery-0001", "package"),
-                     "- 启动方式：package/predict --inputs",
+                     "Current best: V1, auc 1 (evaluation-0001)",
+                     "- Model package: %s" % os.path.join(self.wsdir, "artifacts", "delivery-0001", "package"),
+                     "- Entry point: package/predict --inputs",
                      os.path.join(self.wsdir, "artifacts", "evaluation-0001", "report.md"),
-                     "| evaluation-0002 | candidate-0001 | 2 | auc 1，log_loss 0.105361 |",
-                     "- evaluation-0002：评测报告 %s；交付 delivery-0002（%s），模型包 %s"
+                     "| evaluation-0002 | candidate-0001 | 2 | auc 1, log_loss 0.105361 |",
+                     "- evaluation-0002: evaluation report %s; delivery delivery-0002 (%s), model package %s"
                      % (os.path.join(self.wsdir, "artifacts", "evaluation-0002", "report.md"),
                         os.path.join(self.wsdir, "artifacts", "delivery-0002"),
                         os.path.join(self.wsdir, "artifacts", "delivery-0002", "package")),
-                     "### ① 数据", "| record-0001 | 1 | success |",
-                     "### ④ 评测与决策", "| record-0002 | 1 | inconclusive |",
+                     "### ① Data", "| record-0001 | 1 | success |",
+                     "### ⑤ Judge & decide", "| record-0002 | 1 | inconclusive |",
                      "| 1 | 0 of 3 |  |",
                      "| 2 | 1 of 3 | search-0001 |",
-                     "算力小时：已用 6，预算未设"):
+                     "GPU hours: 6 used, no budget set", "Agent $: 0.00 used, no budget set"):
             self.assertIn(text, out)
         # --out writes the same report to a file and changes nothing else.
         dst = os.path.join(self.wsdir, "REPORT.md")
@@ -494,7 +494,7 @@ class TestReport(LoopCase):
                       external={"weights": {"location": "gpu-box:/srv/pkg.tar", "sha256": "ab" * 32}})
         self.ws.register("evaluation", self.eval_src())
         self.ws.promote("evaluation-0001")
-        self.assertIn("- 模型包：gpu-box:/srv/pkg.tar（external:weights，sha256 %s）" % ("ab" * 32), self.report())
+        self.assertIn("- Model package: gpu-box:/srv/pkg.tar (external:weights, sha256 %s)" % ("ab" * 32), self.report())
 
     def test_report_names_undecided_evaluation(self):
         # R35: a user stop can leave a registered evaluation undecided; the report names it.
@@ -502,8 +502,8 @@ class TestReport(LoopCase):
         self.ws.register("evaluation", self.eval_src())
         self.ws.stop("alice", "stop here")
         out = self.report()
-        self.assertIn("| 1 | data | 未判定（evaluation-0001） |", out)
-        self.assertIn("- 第 1 轮：未判定（evaluation-0001）", out[:out.index("## 任务")])
+        self.assertIn("| 1 | data | undecided (evaluation-0001) |", out)
+        self.assertIn("- Round 1: undecided (evaluation-0001)", out[:out.index("## Task")])
 
     def test_report_without_promoted_version(self):
         self.task["stop"]["target"] = 0.9
@@ -524,23 +524,23 @@ class TestReport(LoopCase):
         out = self.report()
         self.assertEqual(self.files_on_disk(), before)
         # The summary comes first, before the sections, and lists each round.
-        head = out[:out.index("## 任务")]
-        self.assertIn("没有产生可发布的版本", head)
-        self.assertIn("- 第 1 轮：keep，closed without evaluation: no candidate passed the train gate", head)
-        self.assertIn("- 第 2 轮：未判定", head)
-        self.assertIn("进度报告", head)  # not stopped yet
-        self.assertIn("- 目标：auc 0.9", out)
-        self.assertIn("- 未停止", out)
-        self.assertIn("当前最佳：无", out)
+        head = out[:out.index("## Task")]
+        self.assertIn("No releasable version was produced", head)
+        self.assertIn("- Round 1: keep; closed without evaluation: no candidate passed the train gate", head)
+        self.assertIn("- Round 2: undecided", head)
+        self.assertIn("progress report", head)  # not stopped yet
+        self.assertIn("- Target: auc 0.9", out)
+        self.assertIn("- Not stopped", out)
+        self.assertIn("Current best: none", out)
         self.assertIn("| 2 | 1 of 3 | search-0001 |", out)
-        self.assertIn("## 里程碑评测\n\n无。", out)
-        self.assertIn("## 实验记录\n\n无。", out)
+        self.assertIn("## Milestone evaluations\n\nNone.", out)
+        self.assertIn("## Experiment records\n\nNone.", out)
         # After a stop, the same summary without the progress note.
         self.ws.stop("alice", "give up")
         out = self.report()
-        head = out[:out.index("## 任务")]
-        self.assertIn("没有产生可发布的版本", head)
-        self.assertNotIn("进度报告", head)
+        head = out[:out.index("## Task")]
+        self.assertIn("No releasable version was produced", head)
+        self.assertNotIn("progress report", head)
 
 
 if __name__ == "__main__":

@@ -1,127 +1,127 @@
-# 代码驱动的 RSI harness：改动计划
+# The code-driven RSI harness: plan of the change
 
-> 训练与调优已合并为 ② 训练调优（主流程 ① 数据 → ② 训练调优 → ③ 交付 → ④ 评测与决策），文中的五模块编号是当时的。
+> Training and tuning have since been merged into ② Train & tune, and ③ Compare (a code module, report only, on with the task's `compare` section) now comes between it and delivery: the main flow is ① Data → ② Train & tune → ③ Compare → ④ Deliver → ⑤ Judge & decide. The five-module numbering in this document is that of the time.
 
-日期：2026-11-23。起点：`~/research/RSI_decision_model_harness` 的 `main`（81e1a51，412 个测试）。新仓库：`~/research/RSI_code_driven_harness`。
+Date: 2026-11-23. Starting point: `main` of `~/research/RSI_decision_model_harness` (81e1a51, 412 tests). New repository: `~/research/RSI_code_driven_harness`.
 
-## 目标
+## Goal
 
-把现有 harness 改成：**主流程由代码写好**（一个状态机，按工作区状态用 if/else 决定下一步），**具体模块由 agent 实现**（data、train、tune、deliver、judge 各自是一个 agent）。LLM 只出现在两个地方：模块内部，以及代码规定好的少数决策点。
+Turn the existing harness into one where **the main flow is written in code** (a state machine that decides the next step from the workspace state with if/else) and **agents implement the modules** (data, train, tune, deliver and judge are each an agent). An LLM appears in only two places: inside the modules, and at the few decision points the code defines.
 
-依据：调研（2026-11-23）显示，公开内部实现的自改进、自动 ML 工程系统几乎都是"代码外环 + LLM 算子"（FunSearch、AlphaEvolve、DGM、AIDE、AIRA2、MLE-STAR、R&D-Agent、AI Scientist v2）；LLM 调度的典型失败是提前结束、跳步、重复、不知终止；写在 prompt 里的约束会被省略或绕过；评测和选择交给 LLM 会被利用。同时 AIRA2 表明模块内部给 agent 更多自由能明显提升效果。
+Basis: a survey (2026-11-23) shows that almost every self-improving or automated ML engineering system that publishes its internals is "code outer loop + LLM operators" (FunSearch, AlphaEvolve, DGM, AIDE, AIRA2, MLE-STAR, R&D-Agent, AI Scientist v2); the typical failures of LLM scheduling are ending early, skipping steps, repeating and not knowing when to stop; constraints written in a prompt get skipped or worked around; evaluation and selection left to an LLM get exploited. At the same time AIRA2 shows that giving agents more freedom inside the modules clearly improves results.
 
-## 一、哪些固定、哪些灵活
+## 1. What is fixed and what is flexible
 
-原则：**凡是有明确规则、错了会污染结果、或需要可复现的，写成固定代码；凡是需要理解、诊断和创造的，交给 agent；凡是因任务而异的阈值和资源，放进任务定义由用户确认。**
+Principle: **whatever has clear rules, would contaminate the results if wrong, or must be reproducible is fixed code; whatever needs understanding, diagnosis and creativity goes to agents; thresholds and resources that vary by task go into the task definition, confirmed by the user.**
 
-| 部分 | 归属 | 理由 |
+| Part | Belongs to | Why |
 |---|---|---|
-| 主流程状态机：阶段顺序、何时派哪个模块、门没过怎么走、何时关闭本轮、何时进入下一轮、何时停止 | **固定代码** | 规则明确；LLM 调度会跳步、提前结束（MAST、MLE-bench） |
-| 预算、尝试次数、评测集使用次数、停止条件 | **固定代码**（数值由任务定义） | 写在 prompt 里会被省略或绕过（STOP、AI Scientist） |
-| 产物契约、校验、登记、集合之间不重叠、评测集和测试集的移交 | **固定代码**（沿用现有 `rsi`） | 已有，且是防作弊的基础 |
-| 指标、对照组、置信区间、升级判定、训练门、交付复现检查 | **固定代码**（沿用现有 `rsi`） | 调研里证据最强的一条：评测和选择不能交给 LLM |
-| 送评哪个候选 | **固定代码** | 规则明确：通过训练门、验证集主指标最好的那个 |
-| 每个模块拿到哪些输入、输出到哪里（数据隔离） | **固定代码** | 由代码组装简报，模块拿不到简报以外的路径 |
-| 简报的结构化部分（路径、id、预算、门槛、上轮结果） | **固定代码** | 模拟里简报漏项、填错都出在这里 |
-| 简报的自由文本部分（本次目标、要验证的假设、要改什么） | **agent**（来自 judge 的计划） | 需要理解上一轮的失败 |
-| 何时停下来问用户、问什么 | **固定代码** | 审批点是规则（任务定义、计划、超预算、刷新评测集、测试集、删除） |
-| 用户怎么回答 | **人** | — |
-| 进度页面、运行报告、运行日志 | **固定代码**（沿用现有） | 只读工作区，由代码生成 |
-| 调用 agent 的方式（超时、重试、收集结果、记账） | **固定代码**（可插拔） | 见「三、模块怎么被调用」 |
-| 数据的获取、生成、标注、质量检查的计算 | **agent**（data） | 因任务而异，需要判断 |
-| 训练方法、模型选择、校准、训练命令和预测入口的实现 | **agent**（train） | 同上 |
-| 调优策略 | **agent**（tune） | 同上 |
-| 打包、延迟和成本测量 | **agent**（deliver） | 同上 |
-| 失败分析、切片、归因、下一轮计划 | **agent**（judge），输出结构化结果，代码校验 | 这是 RSI"自我改进"的核心，写死就失去通用性 |
-| 决策点上的判断（见下表） | **代码给默认选择，agent 可以按任务设置参与判断**；结果结构化、可审计、有上限 | 调研：命名决策点 + 结构化输出 + 代码路由 |
-| 起草任务定义 | **agent**（和用户对话），用户确认后才生效 | 需要理解用户的需求 |
-| 阈值、预算、审批项、指标、训练命令位置 | **任务定义**（用户确认，之后固定） | 因任务而异 |
-| 框架代码本身 | **只通过正常开发流程修改**，运行中的 agent 不能改 | DGM 也规定外环不可被自身修改 |
+| The main-flow state machine: stage order, when to dispatch which module, what to do after a failed gate, when to close the round, when to move to the next round, when to stop | **fixed code** | Clear rules; LLM scheduling skips steps and ends early (MAST, MLE-bench) |
+| Budget, attempts, evalset uses, stop conditions | **fixed code** (values from the task definition) | Written in a prompt they get skipped or worked around (STOP, AI Scientist) |
+| Artifact contracts, validation, registration, no overlap between sets, hand-over of the evalset and testset | **fixed code** (the existing `rsi`, kept) | Already there, and the basis against cheating |
+| Metrics, baselines, confidence intervals, promotion decisions, train gate, the delivery's reproduction check | **fixed code** (the existing `rsi`, kept) | The best-supported point of the survey: evaluation and selection cannot be left to an LLM |
+| Which candidate is sent to evaluation | **fixed code** | Clear rule: the one that passed the train gate with the best valset primary metric |
+| Which inputs each module gets and where it writes (data isolation) | **fixed code** | The code assembles the brief, and modules cannot get paths outside it |
+| The structured part of the brief (paths, ids, budget, thresholds, last round's results) | **fixed code** | In the simulations, briefs' missing and wrong items all came from here |
+| The free-text part of the brief (this time's goal, the hypothesis to test, what to change) | **agent** (from judge's plan) | Needs understanding of last round's failures |
+| When to stop and ask the user, and what | **fixed code** | Approval points are rules (task definition, plan, over budget, evalset refresh, testset, deletion) |
+| How the user answers | **person** | — |
+| Progress pages, run report, run log | **fixed code** (existing, kept) | They only read the workspace and are generated by code |
+| How agents are called (timeouts, retries, collecting results, bookkeeping) | **fixed code** (pluggable) | See "3. How modules are called" |
+| Getting, generating and labelling data, computing the quality checks | **agent** (data) | Varies by task and needs judgement |
+| Training methods, model choice, calibration, implementing the train command and the prediction entry | **agent** (train) | Same |
+| Tuning strategy | **agent** (tune) | Same |
+| Packaging, measuring latency and cost | **agent** (deliver) | Same |
+| Failure analysis, slicing, attribution, the next round's plan | **agent** (judge), structured output checked by code | This is the core of RSI's "self-improvement"; hard-coding it would lose generality |
+| Judgement at decision points (see the table below) | **code gives a default choice, and an agent can take part in the judgement by a task setting**; results structured, auditable, capped | Survey: named decision points + structured output + code routing |
+| Drafting the task definition | **agent** (talking with the user), effective only once the user confirms | Needs understanding of the user's request |
+| Thresholds, budget, approval items, metrics, the train command's location | **task definition** (confirmed by the user, fixed afterwards) | Varies by task |
+| The framework's code itself | **changed only through normal development**, never by a running agent | DGM also requires that the outer loop cannot be changed by itself |
 
-### 决策点
+### Decision points
 
-代码在这些地方停下来"做一个选择"。每个决策点都有一个**由代码算出的默认选择**；任务定义可以选择让一个 agent 来判断（`decisions.<名字>: "agent"`），agent 必须从给定选项里选一个并写明理由（用 JSON schema 约束输出），代码校验后执行。所有决策写进运行日志，页面上可见。
+At these places the code stops to "make a choice". Each decision point has a **default choice computed by code**; the task definition can choose to have an agent judge it (`decisions.<name>: "agent"`), and the agent must pick one of the given options and give a reason (output constrained by a JSON schema), which the code checks and carries out. Every decision goes into the run log and is visible on the pages.
 
-| 决策点 | 选项 | 代码的默认选择 |
+| Decision point | Options | The code's default choice |
 |---|---|---|
-| 训练门没过、还有尝试次数 | 重派 train、派 tune、派 data | 本轮还没派过 tune → tune；派过 → train；候选报告里质量相关的失败标记 → data |
-| 质量门没过 | 交回 data 重做、问用户 | 本轮重做不超过 2 次 → 交回 data；否则问用户 |
-| 模块交回的产物登记被拒 | 原模块重做、问用户 | 同一模块本轮被拒不超过 2 次 → 带着错误原文重做；否则问用户 |
-| 尝试次数用完仍没有候选通过 | 关闭本轮（固定） | 关闭本轮，judge 写计划 |
-| 停止条件满足、有最佳版本 | 做里程碑发布、不做 | 问用户（里程碑要用测试集，必须人决定） |
+| Train gate failed, attempts left | dispatch train again, dispatch tune, dispatch data | This round has not dispatched tune yet → tune; it has → train; a quality-related failure flag in the candidate report → data |
+| Quality gate failed | hand back to data to redo, ask the user | Redone at most 2 times this round → hand back to data; otherwise ask the user |
+| Registration refused an artifact a module handed back | the module redoes it, ask the user | The same module refused at most 2 times this round → redo with the error text; otherwise ask the user |
+| Attempts used up, still no candidate passed | close the round (fixed) | Close the round, judge writes the plan |
+| Stop condition met, there is a best version | do a milestone release, do not | Ask the user (a milestone uses the testset, which a person must decide) |
 
-## 二、架构
+## 2. Architecture
 
 ```
-人 / 操作会话（Claude，可选）
-   │  rsi init / rsi run / rsi answer / rsi status / 进度页面
+Person / operator session (Claude, optional)
+   │  rsi init / rsi run / rsi answer / rsi status / progress pages
    ▼
-流程引擎（固定代码）
-   next_action(ws) ──► 动作：派模块 / 登记 / 决策 / 问人 / promote / 关闭本轮 / next / 停止 / 报告 / 等长任务
-   执行动作 ──► 更新工作区 ──► 再次 next_action（循环，直到需要人或要等长任务）
+Flow engine (fixed code)
+   next_action(ws) ──► action: dispatch a module / register / decide / ask the person / promote / close the round / next / stop / report / wait for a long job
+   carry out the action ──► update the workspace ──► next_action again (looping until a person is needed or a long job must be waited for)
    │
-   ├─ 简报生成（固定代码）：rsi brief <ws> <模块>
-   ├─ agent 调用器（可插拔）：claude -p / 模拟脚本 / 手动
-   └─ 核心库（沿用现有 rsi）：校验、登记、指标、规则、页面、报告
+   ├─ brief builder (fixed code): rsi brief <ws> <module>
+   ├─ agent runners (pluggable): claude -p / mock scripts / manual
+   └─ core library (the existing rsi, kept): validation, registration, metrics, rules, pages, report
    ▼
-模块 agent（data / train / tune / deliver / judge）：读简报，写产物和 handback.json
+Module agents (data / train / tune / deliver / judge): read the brief, write artifacts and handback.json
 ```
 
-- **`next_action(ws) -> Action`** 是纯函数，只读工作区状态，返回下一步动作。它就是现在进度页面里 `_status` / `_next_step` 那套推导的升级版：搬到共用的 `rsi/flow.py`，页面和引擎共用一份逻辑，不再可能不一致。
-- **`rsi run <ws>`** 是引擎的主循环：反复调用 `next_action` 并执行，直到遇到"问人"或"等长任务"就退出，打印原因。它是可续跑的：所有状态都在工作区里，进程退出、机器重启后再运行 `rsi run` 接着走。
-- **模块交回后由引擎自动处理**：校验 → 登记 → 被拒时按决策点处理。顶层不再需要 agent 来执行这些机械步骤。
-- **问人**：引擎在 STATE 里写一条待答问题（问题、选项、开始时间），退出；人用 `rsi answer <ws> <选项> --quote "<原话>"`（审批类的仍用 `rsi approve`）回答，再 `rsi run` 继续。页面上显示 ⏸。
-- **运行日志**：`<ws>/work/run.jsonl`，记录每个动作、每次决策（含理由和来源：代码默认 / agent）、每次 agent 调用（耗时、退出码）。
+- **`next_action(ws) -> Action`** is a pure function: it only reads the workspace state and returns the next action. It is an upgraded version of the derivation `_status` / `_next_step` that the progress pages do now: moved into a shared `rsi/flow.py`, so the pages and the engine share one logic and can no longer disagree.
+- **`rsi run <ws>`** is the engine's main loop: it calls `next_action` and carries it out over and over, until it meets "ask the person" or "wait for a long job", then exits and prints why. It can be resumed: all state is in the workspace, so after the process exits or the machine restarts, running `rsi run` again picks up where it left off.
+- **The engine handles a module's hand-back by itself**: validate → register → on refusal, handle it at a decision point. The top level no longer needs an agent for these mechanical steps.
+- **Asking the person**: the engine writes a waiting question into STATE (question, options, start time) and exits; the person answers with `rsi answer <ws> <option> --quote "<own words>"` (approvals still with `rsi approve`) and then `rsi run` goes on. The pages show ⏸.
+- **Run log**: `<ws>/work/run.jsonl`, recording each action, each decision (with its reason and source: code default / agent), each agent call (time taken, exit code).
 
-## 三、模块怎么被调用
+## 3. How modules are called
 
-agent 调用器是一个接口，三种实现，由任务定义或命令行选择：
+The agent runner is an interface with three implementations, chosen by the task definition or the command line:
 
-1. **ClaudeCodeRunner**（默认）：用 `claude -p` 无界面模式调用，**默认给全部权限**（`--dangerously-skip-permissions`，用户 2026-11-23 决定）。提示词 = 模块 skill（`modules/<模块>/SKILL.md`）+ 简报；工作目录 = 该模块本次的输出目录。命令行模板可配置（模型、超时）。
-   - **同一个 agent 接着改**（用户决定）：每次派出都记下 `claude -p` 返回的会话 id。门没过、登记被拒、交回报告 `failed` 而需要原模块重做时，引擎用 `--resume <会话 id>` 接着原来的会话，把原因（错误原文、没过的门和数值）发给它，不另起新 agent。会话续不上时（例如会话已失效），才新开一个，并把上次的简报、交回和错误一起给它，运行日志里记下这次退回。
-2. **MockRunner**：调用模拟脚本，瞬间产出合法产物。用于测试和流程模拟，不调用任何模型。
-3. **ManualRunner**：只写出简报并退出，等人或别的会话把输出目录填好，再 `rsi run` 继续。适合模块负责人手工或在自己的环境里跑。
+1. **ClaudeCodeRunner** (default): calls `claude -p` in headless mode, **with all permissions by default** (`--dangerously-skip-permissions`, decided by the user on 2026-11-23). Prompt = the module skill (`modules/<module>/SKILL.md`) + the brief; working directory = this module's output directory this time. The command template is configurable (model, timeout).
+   - **The same agent carries on with its changes** (decided by the user): each dispatch records the session id `claude -p` returns. After a failed gate, a refused registration, or a hand-back reporting `failed` that the module must redo, the engine carries on the original session with `--resume <session id>`, sending it the reason (the error text, the failed gates and their values) instead of starting a new agent. Only when the session cannot be carried on (e.g. it has expired) is a new one opened, given the last brief, hand-back and errors together, and the run log records this return.
+2. **MockRunner**: calls mock scripts that produce valid artifacts at once. For tests and flow simulations; it calls no model.
+3. **ManualRunner**: only writes out the brief and exits, waiting for a person or another session to fill the output directory, then `rsi run` goes on. Suits module owners running a module by hand or in their own environment.
 
-模块 agent 的输入输出契约不变（沿用现有接口文档）；新增一个约定：交回时在输出目录写 `handback.json`（`status`：ok / failed / long_job；`marker`：长任务的完成标记路径；`notes`；`questions`：需要用户决定的事）。
+The module agents' input and output contracts stay the same (the existing interface documents are kept); one new convention is added: on handing back, write `handback.json` in the output directory (`status`: ok / failed / long_job; `marker`: the long job's completion marker path; `notes`; `questions`: what the user needs to decide).
 
-## 四、人和操作会话的角色
+## 4. The roles of the person and the operator session
 
-- 人可以直接用命令行：`rsi init` → `rsi run` → 看页面 → `rsi answer` / `rsi approve` → `rsi run` …
-- 也可以开一个 Claude 会话加载很薄的"操作" skill：它负责和你对话起草任务定义、替你运行 `rsi run`、把待答问题转述给你、把你的回答用 `rsi answer` 记下来。它**不决定流程**。
+- A person can use the command line directly: `rsi init` → `rsi run` → look at the pages → `rsi answer` / `rsi approve` → `rsi run` …
+- Or open a Claude session that loads a thin "operator" skill: it drafts the task definition with you, runs `rsi run` for you, relays the waiting questions to you, and records your answers with `rsi answer`. It **does not decide the flow**.
 
-## 五、实施任务
+## 5. Implementation tasks
 
-由 subagent 逐个实现，每个任务完成后审查，最后整体审查（同之前的流程）。
+Implemented one by one by subagents, each task reviewed when done, with a whole review at the end (as in the earlier process).
 
-1. **建仓**：从现有仓库 `main`（81e1a51）导出 `rsi/`、`tests/`、`docs/`、`skills/`、`README.md`，作为新仓库第一个提交；412 个测试在两个 Python 版本下通过。
-2. **流程引擎（纯函数）**：`rsi/flow.py` 的 `next_action(ws)` 和动作类型；把页面里的下一步推导搬进来，页面改为调用它；STATE 新增 `waiting`（待答问题）、`decisions`（决策记录）、`dispatches`（派出记录）。表驱动测试覆盖每一个转移（第一轮四个集合、train ∥ tune、门没过的三种走法、交付、评测、升级/保留、计划审批、刷新评测集、关闭本轮、停止、里程碑、停止后报告）。
-3. **简报和交回**：`rsi brief <ws> <模块>` 由代码生成简报（结构化字段全部来自工作区，自由文本来自计划）；`handback.json` 的格式和校验；引擎的"校验 → 登记 → 被拒处理"。
-4. **调用器和主循环**：三种 runner；`rsi run`（循环到问人或等长任务为止）、`rsi answer`；运行日志；长任务的完成标记。
-5. **决策点和问人**：决策点表、默认规则、agent 判断（JSON schema）、上限；问人和续跑。
-6. **skill 和文档**：顶层 skill 改写成很薄的"操作" skill；模块 skill 补上简报和 `handback.json` 的约定；删掉现在顶层 skill 里描述流程表的部分；README 和接口文档同步。
-7. **端到端验证**：用 MockRunner 自动跑一遍多轮场景（升级、训练门没过重试、质量门没过、评测集刷新、关闭本轮、连续未升级停止、里程碑），作为一个测试用例；再在你同意后，用 ClaudeCodeRunner 在一个玩具任务上实跑一轮（会花 token，也需要给 `claude -p` 权限）。
+1. **New repository**: export `rsi/`, `tests/`, `docs/`, `skills/`, `README.md` from `main` (81e1a51) of the existing repository as the new repository's first commit; the 412 tests pass under both Python versions.
+2. **Flow engine (pure function)**: `next_action(ws)` and the action types in `rsi/flow.py`; move the pages' derivation of the next step into it and have the pages call it; STATE gains `waiting` (the waiting question), `decisions` (decision records) and `dispatches` (dispatch records). Table-driven tests cover every transition (round 1's four sets, train ∥ tune, the three ways after a failed gate, delivery, evaluation, promote/keep, plan approval, evalset refresh, closing the round, stop, milestone, the report after the stop).
+3. **Briefs and hand-backs**: `rsi brief <ws> <module>` builds the brief in code (every structured field from the workspace, free text from the plan); the format and checks of `handback.json`; the engine's "validate → register → handle refusals".
+4. **Runners and main loop**: the three runners; `rsi run` (looping until it asks a person or waits for a long job), `rsi answer`; the run log; long jobs' completion markers.
+5. **Decision points and asking the person**: the table of decision points, default rules, agent judgement (JSON schema), caps; asking the person and resuming.
+6. **Skills and documents**: rewrite the top-level skill as a thin "operator" skill; add the brief and `handback.json` conventions to the module skills; delete the part of the current top-level skill that describes the flow table; bring the README and the interface documents in line.
+7. **End-to-end check**: with MockRunner, run a multi-round scenario automatically (promotion, a failed train gate and retry, a failed quality gate, evalset refresh, closing the round, stopping after rounds without promotion, a milestone) as one test case; then, once you agree, run one real round with ClaudeCodeRunner on a toy task (it costs tokens and needs permissions for `claude -p`).
 
-## 六、约束
+## 6. Constraints
 
-- 核心仍只用 Python 标准库；Python 3.9 和 3.14 都要通过。调用 `claude` 是通过子进程调用外部程序。
-- 测试全部用 MockRunner，测试运行不调用任何模型，也不打开浏览器。
-- 现有的检查一个都不放松：校验、登记、指标重算、门、升级规则、数据隔离照旧由代码执行。
-- 框架不针对任何具体任务。
+- The core still uses only the Python standard library; it must pass on both Python 3.9 and 3.14. `claude` is called as an external program through a child process.
+- All tests use MockRunner; running the tests calls no model and opens no browser.
+- None of the existing checks is relaxed: validation, registration, metric recomputation, gates, the promotion rule and data isolation are still done by code.
+- The framework is not tied to any particular task.
 
-## 七、已定（用户 2026-11-23）
+## 7. Decided (by the user, 2026-11-23)
 
-1. 模块 agent 默认给全部权限；需要原模块重做时，接着同一个 agent 的会话。
-2. 决策点用代码的默认规则（"让 agent 判断"保留为任务定义里的可选项，默认关闭）。
-3. 仓库名 `RSI_code_driven_harness`。
-4. 新 harness 保留进度页面那一套（概览、轮次与产物、事件记录、运行报告），并由流程引擎驱动：页面的"下一步"直接来自 `next_action`；agent 由引擎启动，所以"正在运行"是准确的；决策记录、待答问题、运行日志都显示在页面上。
+1. Module agents get all permissions by default; when a module must redo its work, the same agent's session carries on.
+2. Decision points use the code's default rules ("let an agent judge" stays as an option in the task definition, off by default).
+3. The repository's name is `RSI_code_driven_harness`.
+4. The new harness keeps the progress pages as they are (overview, rounds and artifacts, event log, run report), driven by the flow engine: the pages' "next step" comes straight from `next_action`; agents are launched by the engine, so "running" is accurate; decision records, waiting questions and the run log are all shown on the pages.
 
-## 八、已知限制
+## 8. Known limitations
 
-- 模块 agent 有全部权限、和工作区在同一台机器上，所以技术上读得到工作区里评测集和测试集的标签。隔离靠简报只给必要路径和模块 skill 的约定；登记时的指标重算保证报上来的数字是真的，但挡不住"偷看标签来调模型"。以后需要更强隔离时，可以加一个在容器或独立用户下运行模块的调用器（AIRA2 的做法）。
+- Module agents have all permissions and run on the same machine as the workspace, so technically they can read the labels of the evalset and the testset in the workspace. The isolation relies on the brief giving only the paths needed and on the module skills' conventions; the metric recomputation at registration guarantees that the reported numbers are real, but cannot stop "peeking at the labels to tune the model". When stronger isolation is needed later, a runner that runs modules in a container or as a separate user can be added (as AIRA2 does).
 
-## 九、数据读取限制（2026-11-23 追加，用户决定"先只用禁止读取规则"）
+## 9. Data read limits (added 2026-11-23; the user decided "only read-deny rules for now")
 
-- 每次用 ClaudeCodeRunner 启动模块 agent 时，代码按这次派出的简报自动生成禁止读取名单，以 `--disallowedTools 'Read(//<绝对路径>/**)' 'Edit(//<绝对路径>/**)'` 传给 `claude`。Claude Code 文档写明禁止规则在全部权限模式下仍然生效。
-- 名单的规则：工作区 `artifacts/` 下所有数据集产物（trainset、valset、evalset、testset）中，凡不在这次简报输入里的，整个目录禁止读取和修改；在简报里但只放行了其中个别文件的（例如 deliver 只拿 `inputs.jsonl`），同目录的其他文件（`labels.jsonl`、`rows.jsonl`）逐个禁止。训练模块因此读不到它用不到的数据集。
-- 名单只写进派出记录和运行日志，不写进简报（不把被封数据的位置告诉 agent）。
-- 已知范围：禁止规则管 agent 自己的工具（Read 工具，以及 `cat`、`head` 这类点名文件的命令），不管 agent 启动的子进程（例如 Python 训练脚本自己 `open()`）。更强的系统沙盒留待以后。
+- Every time ClaudeCodeRunner launches a module agent, the code builds a read-deny list from this dispatch's brief and passes it to `claude` as `--disallowedTools 'Read(//<absolute path>/**)' 'Edit(//<absolute path>/**)'`. Claude Code's documentation says deny rules still apply in the all-permissions mode.
+- The rules of the list: of all dataset artifacts under the workspace's `artifacts/` (trainset, valset, evalset, testset), any not among this brief's inputs is denied for reading and changing as a whole directory; for one in the brief of which only some files are let through (e.g. deliver gets only `inputs.jsonl`), the other files of the same directory (`labels.jsonl`, `rows.jsonl`) are denied one by one. So the train module cannot read datasets it has no use for.
+- The list is written only into the dispatch record and the run log, never into the brief (the agent is not told where the blocked data is).
+- Known scope: deny rules govern the agent's own tools (the Read tool, and commands such as `cat` and `head` that name a file), not the child processes the agent starts (e.g. a Python training script's own `open()`). A stronger system sandbox is left for later.

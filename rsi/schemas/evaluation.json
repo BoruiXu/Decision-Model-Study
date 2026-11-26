@@ -63,6 +63,52 @@
       }
     },
     "uses_testset": {"type": "boolean"},
-    "metrics_test": {"type": "object", "additionalProperties": {"type": "number"}}
+    "metrics_test": {"type": "object", "additionalProperties": {"type": "number"}},
+    "baselines_eval": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "metrics", "delta"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "metrics": {"type": "object", "additionalProperties": {"type": "number"}},
+          "delta": {
+            "type": "object",
+            "required": ["metric", "delta", "ci_low", "ci_high"],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {"type": "string", "minLength": 1},
+              "delta": {"type": "number"},
+              "ci_low": {"type": "number"},
+              "ci_high": {"type": "number"}
+            }
+          }
+        }
+      }
+    },
+    "baselines_test": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "metrics", "delta"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "metrics": {"type": "object", "additionalProperties": {"type": "number"}},
+          "delta": {
+            "type": "object",
+            "required": ["metric", "delta", "ci_low", "ci_high"],
+            "additionalProperties": false,
+            "properties": {
+              "metric": {"type": "string", "minLength": 1},
+              "delta": {"type": "number"},
+              "ci_low": {"type": "number"},
+              "ci_high": {"type": "number"}
+            }
+          }
+        }
+      }
+    }
   }
 }

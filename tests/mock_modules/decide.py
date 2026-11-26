@@ -5,7 +5,8 @@
 in the decision's directory (work/decisions/<n>-<point>/). The request holds the point, the options the agent
 may pick from, the code's default, the prompt and the JSON schema. The answer comes from RSI_MOCK_BEHAVIOR's
 "decide" entry (per point, or one for every point): {"choice": ..., "reason": ...} is printed as JSON, {"raw":
-text} prints the text as it is; without an entry the agent takes the code's default.
+text} prints the text as it is; without an entry the agent takes the code's default. With "cost_usd" a result object
+like claude's ({"session_id", "total_cost_usd"}) is printed first, the answer still last.
 """
 import argparse
 import json
@@ -24,6 +25,8 @@ def main():
         with open(os.environ["RSI_MOCK_BEHAVIOR"], encoding="utf-8") as f:
             behavior = json.load(f).get("decide", {})
     answer = behavior.get(req["point"], behavior)
+    if "cost_usd" in answer:
+        print(json.dumps({"type": "result", "session_id": "mock-decide", "total_cost_usd": answer["cost_usd"]}))
     if "raw" in answer:
         sys.stdout.write(answer["raw"] + "\n")
         return

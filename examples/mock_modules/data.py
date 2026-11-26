@@ -9,7 +9,7 @@ purpose refresh   a new evalset (a namespace no earlier set used), plus a record
 Sent back because the trainset failed its quality gate (sets or trainset), it hands back the trainset without its
 near duplicates; it reports any other return as failed. With the questions knob (sets or trainset) the first
 call's trainset also holds UNKNOWN_CLUSTERS clusters of rows of unknown source (meta.source unknown-export); given
-the user's answer (the engine registers nothing before it), it drops them when the answer says 删 and hands back
+the user's answer (the engine registers nothing before it), it drops them when the answer says "drop" and hands back
 the new trainset with a record, else it hands back the same subdirectories.
 
 The quality gate computes the task's quality_checks (min_rows, max_near_dup_rate, min_label_agreement).
@@ -90,8 +90,8 @@ def write_split(c, kind, rows):
 
 
 def gate_text(q):
-    return "；".join("%s = %s（阈值 %s，%s）" % (x["name"], x["value"], x["threshold"], "通过" if x["passed"] else "没过")
-                    for x in q["checks"])
+    return "; ".join("%s = %s (threshold %s, %s)" % (x["name"], x["value"], x["threshold"],
+                                                     "passed" if x["passed"] else "failed") for x in q["checks"])
 
 
 def dedup(rows):
@@ -108,16 +108,18 @@ def fix_quality(c, st):
     """A return for a failed quality gate: the last trainset without its near duplicates."""
     rows = M.rows_of(os.path.join(c.outdir, st["trainset"]))
     kept = dedup(rows)
-    d, q = write_trainset(c, kept, st.get("parent"), "%s；按退回的反馈删掉 %d 行近似重复（大小写和空白的变体）"
-                          % (st["changes"], len(rows) - len(kept)))
+    d, q = write_trainset(c, kept, st.get("parent"), "%s; dropped %d near-duplicate rows by the return's feedback "
+                          "(case and whitespace variants)" % (st["changes"], len(rows) - len(kept)))
     before = st.get("quality")
     st.update(trainset=os.path.basename(d), quality=q)
     c.save_state(st)
-    r = M.write_record(c, "record", "训练集没过质量门（近似重复率超限）", "去掉近似重复后近似重复率降到阈值以下",
-                       "删掉 %d 行近似重复" % (len(rows) - len(kept)), "trainset near_dup_rate",
+    r = M.write_record(c, "record", "the trainset failed the quality gate (near-duplicate rate over the limit)",
+                       "without the near duplicates the near-duplicate rate falls below the threshold",
+                       "dropped %d near-duplicate rows" % (len(rows) - len(kept)), "trainset near_dup_rate",
                        _check(before, "max_near_dup_rate"), _check(q, "max_near_dup_rate"),
-                       "success" if q["passed"] else "failure", "合并导出的数据要先按输入指纹去重")
-    c.handback([d, r], notes="质量门：%s" % gate_text(q))
+                       "success" if q["passed"] else "failure",
+                       "merged exports must be deduplicated by input fingerprint first")
+    c.handback([d, r], notes="quality gate: %s" % gate_text(q))
 
 
 def _check(q, name):
@@ -128,26 +130,29 @@ def _check(q, name):
 
 
 def apply_answer(c, st):
-    """The user answered the questions of the last hand-back (none of it registered): an answer saying 删 drops
+    """The user answered the questions of the last hand-back (none of it registered): an answer saying "drop" drops
     the rows of unknown source from that trainset (a new trainset and a record replace the old ones); any other
     answer hands back the same subdirectories."""
     question, answer = c.answers()[-1]
     names = c.previous_artifacts()
     old = st.get("trainset")
-    if "删" not in answer or not old or old not in names:
-        return c.handback([os.path.join(c.outdir, n) for n in names], notes="用户的回答：%s；交回的产物不变" % answer)
+    if "drop" not in answer or not old or old not in names:
+        return c.handback([os.path.join(c.outdir, n) for n in names],
+                          notes="the user's answer: %s; the artifacts handed back are unchanged" % answer)
     rows = M.rows_of(os.path.join(c.outdir, old))
     kept = [r for r in rows if r["meta"].get("source") != UNKNOWN_SOURCE]
-    changes = "%s；按用户的回答删掉 %d 行来源不明的样本" % (st["changes"], len(rows) - len(kept))
+    changes = "%s; dropped %d rows of unknown source by the user's answer" % (st["changes"], len(rows) - len(kept))
     d, q = write_trainset(c, kept, st.get("parent"), changes)
-    r = M.write_record(c, "record", "新一批数据里有来源不明的样本", "去掉来源不明的样本，训练集只保留来源清楚的数据",
-                       "按用户的回答（%s）删掉 %d 行" % (answer, len(rows) - len(kept)), "trainset rows", len(rows),
-                       len(kept), "success", "来源不明的数据先问用户再用", artifacts=[st["parent"]] if st.get("parent")
-                       else [])
+    r = M.write_record(c, "record", "the new batch of data has samples of unknown source",
+                       "without the samples of unknown source the trainset keeps only data of known source",
+                       "dropped %d rows by the user's answer (%s)" % (len(rows) - len(kept), answer), "trainset rows",
+                       len(rows), len(kept), "success", "ask the user before using data of unknown source",
+                       artifacts=[st["parent"]] if st.get("parent") else [])
     st.update(trainset=os.path.basename(d), changes=changes, quality=q)
     c.save_state(st)
     keep = [os.path.join(c.outdir, n) for n in names if n != old and not n.startswith("record")]
-    c.handback(keep + [d, r], notes="按用户的回答删掉 %d 行来源不明的样本；质量门：%s" % (len(rows) - len(kept), gate_text(q)))
+    c.handback(keep + [d, r], notes="dropped %d rows of unknown source by the user's answer; quality gate: %s" % (
+        len(rows) - len(kept), gate_text(q)))
 
 
 def returned(c, st):
@@ -158,10 +163,11 @@ def returned(c, st):
         return False  # e.g. a session that died before handing back: do the whole job
     if c.answers():
         apply_answer(c, st)
-    elif st.get("trainset") and "质量门" in c.feedback:
+    elif st.get("trainset") and "quality gate" in c.feedback:
         fix_quality(c, st)
     else:
-        c.fail("rsi-data 不知道这次退回要改什么（只会处理没过的质量门）：%s" % (c.reason() or "反馈里没有原因"))
+        c.fail("rsi-data does not know what to change for this return (it handles only a failed quality gate): %s"
+               % (c.reason() or "the feedback gives no reason"))
     return True
 
 
@@ -175,26 +181,27 @@ def sets(c):
             "valset": M.gen_rows(q, "val", 13, "va", SPLIT_CLUSTERS)}
     train = M.gen_rows(q, "train", 14, "tr1", TRAIN_CLUSTERS)
     rate = c.knob("near_dups") if c.first else None
-    changes = "第一版：%d 个簇" % TRAIN_CLUSTERS
+    changes = "first version: %d clusters" % TRAIN_CLUSTERS
     unknown = unknown_rows(c)
     if unknown:
         train += unknown
-        changes += "，含 %d 行来源不明的样本" % len(unknown)
+        changes += ", with %d rows of unknown source" % len(unknown)
     if rate:
         train += M.near_duplicates(train, rate, "dp1")
-        changes += "，合并了第二份导出（含近似重复）"
+        changes += ", merged with a second export (with near duplicates)"
     for kind in ("testset", "evalset", "valset"):
         ov = M.overlap(train, rows[kind])
         if any(ov):
-            c.fail("trainset 与 %s 重叠：%s" % (kind, ov))
+            c.fail("trainset overlaps %s: %s" % (kind, ov))
     dirs = [write_split(c, kind, rows[kind]) for kind in ("testset", "evalset", "valset")]
     d, q = write_trainset(c, train, None, changes)
     st.update(trainset=os.path.basename(d), parent=None, changes=changes, quality=q)
     c.save_state(st)
-    r = M.write_record(c, "record", "还没有数据", "模板规则打标便宜且一致", "生成 testset/evalset/valset/trainset",
+    r = M.write_record(c, "record", "no data yet", "labelling by template rules is cheap and consistent",
+                       "generated testset/evalset/valset/trainset",
                        "trainset label agreement", None, _check(q, "min_label_agreement"),
-                       "success" if q["passed"] else "failure", "第一版数据")
-    c.handback(dirs + [d, r], notes="质量门：%s" % gate_text(q))
+                       "success" if q["passed"] else "failure", "first version of the data")
+    c.handback(dirs + [d, r], notes="quality gate: %s" % gate_text(q))
 
 
 def trainset(c):
@@ -206,27 +213,29 @@ def trainset(c):
     prev_rows = M.rows_of(prev_dir)
     added = M.gen_rows(M.question_of(c.task), "train", 20 + c.round, "tr%d" % c.round, ADDED_CLUSTERS)
     rows = prev_rows + added
-    changes = "在 %s 上加了 %d 个新簇（%d 行）" % (prev_id, ADDED_CLUSTERS, len(added))
+    changes = "added %d new clusters (%d rows) to %s" % (ADDED_CLUSTERS, len(added), prev_id)
     unknown = unknown_rows(c)
     if unknown:
         rows += unknown
-        changes += "，含 %d 行来源不明的样本（%d 个簇）" % (len(unknown), UNKNOWN_CLUSTERS)
+        changes += ", with %d rows of unknown source (%d clusters)" % (len(unknown), UNKNOWN_CLUSTERS)
     rate = c.knob("near_dups") if c.first else None
     if rate:
         rows += M.near_duplicates(rows, rate, "dp%d" % c.round)
-        changes += "，合并了第二份导出（含近似重复）"
+        changes += ", merged with a second export (with near duplicates)"
     val_rows = M.rows_of(val_dir)
     if any(M.overlap(rows, val_rows)):
-        c.fail("新训练集与验证集重叠：%s" % (M.overlap(rows, val_rows),))
+        c.fail("the new trainset overlaps the valset: %s" % (M.overlap(rows, val_rows),))
     d, q = write_trainset(c, rows, prev_id, changes)
     st.update(trainset=os.path.basename(d), parent=prev_id, changes=changes, quality=q)
     c.save_state(st)
     primary = c.task["metrics"]["primary"]
     # The data module does not train: the round's train and judge dispatches test the new trainset.
-    r = M.write_record(c, "record", "计划把问题归到数据覆盖", "更多样本让模型学到更全的垃圾邮件词",
+    r = M.write_record(c, "record", "the plan attributes the issue to data coverage",
+                       "more samples let the model learn more of the spam words",
                        changes, "eval %s" % primary, None, None, "inconclusive",
-                       "由本轮 ② 训练调优和 ④ 评测检验", artifacts=[prev_id, val_id])
-    c.handback([d, r], notes="质量门：%s；新训练集由本轮 ② 训练调优和 ④ 评测检验" % gate_text(q))
+                       "tested by this round's ② Train & tune and ⑤ Judge & decide", artifacts=[prev_id, val_id])
+    c.handback([d, r], notes="quality gate: %s; this round's ② Train & tune and ⑤ Judge & decide test the new "
+                             "trainset" % gate_text(q))
 
 
 def refresh(c):
@@ -239,12 +248,14 @@ def refresh(c):
             seen += M.rows_of(path)
     ov = M.overlap(rows, seen)
     if any(ov):
-        c.fail("新评测集与训练集或验证集重叠：%s" % (ov,))
+        c.fail("the new evalset overlaps the trainset or the valset: %s" % (ov,))
     d = write_split(c, "evalset", rows)
-    r = M.write_record(c, "record", "评测集用到了上限", "同一个生成器产出的新样本让评测集仍可比",
-                       "生成新的评测集（%d 行，新的命名空间 ev%d）" % (len(rows), c.round), "eval rows", None, len(rows),
-                       "success", "刷新的评测集要用新的 id 和簇命名空间")
-    c.handback([d, r], notes="新评测集 %d 行；与给出的训练集、验证集的重叠（id、输入、簇）：%s" % (len(rows), ov))
+    r = M.write_record(c, "record", "the evalset reached its use limit",
+                       "new samples from the same generator keep the evalset comparable",
+                       "generated a new evalset (%d rows, new namespace ev%d)" % (len(rows), c.round), "eval rows",
+                       None, len(rows), "success", "a refreshed evalset needs new id and cluster namespaces")
+    c.handback([d, r], notes="new evalset of %d rows; overlap (ids, inputs, clusters) with the trainset and valset "
+                             "given: %s" % (len(rows), ov))
 
 
 def main():
@@ -256,7 +267,7 @@ def main():
     elif c.purpose == "refresh":
         refresh(c)
     else:
-        c.fail("rsi-data 不认识目的 %r" % c.purpose)
+        c.fail("rsi-data does not know the purpose %r" % c.purpose)
 
 
 if __name__ == "__main__":

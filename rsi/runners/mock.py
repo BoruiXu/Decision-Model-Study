@@ -1,12 +1,13 @@
 """MockRunner: a module agent is a script, for tests and flow simulations (no model is called).
 
-launch starts `<python> <scripts_dir>/<module>.py --brief <outdir>/brief.json --outdir <outdir> --session <id>
-[--feedback <outdir>/<dispatch feedback>]` in the output directory as its own process group (stdout and stderr to
-agent-<n>.log) and returns at once, like ClaudeCodeRunner: the engine polls it, so a stop is noticed while the
-script runs (stop terminates its process group) and records dispatched together run side by side. A new
-session's id is made up by new_session (mock-<hex>), a resumed one passed on; a script that exits RESUME_FAILED
-when given a session to resume reports that the session cannot be resumed. A script still running after
-timeout_s is stopped (timed_out).
+launch starts argv(), `<python> <scripts_dir>/<module>.py --brief <outdir>/brief.json --outdir <outdir> --session
+<id> [--feedback <outdir>/<dispatch feedback>]`, in the output directory as its own process group (stdout and stderr
+to agent-<n>.log) and returns at once (a missing script: exit code 127 at once, the log says why), like
+ClaudeCodeRunner: the engine polls it, so a stop is noticed while the script runs (stop terminates its process
+group) and records dispatched together run side by side. A new session's id is made up by new_session (mock-<hex>), a
+resumed one passed on; a script that exits RESUME_FAILED when given a session to resume reports that the session
+cannot be resumed. A script still running after timeout_s is stopped (timed_out). Subclasses change argv, missing
+(the log line when argv is None) and popen_argv (rsi.runners.code.CodeRunner).
 
 attach (a later `rsi run`, after the one that launched the script was killed) finds the script again by the
 record's pid while that process runs `--outdir <the dispatch's output directory>` and started within START_SLACK
@@ -31,6 +32,7 @@ START_SLACK = (5, 60)
 
 class MockRunner(base.Runner):
     name = "mock"
+    resume_failed_exit = RESUME_FAILED  # the exit code of a resumed script that says its session cannot be resumed
 
     def __init__(self, scripts_dir, timeout_s=600, poll_interval=0.05):
         self.scripts_dir = os.path.abspath(scripts_dir) if scripts_dir else None
@@ -40,24 +42,43 @@ class MockRunner(base.Runner):
     def new_session(self, dispatch):
         return "mock-%s" % uuid.uuid4().hex[:12]
 
-    def launch(self, ws, dispatch, prompt, resume_session=None, new_session=None):
-        out = base.outdir(ws, dispatch)
-        log = os.path.join(out, "agent-%d.log" % base.launch_number(dispatch))
-        session = resume_session or new_session or self.new_session(dispatch)
-        script = os.path.join(self.scripts_dir or "", "%s.py" % dispatch["module"])
+    def script(self, module):
+        return os.path.join(self.scripts_dir or "", "%s.py" % module)
+
+    def argv(self, ws, dispatch, out, session):
+        """The command line launch runs for `dispatch` (output directory `out`, absolute; session `session`); None
+        when there is nothing to run (no mock module script <scripts_dir>/<module>.py)."""
+        script = self.script(dispatch["module"])
+        if not (self.scripts_dir and os.path.isfile(script)):
+            return None
         argv = [sys.executable, script, "--brief", os.path.join(out, "brief.json"), "--outdir", out,
                 "--session", session]
         if dispatch.get("feedback"):
             argv += ["--feedback", os.path.join(out, dispatch["feedback"])]
-        if not (self.scripts_dir and os.path.isfile(script)):
+        return argv
+
+    def missing(self, dispatch):
+        """The log line of a launch whose argv is None."""
+        return "mock runner: no mock module script %s" % self.script(dispatch["module"])
+
+    def popen_argv(self, argv, log):
+        """What launch starts for `argv` (the launch's log `log`): argv itself."""
+        return argv
+
+    def launch(self, ws, dispatch, prompt, resume_session=None, new_session=None):
+        out = base.outdir(ws, dispatch)
+        log = os.path.join(out, "agent-%d.log" % base.launch_number(dispatch))
+        session = resume_session or new_session or self.new_session(dispatch)
+        argv = self.argv(ws, dispatch, out, session)
+        if argv is None:
             with open(log, "ab") as f:
-                f.write(("mock runner: no mock module script %s\n" % script).encode("utf-8"))
+                f.write((self.missing(dispatch) + "\n").encode("utf-8"))
             return {"runner": self, "waits": True, "session": session,
                     "result": base.result(exit_code=127, session=session, log=log)}
         try:
             with open(log, "ab") as f:
-                proc = subprocess.Popen(argv, cwd=out, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
-                                        start_new_session=True)
+                proc = subprocess.Popen(self.popen_argv(argv, log), cwd=out, stdin=subprocess.DEVNULL, stdout=f,
+                                        stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as e:
             return base.launch_failed(self, log, e)
         return {"runner": self, "waits": True, "proc": proc, "pid": proc.pid, "outdir": out, "log": log,
@@ -78,7 +99,7 @@ class MockRunner(base.Runner):
             base.stop_process(handle["pid"], proc)
             timed_out = True
             code = proc.returncode if proc is not None else None
-        failed = bool(handle.get("resume")) and code == RESUME_FAILED
+        failed = bool(handle.get("resume")) and code is not None and code == self.resume_failed_exit
         session = None if failed else handle.get("session")
         handle["result"] = base.result(exit_code=code, session=session, log=handle.get("log"), resume_failed=failed,
                                        timed_out=timed_out)

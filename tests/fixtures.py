@@ -168,12 +168,14 @@ class Opts(object):
     train_ids: the trainset rows the baselines come from; best_wrong: wrong ids of
     the best version's predictions (evaluation); test_ids: testset rows (milestone
     evaluation); val_ids, val_wrong: a delivery's predictions_val, which reproduce
-    the candidate's (a candidate built with ids=val_ids, wrong=val_wrong); fields:
-    the manifest overrides given to make_artifact.
+    the candidate's (a candidate built with ids=val_ids, wrong=val_wrong); eval_ids: a
+    baseline's predictions_eval rows; candidate, baselines: what a comparison compares
+    (see _comparison_extra), and the baselines an evaluation scores (baseline id -> (name, wrong ids):
+    baselines_eval, or baselines_test at a milestone); fields: the manifest overrides given to make_artifact.
     """
 
     def __init__(self, ids=None, wrong=(), train_ids=None, best_wrong=(), test_ids=None, fields=None,
-                 val_ids=None, val_wrong=(), rows=None):
+                 val_ids=None, val_wrong=(), rows=None, eval_ids=None, candidate=None, baselines=None):
         self.given_ids = ids
         self.rows = rows
         self.ids = list(DEFAULT_IDS if ids is None else ids)
@@ -183,6 +185,9 @@ class Opts(object):
         self.test_ids = list(DEFAULT_IDS if test_ids is None else test_ids)
         self.val_ids = list(DEFAULT_IDS if val_ids is None else val_ids)
         self.val_wrong = set(val_wrong)
+        self.eval_ids = list(DEFAULT_IDS if eval_ids is None else eval_ids)
+        self.candidate = "candidate-0001" if candidate is None else candidate
+        self.baselines = dict(baselines or {})
         self.fields = fields or {}
 
 
@@ -299,6 +304,12 @@ def _delivery_files(d, task, o):
             "predictions_val": _pred_file(d, task, "predictions_val", o.val_ids, o.val_wrong)}
 
 
+def _baseline_files(d, task, o):
+    """predictions_val on o.ids and predictions_eval on o.eval_ids (o.wrong wrong in both)."""
+    return {"predictions_val": _pred_file(d, task, "predictions_val", o.ids, o.wrong),
+            "predictions_eval": _pred_file(d, task, "predictions_eval", o.eval_ids, o.wrong)}
+
+
 def _feedback_files(d, task, o):
     ids = list(range(3)) if o.given_ids is None else o.ids
     write_jsonl(os.path.join(d, "trace.jsonl"), [feedback_row(i, task) for i in ids])
@@ -392,6 +403,65 @@ def _candidate_extra(task, o):
     }
 
 
+def _baseline_extra(task, o):
+    """A CPU baseline lr on trainset-0001, valset-0001 and evalset-0001; metrics_val computed from its predictions_val."""
+    labels = [full_row(i, task) for i in o.ids]
+    metrics_val = scores(task, predictions(task, o.ids, o.wrong), labels)
+    metrics_val.setdefault(task["metrics"]["primary"], 0.8)  # a primary rsi does not compute
+    return {
+        "producer": "compare",
+        "name": "lr",
+        "trainset_id": "trainset-0001",
+        "valset_id": "valset-0001",
+        "evalset_id": "evalset-0001",
+        "testset_id": None,
+        "spec": {"grid": {"C": [0.1, 1.0]}},
+        "spec_sha256": "2" * 64,
+        "config": {"C": 1.0},
+        "features": None,
+        "metrics_val": metrics_val,
+        "cost": {"compute_hours": 0},
+        "reused_from": None,
+    }
+
+
+def _comparison_extra(task, o):
+    """A comparison on the valset rows o.ids of candidate o.candidate (the predictions of a candidate built with the same
+    ids and wrong) against o.baselines: name -> baseline id, or (id, the ids its predictions_val get wrong). metrics_val,
+    deltas_val and strongest are computed with rsi.metrics as registration recomputes them."""
+    primary, higher = task["metrics"]["primary"], task["metrics"]["higher_is_better"]
+    labels = [full_row(i, task) for i in o.ids]
+    clusters = M.clusters_of([input_row(i, task) for i in o.ids])
+    cand = predictions(task, o.ids, o.wrong)
+    metrics_val = {"candidate": scores(task, cand, labels)}
+    metrics_val["candidate"].setdefault(primary, 0.85)  # a primary rsi does not compute
+    ids, deltas, strongest = {}, {}, None
+    for name in sorted(o.baselines):
+        b = o.baselines[name]
+        ids[name], wrong = (b, ()) if isinstance(b, str) else b
+        preds = predictions(task, o.ids, wrong)
+        metrics_val[name] = scores(task, preds, labels)
+        metrics_val[name].setdefault(primary, 0.8)
+        if primary in M.KNOWN_METRICS:
+            deltas[name] = dict(M.paired_delta(primary, cand, preds, labels, task, clusters, **M.ci_settings(task)),
+                                metric=primary)
+        v = metrics_val[name][primary]
+        if strongest is None or (v > metrics_val[strongest][primary] if higher else v < metrics_val[strongest][primary]):
+            strongest = name
+    return {
+        "producer": "compare",
+        "candidate_id": o.candidate,
+        "trainset_id": "trainset-0001",
+        "valset_id": "valset-0001",
+        "evalset_id": "evalset-0001",
+        "baselines": ids,
+        "metrics_val": metrics_val,
+        "deltas_val": deltas,
+        "strongest": strongest,
+        "skipped": {},
+    }
+
+
 def _evaluation_extra(task, o):
     """An evaluation whose numbers are computed from the rows: the delivery's predictions on
     o.ids (wrong o.wrong) against the evalset labels, the best version's (wrong o.best_wrong)
@@ -429,6 +499,25 @@ def _evaluation_extra(task, o):
     if uses_testset:
         test_labels = [label_row(i, task) for i in o.test_ids]
         out["metrics_test"] = scores(task, predictions(task, o.test_ids, o.wrong), test_labels)
+    if o.baselines:  # baseline id -> (name, the ids its predictions get wrong): on the testset at a milestone
+        field, ids = ("baselines_test", o.test_ids) if uses_testset else ("baselines_eval", o.ids)
+        out[field] = baselines_scored(task, ids, o.wrong, o.baselines)
+    return out
+
+
+def baselines_scored(task, ids, wrong, baselines):
+    """An evaluation's baselines_eval (or baselines_test) as the judge computes them with `rsi score` on the rows q<i>, i
+    in ids: for each baseline id -> (name, its wrong ids), its metrics and the paired delta of the primary metric, the
+    delivery's predictions (wrong `wrong`) minus the baseline's, clusters from the rows' inputs."""
+    primary = task["metrics"]["primary"]
+    labels = [label_row(i, task) for i in ids]
+    clusters = M.clusters_of([input_row(i, task) for i in ids])
+    preds = predictions(task, ids, wrong)
+    out = {}
+    for bid, (name, bwrong) in sorted(baselines.items()):
+        base = predictions(task, ids, bwrong)
+        delta = M.paired_delta(primary, preds, base, labels, task, clusters, **M.ci_settings(task))
+        out[bid] = {"name": name, "metrics": scores(task, base, labels), "delta": dict(delta, metric=primary)}
     return out
 
 
@@ -480,6 +569,8 @@ ARTIFACT_BUILDERS = {
         "best_candidate": "candidate-0002",
         "gain_vs_default": {"metric": task["metrics"]["primary"], "delta": 0.05},
     }),
+    "baseline": (_baseline_files, _baseline_extra),
+    "comparison": (_no_files_report, _comparison_extra),
     "delivery": (_delivery_files, lambda task, o: {
         "producer": "deliver",
         "candidate_id": "candidate-0002",
@@ -517,7 +608,7 @@ ARTIFACT_BUILDERS = {
 
 
 def make_artifact(kind, dir, task, ids=None, wrong=(), train_ids=None, best_wrong=(), test_ids=None,
-                  val_ids=None, val_wrong=(), rows=None, **fields):
+                  val_ids=None, val_wrong=(), rows=None, eval_ids=None, candidate=None, baselines=None, **fields):
     """Write a minimal valid artifact directory and return its path.
 
     `ids` (ints) picks the decision rows q<i> written to row files (rows,
@@ -526,14 +617,16 @@ def make_artifact(kind, dir, task, ids=None, wrong=(), train_ids=None, best_wron
     pool) writes the full rows `rows` instead when given (an evalset or testset
     their input rows and label rows). A corpus also has the script
     preprocess.py. Predictions of the ids in `wrong` pick the wrong label.
-    Candidates and evaluations report the numbers rsi.metrics computes from
-    these rows (see Opts for train_ids, best_wrong, test_ids, val_ids and
-    val_wrong), and the train gate and recommendation those numbers give.
+    Candidates, baselines, comparisons and evaluations report the numbers
+    rsi.metrics computes from these rows (see Opts for train_ids, best_wrong,
+    test_ids, val_ids, val_wrong, eval_ids, candidate and baselines), and the
+    train gate, strongest baseline and recommendation those numbers give.
     Other keyword arguments override manifest fields.
     """
     os.makedirs(dir, exist_ok=True)
     build, extra = ARTIFACT_BUILDERS[kind]
-    o = Opts(ids, wrong, train_ids, best_wrong, test_ids, fields, val_ids, val_wrong, rows)
+    o = Opts(ids, wrong, train_ids, best_wrong, test_ids, fields, val_ids, val_wrong, rows, eval_ids, candidate,
+             baselines)
     manifest = {
         "kind": kind,
         "id": None,
@@ -562,7 +655,7 @@ def make_task_dir(dir, task, md=None):
     with open(os.path.join(dir, "task.json"), "w", encoding="utf-8") as f:
         json.dump(task, f, indent=2, ensure_ascii=False)
     with open(os.path.join(dir, "TASK.md"), "w", encoding="utf-8") as f:
-        f.write("# 任务说明：%s\n\nversion %d\n" % (task["task_id"], task["version"]) if md is None else md)
+        f.write("# Task: %s\n\nversion %d\n" % (task["task_id"], task["version"]) if md is None else md)
     return dir
 
 
@@ -584,3 +677,16 @@ def add_predictions(dir, task, logical, ids, wrong=(), **fields):
         files = json.load(f)["files"]
     files[logical] = _pred_file(dir, task, logical, ids, wrong)
     return update_manifest(dir, files=files, **fields)
+
+
+def labels_path(ws, kind):
+    """The absolute path of the labels file of the current `kind` set of workspace `ws`, from its manifest's files."""
+    aid = ws.current(kind)
+    return os.path.join(os.path.abspath(ws.path(aid)), ws.manifest(aid)["files"]["labels"]["path"])
+
+
+def FakeEngine(ws):
+    """A real engine on workspace `ws` whose runner launches nothing (ManualRunner), without the pages."""
+    from rsi.engine import Engine
+    from rsi.runners import ManualRunner
+    return Engine(ws.root, ManualRunner(), pages=False)

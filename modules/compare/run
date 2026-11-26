@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""The compare module's command (modules/compare/SKILL.md): a standard-library launcher that runs `python -m compare
+run <its arguments>` in the task's interpreter, the brief's compare.python, else resources.onejev.python, with
+PYTHONPATH <repo>/modules/compare:<repo>/modules/common:<repo>/modules/train:<repo> (modules/train: trsi, whose
+card choice and model.predict code the GPU baselines use).
+
+    run --brief <outdir>/brief.json --outdir <outdir> --mode <mode> [--feedback <file>]
+
+Without either interpreter, or with one that is not an executable, it writes handback.json with status failed and
+the reason in notes (so the engine's decision applies) and exits 0. A brief it cannot read exits 2.
+"""
+import argparse
+import json
+import os
+import shutil
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+REPO = os.path.dirname(os.path.dirname(HERE))
+NO_PYTHON = "compare needs a Python with scikit-learn: set compare.python or resources.onejev.python"
+
+
+def failed(outdir, notes):
+    path = os.path.join(outdir, "handback.json")
+    tmp = "%s.tmp-%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"status": "failed", "artifacts": [], "marker": None, "notes": notes, "questions": []}, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+    print(notes, file=sys.stderr)
+    return 0
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="run", add_help=False)
+    p.add_argument("--brief", required=True)
+    p.add_argument("--outdir", required=True)
+    args, _ = p.parse_known_args(argv)
+    try:
+        with open(args.brief, encoding="utf-8") as f:
+            brief = json.load(f)
+    except (OSError, ValueError) as e:
+        print("run: cannot read the brief %s: %s" % (args.brief, e), file=sys.stderr)
+        return 2
+    outdir = os.path.abspath(args.outdir)
+    os.makedirs(outdir, exist_ok=True)
+    onejev = (brief.get("resources") or {}).get("onejev") or {}
+    python = (brief.get("compare") or {}).get("python") or onejev.get("python")
+    if not python:
+        return failed(outdir, NO_PYTHON)
+    exe = shutil.which(python)
+    if exe is None:
+        return failed(outdir, "compare's Python %s is not an executable: %s" % (python, NO_PYTHON.split(": ")[1]))
+    env = dict(os.environ)
+    path = [HERE, os.path.join(REPO, "modules", "common"), os.path.join(REPO, "modules", "train"), REPO]
+    env["PYTHONPATH"] = os.pathsep.join(path + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execve(exe, [exe, "-m", "compare", "run"] + list(argv), env)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

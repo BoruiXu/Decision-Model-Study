@@ -1,251 +1,251 @@
-# Decision Model RSI 框架设计（顶层）
+# Decision Model RSI framework design (top level)
 
-> 训练与调优已合并为 ② 训练调优（主流程 ① 数据 → ② 训练调优 → ③ 交付 → ④ 评测与决策），文中的五模块编号是当时的。
+> Training and tuning have since been merged into ② Train & tune, and ③ Compare (a code module, report only, on with the task's `compare` section) now comes between it and delivery: the main flow is ① Data → ② Train & tune → ③ Compare → ④ Deliver → ⑤ Judge & decide. The five-module numbering in this document is that of the time.
 
-> 本文是最初的分层设计（由顶层 skill 里的主流程表调度模块）。现在主流程由代码写好、由 `rsi run` 的流程引擎执行，顶层 skill 只是很薄的操作 skill：见 [plan.md](plan.md) 和 [interfaces/engine.md](interfaces/engine.md)；下文关于顶层 agent 调度顺序、派 subagent 的部分以它们为准。
+> This document is the original layered design (the modules scheduled by the main flow table in the top-level skill). The main flow is now written in code and run by the flow engine of `rsi run`, and the top-level skill is only a thin operator skill: see [plan.md](plan.md) and [interfaces/engine.md](interfaces/engine.md); where this document describes the top-level agent's scheduling order and dispatching subagents, those documents take precedence.
 
-- 日期：2026-11-21
-- 状态：已确认（2026-11-21，用户要求按本文开始搭建）
-- 范围：顶层设计，以及顶层和各模块的输入输出。交接产物的具体格式和校验脚本，在本文确认后另写。
+- Date: 2026-11-21
+- Status: confirmed (2026-11-21, the user asked to start building from this document)
+- Scope: the top-level design, and the inputs and outputs of the top level and of each module. The exact formats of the hand-over artifacts and the validation scripts are written separately once this document is confirmed.
 
-## 1. 这是什么
+## 1. What this is
 
-这是一个通用的、分层的 skill 框架，用来从一句需求做出一个决策模型，并让它不断变好。用户用 prompt 描述一个决策任务，例如“给定一笔交易，判断放行、拦截还是转人工”。顶层把需求整理成任务定义，再调度五个模块：数据、训练、调优、交付、评测与决策。每转一圈产出一个候选版本；评测与决策模块判断它是否比当前最佳版本好，并分析失败、提出下一轮改什么。顶层按规则执行，直到达到目标或预算用完，最后把最好的版本交给用户。这个不断改进的循环就是 RSI。
+This is a general, layered skill framework that builds a decision model from a one-sentence request and keeps improving it. The user describes a decision task in a prompt, for example "given a transaction, decide whether to allow it, block it or send it to a person". The top level turns the request into a task definition and then schedules five modules: data, train, tune, deliver, and judge. Every turn of the loop produces a candidate version; the judge module decides whether it is better than the current best version, analyses the failures and proposes what to change next round. The top level follows the rules until the target is reached or the budget is used up, and finally gives the best version to the user. This loop of continuous improvement is RSI.
 
-框架不针对任何具体任务、数据来源、机器或模型后端，这些都由每次运行的任务定义给出。五个模块各是一个 skill，由不同的负责人编写和维护。本文定义顶层做什么、每个模块做什么，以及它们之间交接什么。
+The framework is not tied to any particular task, data source, machine or model backend; the task definition of each run gives those. Each of the five modules is a skill, written and maintained by a different owner. This document defines what the top level does, what each module does, and what they hand over to each other.
 
-## 2. 目标、非目标、反目标
+## 2. Goals, non-goals, anti-goals
 
-**目标**
-- 从用户的 prompt 一路做到交付一个可调用的决策模型，并能自动进入下一轮改进。
-- 顶层和五个模块的职责、输入、输出界定清楚，模块负责人只要守住输入输出，内部怎么改都不影响别人。
-- 同一套框架支持三种决策类型：二分类、多选一、打分。
-- 团队规划的三个层次的 RSI（System、Component、Meta）都有落点。
+**Goals**
+- Go all the way from the user's prompt to delivering a callable decision model, and enter the next round of improvement automatically.
+- Clear responsibilities, inputs and outputs for the top level and the five modules, so that a module owner who keeps the inputs and outputs can change anything inside without affecting anyone else.
+- One framework for three decision types: binary, one of several, and scoring.
+- A place for each of the three levels of RSI that Prof. He proposed (System, Component, Meta).
 
-**非目标**
-- 不规定模块内部的方法，例如数据怎么生成、模型用什么后端、参数怎么搜、接口怎么部署。
-- 不规定团队的协作节奏。框架每运行一次就是一次完整的流程。
-- 第一版不追求完全自动。任务定义、下一轮计划、使用封存 test 等关键节点由人确认。
+**Non-goals**
+- No prescribed method inside the modules, e.g. how data is generated, which backend the model uses, how parameters are searched, how the interface is deployed.
+- No prescribed rhythm of team collaboration. Each run of the framework is one complete flow.
+- The first version does not aim at full automation. Key points such as the task definition, the next round's plan and using the sealed testset are confirmed by a person.
 
-**反目标**（即使跑通了也算失败）
-- 框架里写死了某个任务的假设。
-- 顶层自己去做模块的活。
-- 产出模型的模块能看到或改动评判它的标准。
-- 模块离开顶层就跑不起来，负责人无法单独改进自己的模块。
+**Anti-goals** (failures even when everything runs)
+- The framework hard-codes the assumptions of a particular task.
+- The top level does a module's work itself.
+- A module that produces models can see or change the criteria that judge it.
+- A module cannot run without the top level, and its owner cannot improve it alone.
 
-## 3. 方案选择
+## 3. Choice of approach
 
-**组织方式**考虑过三种。A 是中央调度、模块只是被调用的工人，最简单，但负责人无法单独评估和改进自己的模块。B 是中央调度加统一的模块模板，每个模块写明输入、输出、门、模块指标和单独运行方式。C 是去中心化，各模块监视共享的产物库，有新输入就运行，最解耦，但需要另建触发机制，出错难查。选择 B，它既能从一句需求一路跑到交付，又让每个负责人能单独改进自己的模块。
+Three **ways of organising** were considered. A is central scheduling with modules as mere workers being called: the simplest, but owners cannot evaluate and improve their modules alone. B is central scheduling plus a common module template, each module stating its inputs, outputs, gates, module metrics and how to run it standalone. C is decentralised, each module watching a shared artifact store and running when a new input arrives: the most decoupled, but it needs a separate trigger mechanism, and errors are hard to trace. B was chosen: it can go all the way from a one-sentence request to delivery, and lets each owner improve their own module alone.
 
-**判断和决策放在哪里**考虑过两种。一种是全部放在顶层，交接少，但这部分正是最需要持续研究和改进的地方，放在顶层就没有负责人去做它的 Component RSI，而顶层本身应该稳定、少变。另一种是规则留在顶层，判断和决策交给一个专门的模块。选择后者，并把评测集的标签只交给这个模块保管，交付模块只拿输入跑预测，看不到标签。这样裁判和选手分开，产出模型的模块无法对着评测集反复调整。
+Two options were considered for **where judgement and decisions live**. One is all at the top level: fewer hand-overs, but this is exactly the part that most needs continuing research and improvement, and at the top level no owner would do its Component RSI, while the top level itself should be stable and change little. The other keeps the rules at the top level and gives judgement and decisions to a dedicated module. The latter was chosen, and the evalset's labels are kept only by this module; the deliver module only runs predictions on the inputs and never sees the labels. So referee and player are kept apart, and the modules that produce models cannot tune against the evalset over and over.
 
-## 4. 整体架构
-
-```
-第 0 层  顶层 orchestrator：定规则、调度、执行
-第 1 层  五个模块：① 数据  ② 训练  ③ 调优  ④ 交付  ⑤ 评测与决策
-第 2 层  各模块负责人自己拆分的策略子 skill
-```
-
-从用户 prompt 到最终结果：
+## 4. Overall architecture
 
 ```
-用户 prompt
-   │
-   ▼
-顶层：任务接入 → 任务定义（含升级规则、停止条件、预算），用户确认
-   │
-   ▼
-① 数据 ──► 训练集；第一轮另外产出验证集和评测集，评测集交给 ⑤ 保管
-   │
-   ▼
-② 训练 ◄──► ③ 调优 ──► 候选模型
-   │
-   ▼
-④ 交付 ──► 模型包和预测接口；在评测集上只拿输入跑出的预测；延迟和成本；执行反馈
-   │
-   ▼
-⑤ 评测与决策 ──► 打分，和当前最佳版本比较 → 升级或保留的建议
-                 失败分析和归因 → 下一轮计划
-   │
-   ▼
-顶层：按升级规则核对并执行，登记版本，检查停止条件
-   ├─ 停止 → 交给用户：运行报告，当前最佳版本的模型包、预测接口、评测报告，全部实验记录
-   └─ 继续 → 按计划回到 ①、②、③、④ 中的一个
+Layer 0  top-level orchestrator: sets the rules, schedules, executes
+Layer 1  five modules: ① Data  ② Train  ③ Tune  ④ Deliver  ⑤ Judge & decide
+Layer 2  strategy sub-skills each module owner splits out
 ```
 
-## 5. 顶层的职责
+From the user's prompt to the final result:
 
-顶层只做三类事，不做任何模块的工作，也不做需要判断的分析。
+```
+User prompt
+   │
+   ▼
+Top level: task intake → task definition (with promotion rule, stop conditions, budget), confirmed by the user
+   │
+   ▼
+① Data ──► trainset; round 1 also produces the valset and the evalset, the evalset handed to ⑤ to keep
+   │
+   ▼
+② Train ◄──► ③ Tune ──► candidate model
+   │
+   ▼
+④ Deliver ──► model package and prediction interface; predictions run on the evalset inputs only; latency and cost; execution feedback
+   │
+   ▼
+⑤ Judge & decide ──► scores, compares with the current best version → recommendation to promote or keep
+                     failure analysis and attribution → next round's plan
+   │
+   ▼
+Top level: checks and executes by the promotion rule, registers versions, checks the stop conditions
+   ├─ stop → to the user: the run report, the current best version's model package, prediction interface and evaluation report, all experiment records
+   └─ go on → back to one of ①, ②, ③, ④ by the plan
+```
 
-**协调。** 把用户的需求整理成任务定义，四个产出模块和评测与决策模块都按这一份定义工作。规定每次交接的内容，交接时先校验再往下传。决定下一步运行哪个模块，交给它输入，收回它的输出，长任务在后台等待。把算力、标注、调用费用等预算分配给各模块，在需要人确认的节点停下来。
+## 5. What the top level does
 
-**守规则。** 任务定义、升级规则、停止条件、冻结的验证集和评测集、封存的 test，都由顶层固定，任何模块都不能修改。修改任务定义要用户确认，并生成新版本。顶层还负责版本登记：每个版本用了哪份数据、哪个配置、哪个模型，都能追溯。
+The top level does only three kinds of things; it does none of a module's work and no analysis that needs judgement.
 
-**执行。** 拿到评测与决策模块的建议后，按任务定义里的升级规则核对数字，一致才执行升级或保留。指标、对照组、差值和置信区间怎么算由代码固定（`rsi/metrics.py`），不由各模块自行决定：训练和评测与决策模块用 `rsi score` 算报告的数，登记时代码按同样的定义重算，对不上就拒绝登记。所以训练门和升级判定用的都是代码核对过的数，不同模块算出的数也可以直接比较。第一轮还没有当前最佳版本，候选模型通过训练模块的门后直接成为第一个版本，评测报告照常产出。下一轮计划按审批点交用户确认后，派给计划指定的模块。满足停止条件时停止，把运行报告和结果交给用户。各模块的实验记录也由顶层收集登记。
+**Coordinate.** Turn the user's request into a task definition, by which the four producing modules and the judge module all work. Set what each hand-over holds, validating each hand-over before passing it on. Decide which module runs next, give it its inputs, take back its outputs, and wait in the background for long jobs. Allocate budgets such as compute, annotation and call costs to the modules, and stop at the points that need a person's confirmation.
 
-**停止条件。** 以下任一成立即停止：当前最佳版本的主指标达到目标（`stop.target`）；算力预算用完（`budget.compute_hours`）；已完成的轮数达到 `stop.max_rounds`；连续 `stop.patience` 轮没有升级（不写时为 3）；用户要求结束。前四条由代码在每轮结束时检查（`rsi next`）；用户随时可以要求结束，顶层用 `rsi stop` 记下用户的原话。停止之后只能补登记实验记录和做删除审批后的清理。
+**Keep the rules.** The task definition, the promotion rule, the stop conditions, the frozen valset and evalset, and the sealed testset are all fixed by the top level, and no module may change them. Changing the task definition needs the user's confirmation and makes a new version. The top level also keeps the version registry: which data, which config and which model each version used can all be traced.
 
-**每轮的尝试和关闭一轮。** 一轮里候选没过训练模块的门时，顶层在本轮重派训练、调优，或让数据模块出新的训练集，直到有候选通过。每轮最多尝试 `stop.max_attempts_per_round` 次（不写时为 3；训练产出的一个候选、调优的一次搜索各算一次，搜索里的试验不单独算），超出的登记会被拒绝。用完仍没有候选通过训练门，就关闭本轮（`rsi close-round`）：本轮记为保留，算一轮没有升级，计入 `max_rounds` 和 `patience`；评测与决策模块根据本轮候选的失败原因和实验记录写下一轮计划。这样即使每轮都失败，运行最多 `patience` 轮后也会停止，不会卡在某一轮。
+**Execute.** Given the judge module's recommendation, check the numbers against the task definition's promotion rule, and only when they agree promote or keep. How metrics, baselines, deltas and confidence intervals are computed is fixed by code (`rsi/metrics.py`), not decided by each module: the train and judge modules compute the numbers they report with `rsi score`, and at registration the code recomputes them by the same definitions and refuses a mismatch. So the train gate and promotion decisions both use numbers the code has checked, and numbers from different modules can be compared directly. In round 1 there is no current best version yet, so a candidate model that passes the train module's gate becomes the first version directly, and the evaluation report is produced as usual. The next round's plan goes to the user for confirmation at the approval point and is then dispatched to the module the plan names. When a stop condition holds the run stops, and the run report and the results go to the user. The top level also collects and registers the modules' experiment records.
 
-## 6. 五个模块的职责
+**Stop conditions.** The run stops when any one holds: the current best version's primary metric reaches the target (`stop.target`); the compute budget is used up (`budget.compute_hours`); the completed rounds reach `stop.max_rounds`; `stop.patience` rounds in a row without promotion (3 when not written); the user asks to end. The code checks the first four at the end of each round (`rsi next`); the user may ask to end at any time, and the top level records the user's own words with `rsi stop`. After a stop, only experiment records may still be registered and the cleanup after a delete approval done.
 
-| 模块 | 对应团队规划 | 职责 |
+**Attempts per round and closing a round.** When a round's candidates fail the train module's gate, the top level dispatches train and tune again in this round, or has the data module produce a new trainset, until a candidate passes. Each round tries at most `stop.max_attempts_per_round` times (3 when not written; a candidate produced by train and a search by tune each count once, and the trials within a search do not count separately), and registrations beyond that are refused. When they are used up and still no candidate passed the train gate, the round is closed (`rsi close-round`): it is recorded as keep, counts as a round without promotion, and counts in `max_rounds` and `patience`; the judge module writes the next round's plan from why this round's candidates failed and from the experiment records. So even if every round fails, the run stops after at most `patience` rounds and never gets stuck in a round.
+
+## 6. What the five modules do
+
+| Module | In Prof. He's terms | Responsibilities |
 |---|---|---|
-| ① 数据 | 数据生成、数据质量、数据检测 | 获取或生成数据，检查并提高数据质量；第一轮产出验证集和评测集 |
-| ② 训练 | 模型、模型架构 | 训练决策模型；提供一个不需要 agent 参与的训练命令，供调优调用 |
-| ③ 调优 | 超参调优 | 利用历史实验搜索更好的配置和训练策略 |
-| ④ 交付 | 运行时系统 | 打包模型和预测接口；在评测集上只拿输入跑预测；测延迟和成本；收集执行反馈 |
-| ⑤ 评测与决策 | Evaluation、RSI Controller | 保管评测集的标签；打分和比较；给出升级建议；失败分析和归因；提出下一轮计划 |
+| ① Data | Data generation, data quality, data checks | Get or generate data, check and improve its quality; produce the valset and the evalset in round 1 |
+| ② Train | Model, model architecture | Train the decision model; provide a train command that needs no agent, for tune to call |
+| ③ Tune | Hyperparameter tuning | Search better configs and training strategies using past experiments |
+| ④ Deliver | Runtime system | Package the model and the prediction interface; run predictions on the evalset inputs only; measure latency and cost; collect execution feedback |
+| ⑤ Judge & decide | Evaluation, RSI Controller | Keep the evalset's labels; score and compare; recommend promotion; analyse and attribute failures; propose the next round's plan |
 
-## 7. 数据的划分
+## 7. Data split
 
-| 集合 | 由谁产出 | 谁能看到标签 | 用途 | 是否变化 |
+| Set | Produced by | Who sees the labels | Use | Changes |
 |---|---|---|---|---|
-| 训练集 | ① | ②、③；⑤ 只用它算对照组 | 训练 | 每轮可以出新版本 |
-| 验证集 | ①，第一轮 | ②、③、①；④ 只拿输入（不带标签），用来复现候选的验证集预测 | 选 checkpoint、定阈值、比较配置、去重检查 | 第一轮后固定，刷新要用户批准 |
-| 评测集 | ①，第一轮，产出后交给 ⑤ | 只有 ⑤ | 升级判定 | 固定；参与升级判定的次数有上限，到上限后刷新要用户批准 |
-| 封存 test | ①，第一轮，产出后交给 ⑤ | 只有 ⑤，且每次使用要用户批准 | 里程碑发布时的最终验证 | 不变 |
+| Trainset | ① | ②, ③; ⑤ uses it only for the baselines | Training | May have a new version every round |
+| Valset | ①, round 1 | ②, ③, ①; ④ gets only the inputs (without labels), to reproduce the candidate's valset predictions | Choosing checkpoints, setting thresholds, comparing configs, dedup checks | Fixed after round 1; a refresh needs the user's approval |
+| Evalset | ①, round 1, handed to ⑤ once produced | ⑤ only | Promotion decisions | Fixed; the number of promotion decisions it takes part in is capped, and a refresh after the cap needs the user's approval |
+| Sealed testset | ①, round 1, handed to ⑤ once produced | ⑤ only, and every use needs the user's approval | Final check at a milestone release | Never changes |
 
-验证集固定不变，各模块的新旧比较才是同一把尺子。评测集只给 ⑤，因为它决定升级，必须和产出模型的模块隔开。数据模块虽然在第一轮产出了评测集，但交出之后不再保留访问：登记时评测集和 test 的目录被整个移进工作区，数据模块的输出目录里不留标签（同一台机器上的读取靠约定约束，代码不阻止）；之后每轮由顶层检查训练集与验证集、评测集、test 之间没有重复。评测集刷新后，当前最佳版本要在新评测集上重新打分，所以当前最佳版本的模型一直保留，直到被新版本取代。
+The valset stays fixed so that the modules' comparisons of old and new use the same ruler. The evalset goes only to ⑤, because it decides promotion and must be kept apart from the modules that produce models. Although the data module produces the evalset in round 1, it keeps no access once it hands it over: at registration the evalset's and testset's directories are moved into the workspace whole, and the data module's output directory keeps no labels (reads on the same machine are held back by convention, not prevented by code); after that, each round the top level checks that the trainset does not repeat the valset, the evalset or the testset. After an evalset refresh, the current best version must be scored again on the new evalset, so the current best version's model is kept until a new version replaces it.
 
-## 8. 每部分的输入和输出
+## 8. Inputs and outputs of each part
 
-每个模块都要满足三条：只读它的输入；交出的东西通过顶层的校验；能拿已有的上游产物单独运行，不必跑全流程。每个模块每做一次改进实验，都额外交一份实验记录（第 9 节）。
+Every module meets three conditions: it reads only its inputs; what it hands over passes the top level's validation; it can run standalone on existing upstream artifacts without the whole flow. For every improvement experiment, each module also hands in an experiment record (section 9).
 
-### 8.1 顶层 · 任务接入
+### 8.1 Top level · task intake
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 用户的需求：要做什么决策、数据在哪、能用什么资源、要达到什么水平 |
-| 输出 | 任务定义：决策类型；动作或标签及其含义；模型能看到的输入；数据来源；主指标和其他指标；对照组；目标；升级规则；停止条件；预算；资源；审批点 |
+| Input | The user's request: what decision to make, where the data is, what resources may be used, what level to reach |
+| Output | Task definition: decision type; actions or labels and their meanings; the input the model can see; data sources; primary and other metrics; baselines; target; promotion rule; stop conditions; budget; resources; approval points |
 
-信息不全时一次问完。用户确认后，任务定义固定下来。
+When information is missing, ask all at once. Once the user confirms, the task definition is fixed.
 
-### 8.2 ① 数据
+### 8.2 ① Data
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 任务定义。可选：上一版训练集；下一轮计划里归因到数据的问题；带真实结果的执行反馈；⑤ 给出的错例切片 |
-| 输出 | 训练集的新版本和数据质量报告。第一轮或获批刷新时，另外输出验证集、评测集和封存 test |
-| 门 | 任务定义规定的数据质量检查，例如样本量、标签分布、标签信度、近似重复 |
-| 模块指标 | 本轮的评测和当前最佳版本的比较：新训练集上训出的候选在评测集上相对最佳版本（旧训练集训出的）的主指标差值和升级判定，由 ⑤ 记录。数据模块不训练，不自己验证新训练集（2026-11-25 起；之前是在新旧训练集上各训一次、比较验证集主指标） |
+| Input | Task definition. Optional: the previous trainset; the issues of the next round's plan attributed to data; execution feedback with real outcomes; error slices from ⑤ |
+| Output | A new version of the trainset and a data quality report. In round 1 or an approved refresh, also the valset, the evalset and the sealed testset |
+| Gate | The data quality checks the task definition sets, e.g. sample size, label distribution, label reliability, near duplicates |
+| Module metric | This round's evaluation against the current best version: the primary metric delta and the promotion decision of the candidate trained on the new trainset against the best version (trained on the old trainset) on the evalset, recorded by ⑤. The data module does not train and does not check the new trainset itself (since 2026-11-25; before that it trained once on the new and once on the old trainset and compared the valset primary metric) |
 
-### 8.3 ② 训练
+### 8.3 ② Train
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 任务定义；训练集；验证集；训练配置（默认配置，或 ③ 给出的配置） |
-| 输出 | 候选模型（模型文件、能直接运行的预测入口、完整的训练配置、训练代码的版本、所用训练集的版本）；验证集上的预测和指标；训练日志 |
-| 门 | 验证集上主指标严格优于任务定义列出的每个对照组（方向按任务定义，相等不算优于） |
-| 模块指标 | 训练集固定时，相对上一种训练方法的提升 |
+| Input | Task definition; trainset; valset; training config (the default config, or one given by ③) |
+| Output | Candidate model (model files, a directly runnable prediction entry, the full training config, the training code's version, the version of the trainset used); predictions and metrics on the valset; training log |
+| Gate | The primary metric on the valset strictly better than every baseline the task definition lists (direction by the task definition; equal is not better) |
+| Module metric | With the trainset fixed, the gain over the previous training method |
 
-训练模块还要提供一个不需要 agent 参与的训练命令：输入训练集、验证集和配置，输出候选模型。调优的每次试验调用它；数据模块不调用它（2026-11-25 起数据模块不训练，新训练集的好坏由训练和评测判断）。
+The train module also provides a train command that needs no agent: trainset, valset and config in, candidate model out. Every trial of tune calls it; the data module does not call it (since 2026-11-25 the data module does not train, and train and judge judge whether a new trainset is good).
 
-### 8.4 ③ 调优
+### 8.4 ③ Tune
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 任务定义；训练集；验证集；历史实验（已有的候选模型和搜索记录）；预算 |
-| 输出 | 最佳配置和对应的候选模型；搜索记录（每次试验的配置、结果和花费） |
-| 门 | 最佳配置在验证集上不差于默认配置；做不到时交回默认配置的结果，并如实记录。一次搜索的所有试验出自同一版训练代码，训练代码和默认配置的改动放在两轮之间 |
-| 模块指标 | 同样预算下，相对默认配置的增益 |
+| Input | Task definition; trainset; valset; past experiments (existing candidate models and search records); budget |
+| Output | The best config and its candidate model; the search record (each trial's config, result and cost) |
+| Gate | The best config not worse than the default config on the valset; when that cannot be met, hand back the default config's result and record it truthfully. All trials of a search come from the same version of the training code; changes to the training code and the default config go between rounds |
+| Module metric | The gain over the default config for the same budget |
 
-### 8.5 ④ 交付
+### 8.5 ④ Deliver
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 候选模型；评测集的输入（不带标签）；候选所用验证集的输入（不带标签）；里程碑发布且用户批准时，封存 test 的输入 |
-| 输出 | 模型包（模型、阈值、运行环境、启动方式，放在交付目录里或带 sha256 的外部条目）；预测接口；评测集和验证集上的预测；延迟和成本；执行反馈 |
-| 门 | 模型包能加载；接口在验证集输入上的输出复现候选的验证集预测（登记时由代码逐行核对） |
-| 模块指标 | 延迟、成本、打包是否一次成功 |
+| Input | Candidate model; the evalset's inputs (without labels); the inputs of the candidate's valset (without labels); at a milestone release, with the user's approval, the sealed testset's inputs |
+| Output | Model package (model, threshold, runtime environment, how to start it; in the delivery directory or an external entry with sha256); prediction interface; predictions on the evalset and the valset; latency and cost; execution feedback |
+| Gate | The model package loads; the interface's output on the valset inputs reproduces the candidate's valset predictions (checked row by row by code at registration) |
+| Module metric | Latency, cost, whether packaging succeeds at the first try |
 
-预测接口是交付里的最小 Runtime。它接收一个样本的输入，返回各动作的概率、选中的动作和不确定度，并为每次调用写一条执行反馈：输入、输出、模型版本、耗时，以及事后得到的真实结果（如果有）。带真实结果的执行反馈可以回到数据模块，变成新的训练样本。
+The prediction interface is the minimal Runtime in the delivery. It takes one sample's input, returns each action's probability, the chosen action and the uncertainty, and writes one execution feedback row for every call: input, output, model version, time taken, and the real outcome learned later (if any). Execution feedback with real outcomes can go back to the data module and become new training samples.
 
-### 8.6 ⑤ 评测与决策
+### 8.6 ⑤ Judge & decide
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | 任务定义（指标、对照组、升级规则）；评测集（带标签）；④ 交出的预测、延迟和成本；当前最佳版本的成绩和预测；送评候选的训练集（只用来算对照组）；执行反馈；全部实验记录 |
-| 输出 | 评测报告：各指标，与当前最佳版本和对照组的比较及区间，按分组和切片的结果。升级或保留的建议及证据。失败分析：错在哪里，归因到哪个模块。下一轮计划：回到哪个模块、改什么、预期提升多少 |
-| 门 | 建议必须引用升级规则和对应的数字；计划里每个问题都有证据和唯一的归因 |
-| 模块指标 | 计划的命中率：计划里预期的提升有多少真的实现了 |
+| Input | Task definition (metrics, baselines, promotion rule); evalset (with labels); the predictions, latency and cost ④ handed over; the current best version's results and predictions; the trainset of the candidate sent to evaluation (only for the baselines); execution feedback; all experiment records |
+| Output | Evaluation report: each metric, the comparison with the current best version and the baselines with intervals, results by group and slice. A recommendation to promote or keep, with evidence. Failure analysis: where it goes wrong and which module it is attributed to. The next round's plan: which module to go back to, what to change, how much gain to expect |
+| Gate | The recommendation must cite the promotion rule and the matching numbers; every issue in the plan has evidence and exactly one attribution |
+| Module metric | The plan's hit rate: how much of the gain the plan expected really came true |
 
-归因和重新进入的模块对应如下：数据覆盖不足、标签有噪声、标签定义有问题，回到数据；模型能力不足、校准不好，回到训练；配置不好，回到调优；延迟、成本或接口问题，回到交付。
+Attributions map to the module re-entered as follows: insufficient data coverage, noisy labels or a problematic label definition go back to data; too little model capacity or poor calibration go back to train; a poor config goes back to tune; latency, cost or interface problems go back to deliver.
 
-### 8.7 顶层 · 闭环
+### 8.7 Top level · closing the loop
 
-| 项 | 内容 |
+| Item | Content |
 |---|---|
-| 输入 | ⑤ 的建议和计划；预算用量 |
-| 输出 | 版本登记（升级时更新当前最佳版本）；派出下一轮；或者停止，交出运行报告和最终结果 |
+| Input | ⑤'s recommendation and plan; budget used |
+| Output | Version registry (the current best version updated on promotion); dispatching the next round; or stopping, handing over the run report and the final result |
 
-## 9. 交接产物一览
+## 9. Hand-over artifacts
 
-| 产物 | 类别名 | 产出 | 使用 |
+| Artifact | Kind name | Produced by | Used by |
 |---|---|---|---|
-| 任务定义 | `task` | 顶层 | 全部 |
-| 训练集（带版本） | `trainset` | ① | ②、③；⑤ 只用来算对照组 |
-| 验证集 | `valset` | ① | ①、②、③；④ 只拿输入 |
-| 评测集 | `evalset` | ① 产出，⑤ 保管 | ⑤；④ 只拿输入 |
-| 封存 test | `testset` | ① 产出，⑤ 保管 | ⑤；④ 只拿输入，且要用户批准 |
-| 候选模型 | `candidate` | ②（③ 通过训练命令产出） | ③、④ |
-| 搜索记录 | `search` | ③ | ⑤、顶层 |
-| 模型包、预测接口、评测集上的预测、延迟和成本 | `delivery` | ④ | ⑤、用户 |
-| 执行反馈 | `feedback` | ④，或接入真实系统后的接口 | ①、⑤ |
-| 评测报告和升级建议 | `evaluation` | ⑤ | 顶层 |
-| 下一轮计划 | `plan` | ⑤ | 顶层，再派给对应模块 |
-| 实验记录 | `record` | 每个模块 | ⑤、顶层 |
+| Task definition | `task` | top level | all |
+| Trainset (versioned) | `trainset` | ① | ②, ③; ⑤ only for the baselines |
+| Valset | `valset` | ① | ①, ②, ③; ④ only the inputs |
+| Evalset | `evalset` | produced by ①, kept by ⑤ | ⑤; ④ only the inputs |
+| Sealed testset | `testset` | produced by ①, kept by ⑤ | ⑤; ④ only the inputs, and with the user's approval |
+| Candidate model | `candidate` | ② (③ produces them through the train command) | ③, ④ |
+| Search record | `search` | ③ | ⑤, top level |
+| Model package, prediction interface, predictions on the evalset, latency and cost | `delivery` | ④ | ⑤, the user |
+| Execution feedback | `feedback` | ④, or the interface once connected to a real system | ①, ⑤ |
+| Evaluation report and promotion recommendation | `evaluation` | ⑤ | top level |
+| Next round's plan | `plan` | ⑤ | top level, then dispatched to the module concerned |
+| Experiment record | `record` | every module | ⑤, top level |
 
-**实验记录**是 Meta-RSI 的材料。每份包括：发现的问题，为什么认为改动有效，改了什么，结果（改动前后的数值、结论是成功、失败还是不确定），学到了什么，以及这一步现在是人工、脚本还是自动完成。
+**Experiment records** are the material of Meta-RSI. Each holds: the problem found, why the change was expected to work, what was changed, the result (the values before and after the change, and whether the conclusion is success, failure or inconclusive), what was learned, and whether this step is now done by hand, by script or automatically.
 
-每类产物的具体格式和校验脚本，在本文确认后另写。
+The exact format and validation script of each artifact kind are written separately once this document is confirmed.
 
-## 10. 三个层次的 RSI
+## 10. Three levels of RSI
 
-**System RSI** 是顶层的闭环。每转一圈产出一个候选版本，由 ⑤ 判断是否升级，所以当前最佳版本只会变好或保持。
+**System RSI** is the top level's loop. Every turn produces a candidate version, and ⑤ decides whether to promote it, so the current best version only gets better or stays.
 
-**Component RSI** 是每个模块用自己的模块指标改进自己（第 8 节）。负责人可以拿已有的上游产物单独运行自己的模块，改好之后再交回框架。
+**Component RSI** is each module improving itself by its own module metric (section 8). An owner can run their module standalone on existing upstream artifacts, and hand it back to the framework once improved.
 
-**Meta-RSI** 是从改进过程本身学习。⑤ 根据实验记录判断哪些改进策略在什么情况下有效，用来提出更准的计划；反复出现的经验交给模块负责人去改 skill，或者变成自动规则。
+**Meta-RSI** is learning from the improvement process itself. From the experiment records ⑤ works out which improvement strategies work in which situations, to propose more accurate plans; recurring lessons go to the module owners to change their skills, or become automatic rules.
 
-## 11. 固定的规则和审批点
+## 11. Fixed rules and approval points
 
-以下内容由顶层固定，任何模块都不能修改：任务定义（含升级规则和停止条件）、验证集、评测集、封存 test、版本登记。
+These are fixed by the top level and no module may change them: the task definition (with the promotion rule and stop conditions), the valset, the evalset, the sealed testset, the version registry.
 
-默认审批点：确认或修改任务定义；预计用量超过预算；使用封存 test；刷新验证集或评测集；执行下一轮计划（第一版每轮都确认）；删除产物。
+Default approval points: confirming or changing the task definition; expected use over the budget; using the sealed testset; refreshing the valset or the evalset; carrying out the next round's plan (confirmed every round in the first version); deleting artifacts.
 
-**停止时的交付。** 每次停止，不论是满足停止条件还是用户要求，顶层都用 `rsi report` 生成运行报告。报告由代码生成，内容固定：任务、停止理由、各轮的判定和理由、各版本和当前最佳版本（含模型包和评测报告的位置）、里程碑评测、按模块分组的实验记录、每轮的尝试次数和预算用量。顶层在报告后补上代码给不出的解读：学到了什么、下一步该试什么，只转述已有的评测、计划和实验记录。然后把报告连同当前最佳版本的模型包、预测接口和评测报告交给用户。一个版本都没有升级时，报告开头写明没有产生可发布的版本，并列出各轮的结论，作为失败报告交给用户。
+**Delivery at the stop.** At every stop, whether a stop condition held or the user asked, the top level produces the run report with `rsi report`. The report is generated by code with fixed content: the task, the stop reason, each round's decision and reason, the versions and the current best version (with the locations of the model package and the evaluation report), milestone evaluations, the experiment records grouped by module, each round's attempts and the budget used. After the report the top level adds the interpretation code cannot give: what was learned and what to try next, only relaying existing evaluations, plans and experiment records. Then it gives the report to the user together with the current best version's model package, prediction interface and evaluation report. When not a single version was promoted, the report opens by saying that no releasable version was produced and lists each round's conclusion, and goes to the user as a failure report.
 
-## 12. 多层 skill 的结构
+## 12. The structure of the layered skills
 
-| 层 | skill | 维护者 |
+| Layer | Skill | Maintained by |
 |---|---|---|
-| 第 0 层 | `rsi-orchestrator` | 框架 |
-| 第 1 层 | `rsi-data`、`rsi-train`（训练调优，原来的 `rsi-tune` 已并入）、`rsi-deliver`、`rsi-judge`，名字固定；各在 `modules/<模块>/SKILL.md` | 各模块负责人 |
-| 第 2 层 | 策略子 skill，例如数据模块下按标签来源分规则、模型评判、人工标注，训练模块下按模型后端分 | 各模块负责人 |
+| Layer 0 | `rsi-orchestrator` | the framework |
+| Layer 1 | `rsi-data`, `rsi-train` (train module; the former `rsi-tune` has been merged into it), `rsi-deliver`, `rsi-judge`, with fixed names; each in `modules/<module>/SKILL.md` | each module owner |
+| Layer 2 | Strategy sub-skills, e.g. under the data module by label source (rules, model judging, human annotation), under the train module by model backend | each module owner |
 
-顶层只加载第 1 层，第 1 层根据任务定义选用第 2 层。第 1 层的 skill 按同一个模板写：输入、输出、门、单独运行方式、步骤和策略子 skill、模块指标、何时写实验记录、长任务怎么在后台运行、负责人和版本。顶层只依赖前四项；其余部分负责人可以随时改。
+The top level loads only layer 1, and layer 1 picks layer 2 by the task definition. Layer 1 skills follow one template: inputs, outputs, gates, how to run standalone, steps and strategy sub-skills, module metrics, when to write experiment records, how long jobs run in the background, owner and version. The top level depends only on the first four; owners may change the rest at any time.
 
-## 13. 顶层的实现方式
+## 13. How the top level is implemented
 
-**由谁执行。** 顶层是一个 workflow skill `rsi-orchestrator`。用户在 Claude Code 里开一个会话，直接说需求，或者调用 `/rsi-orchestrator`，主会话加载这个 skill 后就成为顶层 agent。中途停下后，再调用同一个 skill，它读工作区的进度文件，从停下的地方继续。
+**Who runs it.** The top level is a workflow skill, `rsi-orchestrator`. The user opens a session in Claude Code and states the request directly, or calls `/rsi-orchestrator`; once the main session loads this skill it becomes the top-level agent. After a stop midway, calling the same skill again reads the workspace's progress files and goes on from where it stopped.
 
-**怎么派模块。** 只有主会话能派 subagent，subagent 不能再派 subagent。所以顶层必须是主会话；每个模块由主会话派出的一个 subagent 执行，这个 subagent 加载对应的第 1 层 skill。模块之间不能互相派 agent，需要别的模块的能力时调用它提供的命令，例如调优调用训练模块的训练命令。
+**How modules are dispatched.** Only the main session can dispatch subagents, and a subagent cannot dispatch further subagents. So the top level must be the main session; each module is run by a subagent the main session dispatches, which loads the matching layer 1 skill. Modules cannot dispatch agents to each other; when one needs another module's capability it calls a command that module provides, e.g. tune calls the train module's train command.
 
-**调度顺序。** 主会话按 workflow skill 里的主流程表依次派模块，不同时派出全部模块。每一轮的顺序是 ① → ② 和 ③ → ④ → ⑤ → 顶层核对。② 和 ③ 只依赖训练集和验证集，可以同时派；有多个候选模型时，④ 可以同时打包。下一轮从计划指定的模块开始，不必派全五个模块。长任务由 subagent 在后台启动后交回，主会话等完成标记，不轮询。
+**Scheduling order.** The main session dispatches modules one after another by the main flow table in the workflow skill, never all at once. Each round's order is ① → ② and ③ → ④ → ⑤ → top-level check. ② and ③ depend only on the trainset and the valset and can be dispatched together; with several candidate models, ④ can package them together. The next round starts at the module the plan names, without dispatching all five modules. Long jobs are started in the background by the subagent, which then hands back; the main session waits for the completion marker and does not poll.
 
-**脚本把关。** skill 是给 agent 的指令，agent 可能偏离，所以机械的判断都由框架的命令行工具 `rsi` 完成，agent 只能调用：校验交接产物（`rsi validate`）、建立工作区（`rsi init`）、登记产物并核对每轮的尝试次数（`rsi register`）、查看状态（`rsi status`）、按代码固定的定义算指标、对照组和差值（`rsi score`，模块也可以运行）、按升级规则核对评测结果并登记版本（`rsi promote`）、关闭没有可评测候选的一轮（`rsi close-round`）、记录审批（`rsi approve`）、检查停止条件（`rsi check-stop`）、检查停止并推进轮次（`rsi next`）、记录用户要求的停止（`rsi stop`）、生成运行报告（`rsi report`）。脚本之间互相把关：没有通过校验的产物不能登记；登记时按同一套定义重算候选和评测报告的指标、对照组、训练门、差值和区间，对不上就拒绝；没有登记的评测结果不能升级版本；没有批准的计划不能派出下一轮。这样 agent 即使跳过一步，流程也走不下去。
+**Scripts as gatekeepers.** A skill is an instruction to an agent, and agents may stray, so every mechanical judgement is made by the framework's command-line tool `rsi`, which agents can only call: validating hand-over artifacts (`rsi validate`), creating the workspace (`rsi init`), registering artifacts and checking each round's attempts (`rsi register`), viewing the state (`rsi status`), computing metrics, baselines and deltas by the definitions fixed in code (`rsi score`, which modules may run too), checking evaluation results against the promotion rule and registering versions (`rsi promote`), closing a round without a candidate to evaluate (`rsi close-round`), recording approvals (`rsi approve`), checking the stop conditions (`rsi check-stop`), checking the stop and moving the round on (`rsi next`), recording a stop the user asks for (`rsi stop`), producing the run report (`rsi report`). The scripts guard each other: an artifact that failed validation cannot be registered; registration recomputes the metrics, baselines, train gate, deltas and intervals of candidates and evaluation reports by the same definitions and refuses a mismatch; an evaluation result not registered cannot promote a version; a plan not approved cannot dispatch the next round. So even if an agent skips a step, the flow cannot go on.
 
-**格式。** 机器读写的产物一律用 JSON 和 JSONL，给人看的说明用 Markdown。`rsi` 只依赖 Python 标准库，可以在任何装了 Python 3.9 以上的机器上运行。
+**Formats.** Artifacts machines read and write are always JSON and JSONL, and descriptions for people are Markdown. `rsi` depends only on the Python standard library and runs on any machine with Python 3.9 or later.
 
-## 14. 下一步
+## 14. Next steps
 
-1. 写每类交接产物的格式和校验脚本。
-2. 写 `rsi-orchestrator`，以及第 1 层 skill 的模板和五个模块入口的初版（只填好输入、输出、门、单独运行四项）。
-3. 选两个决策类型不同的例子任务，一个二分类、一个多选一，从 prompt 走到交付，验证框架。
+1. Write the format and validation script of each kind of hand-over artifact.
+2. Write `rsi-orchestrator`, the template of the layer 1 skills and a first version of the five module entries (with only the four items inputs, outputs, gates and running standalone filled in).
+3. Pick two example tasks with different decision types, one binary and one of several, and go from prompt to delivery to verify the framework.
 
-## 15. 待定
+## 15. Open questions
 
-1. 默认的升级规则。评测集小时，要求“候选 − 当前最佳”的区间下界大于 0 很难通过；框架是否提供默认规则、用什么规则，待定。各任务仍可在任务定义里自己规定。
-2. 两个验证用的例子任务和数据来源。
+1. The default promotion rule. With a small evalset, requiring the lower bound of the "candidate − current best" interval to be above 0 is hard to pass; whether the framework provides a default rule, and which, is open. Each task may still set its own in its task definition.
+2. The two example tasks for verification and their data sources.

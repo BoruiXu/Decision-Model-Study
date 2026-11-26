@@ -132,8 +132,8 @@ class TestDashboardCommands(unittest.TestCase):
         grew("register", self.ws, "plan", mk("plan", evaluation_id="evaluation-0001", entry_module="train",
                                              issues=[issue]))
         grew("approve", self.ws, "plan", "--by", "alice", "--quote", "go", "--ref", "plan-0001")
-        Workspace(self.ws).set_waiting({"kind": "question", "question": "用哪台机器？", "options": ["已回答"]})
-        grew("answer", self.ws, "已回答", "--by", "alice", "--quote", "a100")
+        Workspace(self.ws).set_waiting({"kind": "question", "question": "Which machine?", "options": ["answered"]})
+        grew("answer", self.ws, "answered", "--by", "alice", "--quote", "a100")
         grew("next", self.ws)
         # A round closed without an evaluation (round 2: the candidate failed its train gate).
         fail = {"passed": False, "detail": "below the majority baseline"}
@@ -213,7 +213,7 @@ class TestDashboardCommands(unittest.TestCase):
             opened.assert_called_once()
 
     def test_open_rules(self):
-        self.ws = os.path.join(self.tmp, "my ws 工作区")  # the URI quotes a path with spaces and CJK
+        self.ws = os.path.join(self.tmp, "my ws café")  # the URI quotes a path with spaces and non-ASCII letters
         self.page = os.path.join(self.ws, "dashboard.html")
         self.init()
         for case in ("env", "flag", "open"):

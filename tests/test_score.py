@@ -76,16 +76,16 @@ class TestScore(ScoreCase):
         self.assertEqual(out["not_computed"], ["block_recall", "category-prior"])
         # An unknown primary is listed too, and --compare needs a known one.
         self.task = binary_task()
-        self.task["metrics"]["primary"] = "expected_cost"
+        self.task["metrics"]["primary"] = "net_cost"
         self.task["metrics"]["higher_is_better"] = False
         self.task["promotion_rule"]["guards"] = []
         t = self.task
         args = ["--labels", self.write("labels.jsonl", [label_row(i, t) for i in VAL]),
                 "--predictions", self.write("a.jsonl", self.preds(VAL))]
-        self.assertEqual(self.ok(*args)["not_computed"], ["expected_cost"])
+        self.assertEqual(self.ok(*args)["not_computed"], ["net_cost"])
         r = self.score(*(args + ["--compare", self.write("b.jsonl", self.preds(VAL))]))
         self.assertEqual(r.returncode, 1)
-        self.assertIn("expected_cost", r.stderr)
+        self.assertIn("net_cost", r.stderr)
 
     def test_group_prior_needs_groups(self):
         self.task["metrics"]["baselines"] = ["group_prior"]

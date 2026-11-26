@@ -57,7 +57,7 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class OjhSettings:
     bin: str                       # the ojh executable, e.g. $OJH_REPO/.venv/bin/ojh
-    env_file: Path | None = None   # sourced in the same shell command before ojh (harness README "环境配置")
+    env_file: Path | None = None   # sourced in the same shell command before ojh (harness README, environment setup)
     machine: Path | None = None    # harness machine.yaml
     root: Path | None = None       # the ojh repository: catalog default recipes, relative recipe paths
 

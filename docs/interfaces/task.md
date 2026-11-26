@@ -1,83 +1,179 @@
-# task：任务定义
+# task: the task definition
 
-`task.json` 是任务定义，也是 `task` 类产物的 manifest；`TASK.md` 是同一份内容的人读版本（模板见 `skills/rsi-orchestrator/templates/TASK.md`）。校验由 `rsi` 的任务检查完成，规则在 `rsi/schemas/task.json` 和 `rsi/rows.py`。所有层级都不允许出现未列出的字段。
+`task.json` is the task definition and also the manifest of a `task` artifact; `TASK.md` is the same content for people to read (template in `skills/rsi-orchestrator/templates/TASK.md`). Validation is done by `rsi`'s task check; the rules are in `rsi/schemas/task.json` and `rsi/rows.py`. No level allows fields that are not listed.
 
-## 顶层字段
+## Top-level fields
 
-- `kind`：固定为 `"task"`。
-- `task_id`：任务标识，匹配 `[a-z0-9][a-z0-9-]*`。
-- `version`：任务定义版本，整数 >= 1。改任务定义要升版本，且需要 `task_change` 审批（补全切分规则的新版本除外，只在评测集、封存 test 登记之前，见 `data`）。
-- `decision`：决策定义。
-- `input`：输入格式，即数据集每一行 `state` 的格式。
-- `data`：数据来源。
-- `metrics`：指标。
-- `promotion_rule`：候选晋升规则。
-- `stop`：停止条件。
-- `budget`：预算。
-- `resources`：可用资源，object，由 orchestrator 和各模块按需读取，见下。
-- `search_space`：可选，训练调优模块（`rsi-train`）可以搜索的配置空间，见下。
-- `search`：可选，训练调优模块的搜索设置，见下。
-- `eval_use_limit`：同一评测集最多使用的次数，整数 >= 1。
-- `quality_checks`：可选，数据质量门的检查项和阈值，任意 object，见下。
-- `delivery`：可选，交付的设置，见下。
-- `flow`：可选，主流程的设置，见下。
-- `runner`：可选，`rsi run` 调用模块 agent 的设置，见下。
-- `approvals`：需要用户审批的事项，取值来自 `task_change`、`over_budget`、`use_testset`、`refresh_sets`、`plan`、`delete`。其中 `task_change`、`refresh_sets`、`use_testset` 守护固定规则（任务定义、冻结的验证集和评测集、封存 test），无论是否列出都必须审批（补全切分规则的新版本除外，只在评测集、封存 test 登记之前，见 `data`），且每次审批只对一次登记有效；本列表只决定 `plan`、`over_budget`、`delete` 是否需要审批。`delete` 管 orchestrator 和用户手动做的删除；rsi-train 的 `trsi collect` 自动删用不上的 checkpoint（没选中的保存点、失败或被换下的训练的 checkpoint），不管这里有没有 `delete`，都不经审批（用户的决定）。
+- `kind`: always `"task"`.
+- `task_id`: the task's identifier, matching `[a-z0-9][a-z0-9-]*`.
+- `version`: the task definition's version, an integer >= 1. Changing the task definition raises the version and needs a `task_change` approval (except a new version that fills in the split rule, only before the evalset and the sealed testset are registered, see `data`).
+- `decision`: the decision definition.
+- `input`: the input format, i.e. the format of `state` in each dataset row.
+- `features`: optional, how a row's `state` becomes numbers (the features adapter), see below.
+- `data`: the data sources.
+- `metrics`: the metrics.
+- `promotion_rule`: the rule for promoting a candidate.
+- `stop`: the stop conditions.
+- `budget`: the budget.
+- `resources`: the resources available, an object that the orchestrator and the modules read as they need, see below.
+- `search_space`: optional, the config space the train module (`rsi-train`) may search, see below.
+- `search`: optional, the train module's search settings, see below.
+- `compare`: optional, turns on ③ Compare and sets its baselines, see below.
+- `policy`: optional, turns on the decision policy that every candidate and every compare baseline fits on its valset predictions, see below.
+- `eval_use_limit`: how many times one evalset may be used at most, an integer >= 1.
+- `quality_checks`: optional, the checks and thresholds of the data quality gate, any object, see below.
+- `delivery`: optional, the delivery settings, see below.
+- `flow`: optional, the main flow's settings, see below.
+- `runner`: optional, the settings for how `rsi run` calls module agents and runs code modules, see below.
+- `approvals`: the items that need the user's approval, from `task_change`, `over_budget`, `use_testset`, `refresh_sets`, `plan`, `delete`. Of these, `task_change`, `refresh_sets` and `use_testset` guard fixed rules (the task definition, the frozen valset and evalset, the sealed testset) and always need approval whether listed or not (except a new version that fills in the split rule, only before the evalset and the sealed testset are registered, see `data`), and each approval holds for one registration only; this list decides only whether `plan`, `over_budget` and `delete` need approval. `delete` covers deletions the orchestrator and the user make by hand; rsi-train's `trsi collect` deletes unusable checkpoints automatically (save points not selected, checkpoints of failed or replaced trainings) without approval, whether `delete` is here or not (the user's decision).
 
 ## `resources`
 
-任意 object；下面几项有固定含义（其余由模块按需读取）：
+Any object; the items below have a fixed meaning (the modules read the rest as they need):
 
-- `resources.train_command`：可选，字符串，训练命令的位置（绝对路径，或相对仓库根目录的路径）。没给时用 `<repo root>/modules/train/train`；调用方运行它时环境里带 `PYTHONPATH=<repo root>`。给了时，登记 candidate 要求它的 `code_version.entry` 就是这个命令（同一字符串，或相对路径按仓库根目录解析、符号链接解开后是同一个文件），见 models.md。
-- `resources.onejev`：可选，object，训练调优模块跑 onejev-harness 用的环境（`python`、`ojh_bin`、`machine`、`env_file`、`default_config`、`estimate` 等，由模块解释）；schema 只检查它是 object。其中 `default_config`（与 candidate 的 `config_request` 同形：`{"base", "recipe", "overrides", "seed", "max_steps"}`）是默认配置，登记时用它核对 `search_space` 没有列出的键（见下）。
-- `resources.gpu_ids`：可选，非负整数列表，训练调优模块可用的 GPU 编号（没写就是全部卡），模块每次启动时从中选空闲的。
+- `resources.train_command`: optional, a string, the location of the train command (an absolute path, or a path relative to the repository root). When not given, `<repo root>/modules/train/train` is used; the caller runs it with `PYTHONPATH=<repo root>` in the environment. When given, registering a candidate requires its `code_version.entry` to be this command (the same string, or the same file once a relative path is resolved against the repository root and symlinks are resolved), see models.md.
+- `resources.onejev`: optional, an object, the environment in which the train module runs onejev-harness (`python`, `ojh_bin`, `machine`, `env_file`, `default_config`, `estimate` and so on, interpreted by the module); the schema checks only that it is an object. Its `default_config` (shaped like a candidate's `config_request`: `{"base", "recipe", "overrides", "seed", "max_steps"}`) is the default config, against which registration checks the keys `search_space` does not list (see below).
+- `resources.gpu_ids`: optional, a list of non-negative integers, the GPU numbers the train module may use (all GPUs when not written); at each launch the module picks free ones from it.
 
-## `search_space`（可选）
+## `search_space` (optional)
 
-训练调优模块只在这里面搜，用户批准任务定义即批准了这个空间。键是配置路径：`base`、`recipe`、`seed`、`max_steps`、`overrides.onejev.<flag>`、`overrides.lora.<field>`；每个键的值恰好是下面三种之一：
+The train module searches only inside it, and a user approving the task definition approves this space. The keys are config paths: `base`, `recipe`, `seed`, `max_steps`, `overrides.onejev.<flag>`, `overrides.lora.<field>`; each key's value is exactly one of these three:
 
-- 允许取值的非空列表；
-- `{"min": <数>, "max": <数>}`（两端都允许，`min` 不大于 `max`）；`base`、`recipe`、`seed` 不能写成区间，只能是列表或下面的 `{"values", "dead"}`（训练调优模块逐个试这些取值），写成区间时任务校验就拒绝；
-- `{"values": [<允许的取值>, …], "dead": {<取值，按文本写>: <为什么是死路>}}`，`dead` 可选：给模块看的已知死路（死路由 trsi 判断），登记时 `dead` 里的取值仍算在空间里。
+- a non-empty list of allowed values;
+- `{"min": <number>, "max": <number>}` (both ends allowed, `min` not greater than `max`); `base`, `recipe` and `seed` cannot be written as ranges, only as lists or as the `{"values", "dead"}` below (the train module tries those values one by one), and the task check refuses them written as ranges;
+- `{"values": [<allowed values>, …], "dead": {<value, written as text>: <why it is a dead end>}}`, with `dead` optional: known dead ends for the module to see (trsi judges dead ends); at registration the values in `dead` still count as inside the space.
 
-`dead` 只能写在某个键里，没有顶层的 `dead`。
+`dead` can only be written inside a key; there is no top-level `dead`.
 
-任务有 `search_space` 时，登记的每个 candidate 都要有 `config_request`（见 models.md），按下面的规则核对（`rsi/space.py`）：
+When the task has a `search_space`, every candidate registered must have a `config_request` (see models.md), checked by these rules (`rsi/space.py`):
 
-- 值为 null 的键不核对（等于用配方或训练命令的默认值）。
-- `search_space` 里有的键：取值在列表里（或 `values` 里，`dead` 的也算；同一个 JSON 值，`true` 不等于 `1`），或是区间内的数。
-- `search_space` 里没有的键：取值必须等于 `resources.onejev.default_config` 在同一路径上的值；任务没给默认配置或默认配置不含这个键时拒绝。没有默认配置的任务用单值列表固定一个设置（例如 `"base": ["joey-1"]`）。
-- 拒绝时错误信息写明键、取值和允许的范围。
+- A key whose value is null is not checked (it means the recipe's or train command's default).
+- A key in `search_space`: the value is in the list (or in `values`, the `dead` ones included; the same JSON value, so `true` is not `1`), or is a number inside the range.
+- A key not in `search_space`: the value must equal the value at the same path of `resources.onejev.default_config`; refused when the task gives no default config or the default config lacks the key. A task without a default config pins a setting with a one-value list (e.g. `"base": ["joey-1"]`).
+- A refusal names the key, the value and the allowed range.
 
-## `search`（可选）
+## `search` (optional)
 
-训练调优模块的搜索设置，由模块解释（框架只检查形状）：`max_configs`（整数 >= 1，一次搜索最多试几个配置）、`seeds`（不重复的整数列表，第一个是试探用的 seed）、`probe_margin`、`accept_margin`（数 >= 0）、`guards`（指标名到允许的最大退化，数 >= 0）。
+The train module's search settings, interpreted by the module (the framework checks only the shape): `max_configs` (an integer >= 1, how many configs one search tries at most), `seeds` (a list of distinct integers, the first being the probe's seed), `probe_margin`, `accept_margin` (numbers >= 0), `guards` (metric name to the largest regression allowed, a number >= 0).
 
 ## `decision`
 
-- `type`：`binary`、`choice` 或 `score`。
-- `instructions`：给人和模型看的决策说明。
-- `labels`：标签列表，至少 2 个字符串。`score` 的标签必须是 `"0"` 到 `"k-1"` 依次排列。
-- `label_meanings`：标签到含义的映射，键集合必须等于 `labels`。
-- `positive`：正类标签。`binary` 必填且必须在 `labels` 中；其他类型不允许出现。
+- `type`: `binary`, `choice` or `score`.
+- `instructions`: the decision's instructions, for people and the model.
+- `labels`: the list of labels, at least 2 strings. The labels of `score` must be `"0"` to `"k-1"` in order.
+- `label_meanings`: label to meaning; its key set must equal `labels`.
+- `positive`: the positive label. Required for `binary` and must be in `labels`; not allowed for the other types.
 
-数据集的每一行都带着由 `decision` 得出的 OneJev 问题 `question`（`instructions` 就是这里的 `instructions`，`criteria` 来自 `label_meanings`；yes/no 的 `binary` 是 `noul` 问题，`score` 是 `score` 问题，其余是 `choice` 问题），登记时逐行核对，见 README.md 的「决策样本行」。
+Every dataset row carries the OneJev question `question` derived from `decision` (`instructions` is the `instructions` here, `criteria` comes from `label_meanings`; a yes/no `binary` is a `noul` question, `score` a `score` question, the rest `choice` questions), checked row by row at registration, see "Decision rows" in README.md.
 
 ## `input`
 
-这一节描述模型的输入，即数据集每一行的 `state`（旧工作区的行叫 `input`，见 README.md 的「决策样本行」）。
+This section describes the model's input, i.e. the `state` of each dataset row (called `input` in the rows of old workspaces, see "Decision rows" in README.md).
 
-- `format`：`messages`、`fields` 或 `object`。`messages` 时 `state` 是 `{"messages": [{"role", "content"}, ...]}`（非空）；`fields` 时 `state` 是 `{"fields": {...}}`；`object` 时 `state` 是任意非空 JSON object（例如结构化的 `{"entity", "summary", "transactions"}`），不检查内部结构，原样交给模型。
-- `description`：对输入的说明。
-- `fields`：字段名列表，`state.fields` 的键必须覆盖它。`format` 为 `fields` 时必填且非空；为 `messages` 或 `object` 时不允许。
+- `format`: `messages`, `fields` or `object`. With `messages`, `state` is `{"messages": [{"role", "content"}, ...]}` (non-empty); with `fields`, `state` is `{"fields": {...}}`; with `object`, `state` is any non-empty JSON object (e.g. a structured `{"entity", "summary", "transactions"}`), whose inner structure is not checked and which goes to the model as it is.
+- `description`: a description of the input.
+- `fields`: the list of field names, which the keys of `state.fields` must cover. Required and non-empty when `format` is `fields`; not allowed for `messages` or `object`.
+- `verbatim`: optional, a list of state paths whose text is a row's own request, e.g. `messages[].content` in a routing task (dots between keys, `[]` for every item of a list); `[]` when not written. Neither data generation nor prompt variation ever changes that text, and the features' edit view never offers these paths (nor any path under them). The default is filled in only in one place, `verbatim_paths` in `rsi/rules.py`.
+
+## `features` (optional)
+
+How a row's `state` becomes numbers for the compare module's baselines and for data generation (`modules/common/features`, standard library only).
+
+```json
+"features": {"adapter": "examples/elliptic_onejev/features_adapter.py", "constraints": []}
+```
+
+- `adapter`: optional, a Python file (standard library only), an absolute path or a path relative to the repository root. The task check refuses a path that is not an existing file, naming the path it resolved. The file may define any of `features(state)` (column → number), `edit_view(state)` (path → scalar), `apply(state, changes)`, `repair(state)`, `check(state)` (a list of the broken rules) and `describe()` (the rules as text for the LLM prompts); every function it leaves out is the generic one. When not written, every function is the generic one.
+- `constraints`: optional, a list, `[]` when not written: declarative constraints on the state's numbers (`modules/common/features/constraints.py`). Each item is one of:
+  - `{"nonneg": [path, ...]}`: every number at each path is 0 or more;
+  - `{"integer": [path, ...]}`: every number at each path is a whole number;
+  - `{"sum": path, "of": [path, ...]}`: the number at `sum` equals the sum of the numbers at `of` (within 1e-9, relative, or absolute near 0);
+  - `{"order": [path, path, ...]}`: the numbers are non-decreasing in the order given (e.g. min, median, max);
+  - `{"zero_if_zero": path, "then": [path, ...]}`: when the number at `zero_if_zero` is 0, so is each number at `then`.
+
+  A path joins keys with dots; a key followed by `[]` stands for every element of the list there (`transactions[].fee`), and a part of digits picks one element (`transactions.0.fee`). In `order` and `zero_if_zero` every `[]` of the item is bound: the item holds in each element (each combination when its paths go through different lists), and a path without `[]` is the same in each; two paths go through the same list when their text up to the `[]` is the same. In `sum` the `[]`s of the `sum` path are bound the same way and an `of` path's other `[]`s are summed over: `{"sum": "total", "of": ["t[].v"]}` is total = the sum of every `t[].v`, and `{"sum": "t[].total", "of": ["t[].a", "t[].b"]}` holds in each element of `t`. Every leaf an item names must be a number (a bool is not one); a leaf that is missing or not a number is a violation that repair leaves as it is.
+
+  The adapter's `repair` and `check` run the constraints first, then the adapter's own functions. Repair works on a copy, in this order: every `nonneg` item (a negative number becomes 0), every `integer` item (rounded to the nearest whole number, halves away from zero), then the relations (`sum`, `order`, `zero_if_zero`) in their order, twice: a sum's number becomes the sum, an order's numbers are sorted into its places, a `then` number becomes 0. Check gives one message per broken item and place, starting with the item's rule (`nonneg transactions[].fee`, `sum total = t[].v`, `order s.min <= s.med <= s.max`). dgen edits rows through this adapter, and `dset repair` repairs rows with it. The task check refuses an item with another key or a value of the wrong type (`order` needs at least two paths); the features component refuses an item that does not name exactly one kind with the key it needs (`of` for `sum`, `then` for `zero_if_zero`) when it loads the adapter, so dgen and `dset repair` stop with that error.
+
+The generic functions:
+
+- `features`, the model view: a number outside any list becomes a column named by its dot path (`summary.txs_sent`; a bool is 1 or 0); a list at path `p` becomes `p.count`, its number items `p.mean`, `p.max` and `p.sum`, and each number `q` inside its object items (at any depth, outside nested lists) `p[].q.mean`, `p[].q.max` and `p[].q.sum` over the items that have it; a nested list becomes `p[].q.count.mean`. Strings and non-finite numbers are skipped.
+- `edit_view`: every scalar leaf by its path, list indices as path parts (`transactions.3.tx_total_btc`); `apply` writes such paths back into a copy of the state, refusing a path the state does not have and a number that would become a non-number.
+- `repair` returns the state unchanged, `check` finds nothing, `describe` is empty.
+
+Paths join keys with dots and nothing is escaped, so a state key that contains a dot or is empty is ambiguous: `{"a.b": 1}` and `{"a": {"b": 1}}` give the same column `a.b`, and `apply` reads `a.b` as the nested path only. Adapters for states with such keys define their own `features`, `edit_view` and `apply`.
+
+The features are computed from a copy of each row's `state` only, never from the row's id, target or meta. Their columns are fixed on the rows they are fitted on (a column a row lacks is 0); fitting with the rows' hard labels refuses a column that takes one value exactly on the rows of one label (at least two of them) and other values on every other row, since it determines the label. Every user of the features fits them only on rows that are not prompt variants (`real_rows`: the rows without `meta.extra.variant`).
+
+The defaults are filled in only in one place, `features_settings` in `rsi/rules.py`; `adapter_path` there resolves the adapter's path.
+
+## `compare` (optional)
+
+③ Compare runs only when this section is there; without it (an old workspace, or a task that wants none) the flow goes from ② Train & tune to ④ Deliver and the pages show `③ Compare (off)`. The compare module (a code module, no agent) trains the baselines once per trainset, reports the round's candidate against each of them on the valset (a `comparison`) and has each predict the evalset inputs for the judge; at the milestone it scores them on the testset inputs. It is a report only, never a gate (see engine.md).
+
+```json
+"compare": {"baselines": ["lr", "gbdt", "mlp", "zero_shot", "few_shot", "team_recipe"], "seed": 0,
+            "python": null, "max_train_rows": null, "grids": {},
+            "zero_shot": {"base": null}, "few_shot": {"base": null, "k": 4, "max_example_chars": 2000},
+            "team_recipe": {"base": "elephant-1", "recipe": "recipes/elephant_lora_1g.yaml", "overrides": {},
+                            "seed": 0, "max_steps": null},
+            "gpu_hours": {"zero_shot": 0.1, "few_shot": 0.1, "predict": 0.1}}
+```
+
+- `baselines`: required, a list of at least one name, each matching `^[a-z][a-z0-9_]*$` and listed once. The compare module knows `lr`, `gbdt`, `mlp`, `zero_shot`, `few_shot` and `team_recipe`; a name it does not know is not trained and the comparison records it under `skipped`.
+- `seed`: an integer, 0 when not written: the fixed seed of every baseline.
+- `python`: a string or null (default): the interpreter that runs the compare module (it needs numpy, scikit-learn, xgboost or lightgbm, and pyyaml: `modules/common/install_deps.sh --python <it>` installs them); null takes `resources.onejev.python`. With neither, every compare dispatch hands back `failed`.
+- `max_train_rows`: an integer >= 1 or null (default): the most trainset rows a baseline is fitted on; null fits on all of them.
+- `grids`: an object, `{}` when not written: `<name>` → the grid (an object: parameter → list of values) that replaces that baseline's default grid (the defaults are in "Baselines" of `modules/compare/SKILL.md`).
+- `zero_shot`: `{"base"}`, the base model scored with no training (a string, or null: `resources.onejev.default_config.base`).
+- `few_shot`: `{"base", "k", "max_example_chars"}`: the same base model with `k` (an integer >= 1, default 4) labelled trainset examples in each row's instructions, each example's state cut at `max_example_chars` (an integer >= 1, default 2000).
+- `team_recipe`: a config of the same shape as a candidate's `config_request` (`{"base", "recipe", "overrides", "seed", "max_steps"}`, all five required), which the train command trains as the team's existing recipe (a null `base` takes `resources.onejev.default_config.base`, a null `seed` the train command's default; a relative `recipe` is looked up under `modules/train`, then the ojh repository, as for every config); null when not written.
+- `gpu_hours`: an object of numbers >= 0, `{"zero_shot": 0.1, "few_shot": 0.1, "predict": 0.1}` when not written: the estimated GPU hours of each GPU baseline (`team_recipe`'s training, when not written here, is `resources.onejev.estimate` of its base), and under `predict` of one prediction of a stored model on the evalset inputs (a team-recipe baseline re-predicted after a refresh, or one whose training an earlier launch of the dispatch finished: it is never trained again, so its training estimate does not hold it). A GPU baseline whose estimate is more than the GPU hours left (`budget_left.compute_hours`) is skipped, with the reason under the comparison's `skipped`. Milestone scoring (the baselines of the best version's comparison on the testset inputs) only predicts and is not held by the budget: the user's yes to the milestone approves it, and the milestone question says it may use GPU hours beyond the budget.
+
+The defaults are filled in only in one place, `compare_settings` in `rsi/rules.py` (null without the section): an object default is merged with what the task writes, one level deep (`few_shot: {"k": 2}` keeps the default `base` and `max_example_chars`). The compare brief carries these settings as `compare`.
+
+## `policy` (optional)
+
+A decision policy is a calibration of a model's probabilities followed by a decision rule (`modules/common/dpolicy`, standard library only). With this section, the train command fits one for every candidate it packs, on the candidate's valset predictions (valset labels only), and stores it in the candidate (`policy.json`, see models.md); the candidate's `model.predict` applies it, so its `predictions_val`, deliveries and evaluations carry the policy's probabilities and decisions. The compare module fits one the same way for each baseline (see compare.md). Without the section (an old workspace, or a task that wants none) nothing is fitted and every candidate is as before. Version 1 is a calibration and a threshold only: no abstain band, no second stage and no refit on later labels.
+
+```json
+"policy": {"objective": "f1", "calibrations": ["none", "platt", "temperature", "isotonic"],
+           "rules": [{"rule": "max_f1"}], "split": {"by": "time", "key": "meta.extra.step", "select_fraction": 0.4},
+           "min_lo": 0}
+```
+
+Every field is optional (`"policy": {}` takes all the defaults):
+
+- `objective`: a known metric (see "Metric definitions"), by which a policy is chosen; `f1` for a `binary` task, `log_loss` for `choice` and `score` when not written. The task check refuses a metric `rsi` does not compute, a binary-only metric in another task, and `expected_cost` without `metrics.costs`.
+- `calibrations`: a non-empty list of `none`, `platt`, `temperature` and `isotonic`; all four for a `binary` task, `["none", "temperature"]` otherwise when not written (the task check refuses `platt` and `isotonic` outside a `binary` task).
+  - `none` keeps the probabilities.
+  - `platt`: Newton's method on (a, b) of sigmoid(a · logit p + b), L2 1e-6, p clipped to [1e-6, 1 − 1e-6], at most 100 steps.
+  - `temperature`: golden-section search over log T in [−5, 5] (100 iterations) minimizing the log loss; sigmoid(logit p / T) for a binary task, softmax(log p / T) over the labels otherwise.
+  - `isotonic`: pool adjacent violators on p, applied as linear interpolation, clipped at both ends.
+
+  In a binary task p is the probability of `decision.positive`, and the other label gets 1 − the calibrated value.
+- `rules`: a non-empty list of decision rules `{"rule", …its parameters}`; when not written, `[{"rule": "max_f1"}]` for the objective `f1`, `[{"rule": "cost"}]` for `expected_cost` and `[{"rule": "argmax"}]` otherwise (always `argmax` outside a `binary` task). A binary rule's threshold is chosen on the calibrated scores of the fit part: a row is positive when its calibrated probability is at least the threshold, the candidate thresholds are the distinct scores, and a tie in the rule's objective goes to the highest threshold.
+  - `max_f1`: the highest F1 of the positive label;
+  - `cost` (`cost_fp`, `cost_fn` >= 0, optional): the lowest `cost_fp` × false positives + `cost_fn` × false negatives, predicting none being a candidate too; without its own costs, those of `metrics.costs` (cost_fp = costs[negative][positive] − costs[negative][negative], cost_fn likewise); the task check refuses a cost rule with neither;
+  - `precision_at` (`target` in (0, 1], required): of the thresholds with at least that precision, the one with the highest recall; none reaching it means never positive;
+  - `recall_at` (`target` in (0, 1], required): of the thresholds with at least that recall, the one with the highest precision;
+  - `top_frac` (`frac` in (0, 1], required): the highest threshold at which at least that share of the rows is positive;
+  - `fixed` (`value`, required): that threshold;
+  - `argmax`: the most probable label, a tie going to the earlier label in `decision.labels` (threshold 0.5).
+
+  Every rule but `argmax` is a threshold rule, for `binary` tasks only: the task check refuses it elsewhere.
+- `split`: `{"by", "key", "select_fraction"}`, how the valset is split into a fit part and a select part. When not written: by `time` on `data.split.key` when `data.split.by` is `time`, else by `group` on `meta.state_id`, `select_fraction` 0.4; a split written in part keeps the defaults of the fields it leaves out (the key of a `group` split is `meta.state_id`). By `time`, the latest max(1, round(n × select_fraction)) of the n distinct values at `key` (a number in every row) go to select; by `group`, the groups (the value at `key`; a row without one is a group of its own) ordered by the sha256 of the value, the last ceil(n × select_fraction) of them. `select_fraction` is strictly between 0 and 1. A `time` split needs a key: the task check refuses `"by": "time"` without one when `data.split` is not by time.
+- `min_lo`: a number, 0 when not written. Every pair of a calibration and a rule (in the order written) is fitted on the fit part, applied to the select part and compared there with the identity policy (`none` + `argmax`, the model's own most probable label) by the paired cluster bootstrap of "Deltas and intervals" below (`rsi.metrics.paired_delta`, the task's `metrics.ci`, clusters from `meta.cluster`). The improvement is the delta in the objective's direction and its lower bound `ci_low` (higher is better) or −`ci_high` (lower is better). A pair is accepted when that lower bound is above `min_lo` **and** the task's primary metric (`metrics.primary`, computed by `rsi.metrics` in its direction) on the select part is not worse with the pair applied than with the identity policy (tolerance 1e-12): a policy never trades the primary metric for its objective (e.g. `isotonic`'s step function ties scores and can lower `auprc` for an equal `f1`; such a pair is refused with the reason). A primary metric `rsi` does not compute is not checked. Of the accepted pairs the one with the largest improvement wins (a tie: the earlier pair), its parameters those fitted on the fit part.
+
+Every pair's numbers (delta, interval, primary metric, accepted or the reason it was refused) are kept beside the policy as `policy_report.json`. When no pair is accepted, when the fit or the select part lacks a label of the task (rare positives: e.g. `the select split lacks label yes`), or when the valset cannot be split, the policy is the identity policy, not accepted, with the reason. The defaults are filled in only in one place, `policy_settings` in `rsi/rules.py` (null without the section); the compare brief carries the task's section as `policy`.
 
 ## `data`
 
 ```json
 "data": {
-  "sources": [{"path": "/abs/path/raw", "about": "原始数据：每个文件是什么"}],
+  "sources": [{"path": "/abs/path/raw", "about": "raw data: what each file is"}],
   "label_sources": ["human"],
-  "rows": {"about": "每个（地址，时间步）一行；state 照原样；时间步写进 meta.extra.step",
+  "rows": {"about": "one row per (address, time step); state as it is; the time step goes into meta.extra.step",
            "expect": {"rows": 291419, "label_counts": {"yes": 14720, "no": 276699}}},
   "split": {"by": "time", "key": "meta.extra.step",
             "ranges": {"trainset": [1, 29], "valset": [30, 32], "evalset": [33, 34], "testset": [35, 49]},
@@ -86,132 +182,143 @@
 }
 ```
 
-- `sources`：原始数据来源，列表，可以为空。每项是字符串（旧写法：只是说明，不是路径，不进禁读名单）或 `{"path", "about"}`（`about` 可选）。`path` 是本机绝对路径（文件或目录），不能含 `(`、`)`、`*`、`?`、`[`，不能以 `!` 开头：禁读规则写不出这样的路径，所以任务校验时就拒绝，不等到派出时。这些路径就是「原始数据」。
-- `label_sources`：允许的标签来源，取值 `rule`、`model_judge`、`human`、`outcome`。
-- `rows`（可选）：全部带标签行的说明。`about`（必填）是给 data agent 的行说明：一行是什么、各字段从哪来。`expect`（可选）是全部行的确切行数 `rows` 和各硬标签的行数 `label_counts`（键必须是任务的标签），`corpus` 登记时逐个核对，对不上就拒绝：标签经过 agent 写的预处理脚本，数目对得上才放行。
-- `split`（可选，可以只写一部分）：切分规则，把全部行分到四个集合。
-  - `by`：`time`（`key` 的值是数，按 `ranges` 的闭区间分）、`group`（按 `key` 的值整组随机分，按 `fractions`）或 `random`（按单位随机分，按 `fractions`，不写 `key`）。
-  - `key`：行里的点路径，例如 `meta.extra.step`、`meta.state_id`。
-  - `ranges`：`trainset`、`valset`、`evalset`、`testset` 各一个 `[lo, hi]`（lo ≤ hi），互不重叠；落在所有区间外的行不用。只有 `time` 用它。
-  - `fractions`：四个集合各一个 (0, 1] 的数，和不超过 1，剩下的行不用。只有 `group`、`random` 用它。
-  - `sizes`：各集合的行数，整数 >= 1；不写或 null 表示范围里的行取完。训练池不受它限制。
-  - `stratify`：不写时为 true，`time` 按（`key` 的值，硬标签）分层，其余按硬标签。
-  - `unit`：`cluster`（不写时的值）或 `state_id`。同一 `state_id` 可以出现在多个集合里，只报告数目；只有写 `state_id` 时才按它分开，登记时也按它查。
-  - `seed`：整数，不写时为 0。
+- `sources`: the raw data sources, a list, possibly empty. Each item is a string (the old form: only a description, not a path, not on the read-deny list) or `{"path", "about"}` (`about` optional). `path` is an absolute path on this machine (file or directory), may not contain `(`, `)`, `*`, `?`, `[` and may not start with `!`: a read-deny rule cannot express such a path, so the task check refuses it rather than waiting for the dispatch. These paths are "the raw data".
+- `label_sources`: the allowed label sources, from `rule`, `model_judge`, `human`, `outcome`.
+- `rows` (optional): a description of all the labelled rows. `about` (required) is the row description for the data agent: what a row is and where each field comes from. `expect` (optional) is the exact count of all rows `rows` and the row count of each hard label `label_counts` (whose keys must be the task's labels), checked one by one when the `corpus` is registered and refused on a mismatch: the labels go through the preprocessing script the agent writes, and they pass only when the counts match.
+- `split` (optional, may be written in part): the split rule, which puts all rows into the four sets.
+  - `by`: `time` (the `key`'s value is a number, split by the closed intervals of `ranges`), `group` (whole groups by the `key`'s value, split at random by `fractions`) or `random` (split at random by unit, by `fractions`, no `key`).
+  - `key`: a dotted path into the row, e.g. `meta.extra.step`, `meta.state_id`.
+  - `ranges`: one `[lo, hi]` (lo ≤ hi) for each of `trainset`, `valset`, `evalset`, `testset`, not overlapping; rows outside all intervals are not used. Only `time` uses it.
+  - `fractions`: a number in (0, 1] for each of the four sets, summing to at most 1; the remaining rows are not used. Only `group` and `random` use it.
+  - `sizes`: each set's row count, integers >= 1; left out or null means all rows in range are taken. The training pool is not limited by it.
+  - `stratify`: true when not written; `time` stratifies by (the `key`'s value, hard label), the others by hard label.
+  - `unit`: `cluster` (the value when not written) or `state_id`. The same `state_id` may appear in several sets, and only the counts are reported; only with `state_id` written are sets separated by it, and registration checks it too.
+  - `seed`: an integer, 0 when not written.
 
-  规则「完整」指：有 `by`；`time`、`group` 有 `key`；`time` 有四个 `ranges`，`group`、`random` 有四个 `fractions`。其余键用默认值。任务校验只查写了的部分是否自洽（`ranges` 只配 `time`，`fractions` 只配 `group`、`random`，`random` 不写 `key`，区间不重叠，比例之和不超过 1），规则由 `rsi/datasplit.py` 检查。
+  A rule is "complete" when it has `by`; `time` and `group` have a `key`; `time` has four `ranges`, and `group` and `random` have four `fractions`. The other keys take their defaults. The task check only checks that what is written is consistent (`ranges` only with `time`, `fractions` only with `group` and `random`, no `key` with `random`, intervals not overlapping, fractions summing to at most 1); the rule is checked by `rsi/datasplit.py`.
 
-**补全切分规则。** 规则不完整时，data agent 在第一轮 `sets` 派出里按数据补全（time、group 还是 random，范围、大小、分层、单位、seed），用户不审批、也不被问。任务写了的键原样使用（`ranges`、`fractions`、`sizes` 按集合逐个看），和 agent 的选择冲突就报错；补好的规则（默认值也写明）记成任务定义的新版本：`task.json` 版本 +1、只多了补全的 `data.split`，`TASK.md` 是当前版本原文末尾直接接上 `rsi.datasplit.split_section_md(规则)` 的输出，一字不差；写文件用 `rsi.datasplit.fill_task_md(当前 TASK.md 的字节, 规则)`，从按字节读到的原文拼出，不要按文本模式读写（换行符 CRLF 会被改成 LF，补全就对不上）。这一节以一个换行开头（原文以换行结尾时，标题前正好空一行），然后是标题「## 切分规则（`data.split`）」、一句「由 rsi-data 按数据填写，理由见那次派出的 record。」和写明默认值的规则 JSON（```json 代码块，每个顶层键一行）。登记这个新版本不需要 `task_change`，只要它是**补全**：同一 `task_id`、版本 +1；`task.json` 除 `data.split` 外和当前版本完全相同；当前的 `data.split` 不完整，新的完整，当前写了的键值都保留；`TASK.md` 逐字节等于 `fill_task_md(当前版本的 TASK.md, 新的 data.split)`；工作区从没登记过评测集或封存 test。不是补全的新版本照常要 `task_change`；`task.json` 只改了 `data.split` 却不是补全时，拒绝信息写出不算补全的原因。作者写了完整规则时不会有新版本。
+**Filling in the split rule.** When the rule is incomplete, the data agent fills it in from the data in round 1's `sets` dispatch (time, group or random, ranges, sizes, stratification, unit, seed), without the user approving or being asked. The keys the task wrote are used as they are (`ranges`, `fractions` and `sizes` looked at set by set), and a conflict with the agent's choice is an error; the filled rule (defaults written out too) is recorded as a new version of the task definition: `task.json` with version + 1 and only the filled `data.split` added, and `TASK.md` being the current version's text followed directly by the output of `rsi.datasplit.split_section_md(rule)`, byte for byte; write the file with `rsi.datasplit.fill_task_md(<the current TASK.md's bytes>, rule)`, built from the text read as bytes, never read and written in text mode (a CRLF line ending would be turned into LF, and the fill would no longer match). The section opens with one newline (when the text ends with a newline, there is exactly one blank line before the heading), then the heading "## Split rule (`data.split`)", the line "Filled in by rsi-data from the data; the reasons are in that dispatch's record." and the rule as JSON with the defaults written out (a ```json code block, one top-level key per line). Registering this new version needs no `task_change`, as long as it is a **fill**: the same `task_id`, version + 1; `task.json` identical to the current version except for `data.split`; the current `data.split` incomplete, the new one complete, and every key value the current one wrote kept; `TASK.md` byte for byte equal to `fill_task_md(the current version's TASK.md, the new data.split)`; and the workspace never registered an evalset or sealed testset. A new version that is no fill needs `task_change` as usual; when `task.json` changed only `data.split` but is not a fill, the refusal gives the reasons it is no fill. When the author wrote a complete rule, there is no new version.
 
-**规则固定。** 评测集或封存 test 登记之后，切分规则在本次运行里固定（refresh 沿用）：任何改了 `data.split` 的新版本都拒绝，有 `task_change` 也不行（两边都完整时按写明默认值之后的规则比较）。
+**The rule is fixed.** Once the evalset or the sealed testset is registered, the split rule is fixed for this run (refresh keeps it): any new version that changes `data.split` is refused, even with `task_change` (when both are complete, the rules are compared with the defaults written out).
 
 ## `metrics`
 
-- `primary`：主指标名。
-- `higher_is_better`：主指标是否越高越好。主指标是下面「指标的定义」里的已知指标时，必须与它的方向一致（`log_loss`、`brier` 为 false，其余为 true），护栏里的已知指标同样如此，否则任务检查报错。
-- `others`：其他要报告的指标。
-- `auc`、`auprc`、`brier` 只对 `binary` 任务有定义：决策类型不是 `binary` 时，主指标、`others` 或护栏里写了它们，任务检查报错（错误信息写明它只用于二分类任务）。
-- `baselines`：必须对比的基线（对照组），至少 1 个。
-- `ci`：可选，差值置信区间的设置 `{"resamples", "seed", "level"}`，三项都可省略：`resamples` 为整数 >= 100，不写时为 1000；`seed` 为整数，不写时为 0；`level` 在 0 和 1 之间（不含两端），不写时为 0.95。默认值只在 `rsi/metrics.py` 的 `ci_settings` 一处补上。
+- `primary`: the primary metric's name.
+- `higher_is_better`: whether higher is better for the primary metric. When the primary metric is one of the known metrics in "Metric definitions" below, it must agree with that metric's direction (false for `log_loss`, `brier` and `expected_cost`, true for the rest), and so must the known metrics in the guards, or the task check reports an error.
+- `others`: the other metrics to report.
+- `auc`, `auprc`, `brier` and `f1` are defined only for `binary` tasks: when the decision type is not `binary` and the primary metric, `others`, the guards or `policy.objective` name them, the task check reports an error (saying it is for binary tasks only).
+- `baselines`: the baselines that must be compared, at least 1.
+- `costs`: optional, the cost of each decision for each true label, `{<true label>: {<decision>: number}}`, both levels keyed by exactly the task's labels (the task check reports other keys), e.g. `{"yes": {"yes": 0, "no": 10}, "no": {"yes": 1, "no": 0}}`. `expected_cost` needs it: the task check refuses `expected_cost` as the primary metric, in `others`, in a guard or as `policy.objective` without it.
+- `ci`: optional, the settings of the delta's confidence interval `{"resamples", "seed", "level"}`, each of the three optional: `resamples` an integer >= 100, 1000 when not written; `seed` an integer, 0 when not written; `level` between 0 and 1 (both excluded), 0.95 when not written. The defaults are filled in only in one place, `ci_settings` in `rsi/metrics.py`.
 
-## 指标的定义
+## Metric definitions
 
-已知指标、已知基线和区间的算法是固定代码（`rsi/metrics.py`），不由模块各自决定。模块报告的数用 `rsi score` 算（见 README 的命令一览），登记时 `rsi register` 用同样的定义重算，差超过 1e-9 就拒绝登记，错误信息给出字段、报告值、重算值和该用的 `rsi score` 命令。升级判定和训练门因此都建立在代码核对过的数上。
+The known metrics, the known baselines and the interval's algorithm are fixed code (`rsi/metrics.py`), not decided by each module. The modules compute the numbers they report with `rsi score` (see the command list in the README), and at registration `rsi register` recomputes them by the same definitions and refuses a difference over 1e-9, the error giving the field, the reported value, the recomputed value and the `rsi score` command to use. So promotion decisions and the train gate both rest on numbers the code has checked.
 
-下面的「硬标签」指 `target` 里概率最大的标签，并列时取 `decision.labels` 里靠前的那个。预测行和标签行按 `id` 对应，预测必须恰好覆盖标签行的 id。求和用 `math.fsum`，结果与行的顺序和 Python 版本无关。
+Below, the "hard label" is the label with the highest probability in `target`, on a tie the one that comes first in `decision.labels`. Prediction rows and label rows are matched by `id`, and the predictions must cover exactly the label rows' ids. Sums use `math.fsum`, so the result does not depend on the order of the rows or the Python version.
 
-| 已知指标 | 方向 | 定义 |
+| Known metric | Direction | Definition |
 |---|---|---|
-| `accuracy` | 越高越好 | 预测行的 `decision` 等于硬标签的行所占比例 |
-| `log_loss` | 越低越好 | 每行取 −ln p 的平均，p 是预测给硬标签的概率，截到 [1e-12, 1] |
-| `macro_f1` | 越高越好 | 对 `decision.labels` 的每个标签算 F1（`decision` 对硬标签），取平均；某个标签既没有真实行也没有被预测时它的 F1 记 0，仍参与平均 |
-| `auc` | 越高越好 | 只用于 `binary`：以预测给 `decision.positive` 的概率为分数、硬标签是否为正类为真值的 ROC AUC，分数相同的正负对记 0.5；标签行里没有正类或没有负类时无定义，登记和 `rsi score` 会报错 |
-| `auprc` | 越高越好 | 只用于 `binary`：同样的分数和真值上的 average precision（PR 曲线下面积的阶梯和）：分数从高到低，每个阈值处「召回率的增量 × 该阈值的精确率」之和；分数相同的行是同一个阈值（与 scikit-learn 的 `average_precision_score` 相同）；标签行里没有正类时无定义，会报错 |
-| `brier` | 越低越好 | 只用于 `binary`：每行取 (p − y)² 的平均，p 是预测给 `decision.positive` 的概率，y 在硬标签是正类时为 1，否则为 0 |
+| `accuracy` | higher is better | The share of rows whose prediction's `decision` equals the hard label |
+| `log_loss` | lower is better | The mean over rows of −ln p, where p is the probability the prediction gives the hard label, clipped to [1e-12, 1] |
+| `macro_f1` | higher is better | The F1 of each label of `decision.labels` (`decision` against the hard label), averaged; a label with neither true rows nor predictions gets F1 0 and still takes part in the average |
+| `auc` | higher is better | `binary` only: the ROC AUC with the probability the prediction gives `decision.positive` as the score and whether the hard label is the positive class as the truth, a positive-negative pair with equal scores counting 0.5; undefined when the label rows have no positives or no negatives, and registration and `rsi score` report an error |
+| `auprc` | higher is better | `binary` only: the average precision on the same scores and truth (the step sum of the area under the PR curve): with scores from high to low, the sum at each threshold of "the increase in recall × the precision at that threshold"; rows with equal scores are one threshold (the same as scikit-learn's `average_precision_score`); undefined when the label rows have no positives, which reports an error |
+| `brier` | lower is better | `binary` only: the mean over rows of (p − y)², where p is the probability the prediction gives `decision.positive` and y is 1 when the hard label is the positive class, 0 otherwise |
+| `f1` | higher is better | `binary` only: the F1 of `decision.positive`, 2tp / (2tp + fp + fn) with the prediction's `decision` against the hard label; 0 when the denominator is 0 |
+| `expected_cost` | lower is better | The mean over rows of `metrics.costs[hard label][decision]`; an error without `metrics.costs` |
 
-| 已知基线 | 定义 |
+| Known baseline | Definition |
 |---|---|
-| `majority` | 对每一行都预测训练集的先验，即训练行 `target` 的平均；`decision` 取先验里概率最大的标签（并列按标签顺序） |
-| `group_prior` | 对每一行预测它的分组（`meta.state_id`；旧工作区的行是 `meta.group`）在训练行里的先验；训练行里没有这个分组时用整体先验。评测集的标签行没有 `meta.state_id`，分组取自同一集合的 `inputs.jsonl` |
+| `majority` | Predicts the trainset prior for every row, i.e. the mean of the training rows' `target`; `decision` is the label with the highest probability in the prior (ties by label order) |
+| `group_prior` | Predicts for each row the prior of its group (`meta.state_id`; `meta.group` in the rows of old workspaces) in the training rows; the overall prior when the training rows lack that group. The evalset's label rows have no `meta.state_id`, so the groups come from the same set's `inputs.jsonl` |
 
-基线的指标与模型用同一套定义：对每个已知基线，用它的预测行算同样的已知指标。候选的基线用它的 `trainset_id` 指的训练集算，评测里的基线用被评测候选的训练集算。
+Baselines use the same definitions as the model: for each known baseline, the same known metrics are computed on its prediction rows. A candidate's baselines are computed with the trainset its `trainset_id` names, and the baselines in an evaluation with the trainset of the candidate evaluated.
 
-**差值和区间。** `deltas[主指标]` 是「候选 − 当前最佳」：`delta` 是两份预测在同一批标签行上的主指标之差；区间用配对簇自助法：按 `meta.cluster` 把行分簇（没有 cluster 的行自成一簇），簇按名字排序；共抽 `resamples` 次，每次用 `random.Random(seed).randrange` 有放回地抽出与簇数相同个数的簇，在抽中的行上重算两份预测的指标之差（某次抽样上指标无定义时跳过这次，例如 `auc` 抽到的行只有一类、`auprc` 抽到的行没有正类）；`ci_low`、`ci_high` 是这些差值的 (1 − level)/2 和 (1 + level)/2 分位数，分位数在相邻的两个排序值之间线性插值（位置 (n − 1) × q）。评测集的簇取自评测集的 `inputs.jsonl`。同样的输入在 Python 3.9 和 3.14 下得到同样的结果。
+**Deltas and intervals.** `deltas[primary metric]` is "candidate − current best": `delta` is the difference of the primary metric of the two predictions on the same label rows; the interval comes from a paired cluster bootstrap: the rows are grouped into clusters by `meta.cluster` (a row without a cluster is a cluster of its own), the clusters sorted by name; `resamples` times, `random.Random(seed).randrange` draws with replacement as many clusters as there are, and the difference of the two predictions' metrics is recomputed on the rows drawn (a draw on which a metric is undefined is skipped, e.g. `auc` drawing rows of only one class, `auprc` drawing rows without positives); `ci_low` and `ci_high` are the (1 − level)/2 and (1 + level)/2 quantiles of these differences, a quantile being interpolated linearly between the two neighbouring sorted values (position (n − 1) × q). The evalset's clusters come from its `inputs.jsonl`. The same inputs give the same results under Python 3.9 and 3.14.
 
-**未知名字。** 任务可以列出不在上表里的指标或基线（例如 `expected_cost`、某个自定义对照组），`rsi` 不计算、不核对它们，由模块自己算、在报告里说明算法。登记时它们被跳过，`rsi register` 在输出行末尾加 `(not verified: <名字>)`。主指标是未知指标时，训练门、差值和区间都不核对；列出的基线里有未知基线时，训练门只按已知基线核对（见 models.md）。
+**Unknown names.** A task may list metrics or baselines not in the tables above (e.g. `net_cost`, a custom baseline); `rsi` neither computes nor checks them, and the modules compute them and explain the method in their reports. Registration skips them, and `rsi register` appends `(not verified: <names>)` to its output line. When the primary metric is an unknown metric, the train gate, the deltas and the intervals are not checked; when the listed baselines include unknown ones, the train gate is checked against the known baselines only (see models.md).
 
 ## `promotion_rule`
 
-- `min_delta`：候选在主指标上相对当前最佳要提升的量，提升必须大于它；恰好等于它（容差 1e-9 内的平局）不算。
-- `ci_lower_min`：提升置信区间下界的最小值；不要求时为 null。
-- `guards`：护栏列表。每项含 `metric`（必须是主指标或 `others` 中的指标）、`higher_is_better`、`max_regression`（>= 0，允许的最大退步）。
+- `min_delta`: how much a candidate must improve the primary metric over the current best; the gain must be greater than it, and exactly equal (a tie within a tolerance of 1e-9) does not count.
+- `ci_lower_min`: the minimum lower bound of the gain's confidence interval; null when not required.
+- `guards`: the list of guards. Each item has `metric` (must be the primary metric or one in `others`), `higher_is_better`, `max_regression` (>= 0, the largest regression allowed).
 
-判定由 `rsi/rules.py` 的 `decide_promotion` 完成，它读的数在登记时已按「指标的定义」核对过。没有当前最佳版本时，候选的 `train_gate.passed` 为真就升级。有当前最佳版本时，设 `s` 在主指标越大越好时为 1、越小越好时为 -1：改进量 `s × deltas[主指标].delta` 必须大于 `min_delta`；`ci_lower_min` 非 null 时，改进区间下界（`s = 1` 取 `ci_low`，`s = -1` 取 `-ci_high`）不小于它；每个护栏的退步量（越大越好时 `best − candidate`，越小越好时 `candidate − best`，取自评测的 `metrics`）不超过 `max_regression`。所需数值缺失时保留（`keep`）。
+The decision is made by `decide_promotion` in `rsi/rules.py`, and the numbers it reads were checked at registration by "Metric definitions". Without a current best version, a candidate whose `train_gate.passed` is true is promoted. With a current best version, let `s` be 1 when higher is better for the primary metric and -1 when lower is better: the gain `s × deltas[primary metric].delta` must be greater than `min_delta`; when `ci_lower_min` is not null, the lower bound of the gain's interval (`ci_low` for `s = 1`, `-ci_high` for `s = -1`) is not less than it; each guard's regression (`best − candidate` when higher is better, `candidate − best` when lower is better, from the evaluation's `metrics`) is not more than `max_regression`. When a number needed is missing, keep (`keep`).
 
-## `quality_checks`（可选）
+## `quality_checks` (optional)
 
-数据模块质量门的检查项和阈值，例如最少样本量、近似重复率上限、标签信度下限，写法由任务自定（例如 `{"min_rows": 2000, "max_near_dup_rate": 0.01}`）。data 模块读取它，逐项算出数值，和阈值一起写进 trainset 的 `quality.checks`。框架只检查它是 object，不解释其中的内容。不写时由 data 模块按任务自定检查项，并在报告里说明。
+The checks and thresholds of the data module's quality gate, e.g. a minimum sample size, a maximum near-duplicate rate, a minimum label reliability, a maximum share of generated rows, written as the task sees fit (e.g. `{"min_rows": 2000, "max_near_dup_rate": 0.01, "max_synthetic_share": 0.3}`). `dset` computes `min_rows`, `min_positive_rows`, `max_duplicate_rate`, `max_conflict_rate` and `max_synthetic_share` (the share of rows whose `meta.source` starts with `dgen:`; it passes at a share no greater than the threshold) itself. The data module reads it, computes the value of each check and writes them with their thresholds into the trainset's `quality.checks`. The framework checks only that it is an object and does not interpret what is in it. When not written, the data module sets its own checks for the task and explains them in its report.
 
-## `delivery`（可选）
+## `delivery` (optional)
 
-- `reproduction_tolerance`：number，大于 0，不写时为 1e-6。登记 delivery 时，交付包在验证集输入上的预测要复现候选的 `predictions_val`：每个概率相差不超过这个值（见 delivery.md）。模型在 GPU 上用 bf16 等低精度、以不同的 batch 大小运行时，概率可能差出 1e-6，这时按实际精度调大，例如 1e-4。
-- `max_decision_mismatch_rate`：number，至少 0 且小于 1，不写时为 0。概率在容差之内、决策却不同的行最多允许多少：上限是 floor(这个值 × 验证集行数)。靠近决策边界的行，概率只要动一点决策就会翻，容差调到多大都可能出现，这一项就是对它们的放宽；`rsi` 不知道模型的决策规则（阈值、并列时怎么取），无法从概率推出决策该不该翻，所以只给一个封顶的行数。决策不同且有概率超出容差的行、超过上限的翻转都照常拒绝。放宽生效时 `rsi register` 在输出行末尾加 `(decision mismatches: <行数>)`。
+- `reproduction_tolerance`: a number greater than 0, 1e-6 when not written. When a delivery is registered, the delivery package's predictions on the valset inputs must reproduce the candidate's `predictions_val`: each probability differing by at most this value (see delivery.md). When the model runs on a GPU in low precision such as bf16 with varying batch sizes, probabilities may differ by more than 1e-6; then raise it to the real precision, e.g. 1e-4.
+- `max_decision_mismatch_rate`: a number at least 0 and less than 1, 0 when not written. How many rows may have probabilities within the tolerance but a different decision: at most floor(this value × the valset's row count). For rows near the decision boundary, a tiny move in probability flips the decision, which can happen whatever the tolerance; this item loosens the check for them; `rsi` does not know the model's decision rule (threshold, how ties are taken) and cannot tell from the probabilities whether a decision should flip, so it gives only a capped row count. Rows with a different decision and a probability outside the tolerance, and flips over the cap, are refused as usual. When the loosening applies, `rsi register` appends `(decision mismatches: <rows>)` to its output line.
 
-两项的默认值只在 `rsi/rules.py` 的 `reproduction_tolerance` 和 `max_decision_mismatches` 一处补上。
+The defaults of both are filled in only in one place, `reproduction_tolerance` and `max_decision_mismatches` in `rsi/rules.py`.
 
-## `flow`（可选）
+## `flow` (optional)
 
-主流程由代码决定（`rsi/flow.py` 的 `next_action`），这里只有下面几项可调。训练与调优合并成一个模块（训练调优，`rsi-train`）之前的 `tune`（`every_round` 或 `on_demand`）仍然能通过校验，但不再起作用。
+The main flow is decided by code (`next_action` in `rsi/flow.py`); only the items below can be set here. The `tune` setting from before training and tuning were merged into one module (the train module, `rsi-train`) (`every_round` or `on_demand`) still passes validation, but no longer has any effect.
 
-- `max_returns`：整数 >= 0，不写时为 2。同一模块在一轮里最多退回几次。已用的次数是该模块本轮各次派出的 `returns`（派出记录里的字段，每退回原会话一次加 1）之和，加上本轮第一次派出之后又新派的次数，所以换一个新会话重派不会把次数清零。没用完时，决策点的代码默认是退回或重派：交回的产物登记被拒（`handback_refused`，处理交回时当场决定）带着登记错误原文退回原会话，交回后本步仍没完成（`handback_failed`，包括交回了却没有登记任何产物）退回原会话，训练集没过质量门（`quality_gate_failed`）退回 data，训练门没过（`train_gate_failed`）退回本轮的 train 会话再搜一次；用完后默认问用户（`ask`）：问题的选项是能改变状态的出口（`resume` 退回原会话、`new_session` 新开会话、`close_round` 关闭本轮、`stop` 停止运行，训练门没过时还有 `train`、`data`），用户用 `rsi answer` 选一个；用户的选择不受上限限制。没有派出记录（手工运行的工作区）时，质量门没过的默认也是问用户。两段式交回的后半段（train 的试验候选登记后写 search，judge 在本轮判定后写计划）第一次是不算退回的续接；之后再要就是退回原会话，次数用完时转为 `handback_failed`，默认问用户。
+- `max_returns`: an integer >= 0, 2 when not written. How many times one module may be sent back at most in a round. The count used is the sum of the `returns` of the module's dispatches this round (a field of the dispatch record, plus 1 each time the dispatch is sent back to its session), plus the number of new dispatches after the round's first, so dispatching again in a new session does not reset the count. While it is not used up, the code's default at a decision point is to send back or dispatch again: an artifact the hand-back gave refused at registration (`handback_refused`, decided on the spot while the hand-back is processed) goes back to the session with the registration's error text, a step still not done after the hand-back (`handback_failed`, including a hand-back that registered nothing) goes back to the session, a trainset that failed the quality gate (`quality_gate_failed`) goes back to data, and a failed train gate (`train_gate_failed`) goes back to this round's train session to search again; once it is used up the default is to ask the user (`ask`): the question's options are the ways out that can change the state (`resume` back to the session, `new_session` a new session, `close_round` close this round, `stop` stop the run, plus `train` and `data` after a failed train gate), and the user chooses one with `rsi answer`; the user's choice is not bound by the limit. For a compare dispatch (③ Compare, report only) the default once it is used up is `skip` instead: the dispatch is closed as skipped and the flow goes on to ④ Deliver; `skip` is also among the options of a question about a compare dispatch. Without dispatch records (a workspace run by hand), the default after a failed quality gate is to ask the user too. The second part of a two-part hand-back (train writing the search after its trial candidates are registered, compare writing the comparison after its baselines are registered, judge writing the plan after this round's decision) is a continuation that is no return the first time; asking again after that is a return to the session, and once the count is used up it turns into `handback_failed`, which asks the user by default (skips, for compare).
 
-- `max_continues`：整数 >= 0，不写时为 10。长任务的完成标记第一行是 `ok`、交回里却还没有列出产物时，引擎接着原会话让它收集结果（派出记录的 `continued` 加 1，不算退回）；同一次派出最多自动接着这么多次，到了上限这次派出记为失败（`capped`），决策点 `handback_failed` 的默认改为问用户。
+- `max_continues`: an integer >= 0, 10 when not written. When a long job's completion marker has `ok` on its first line but the hand-back lists no artifacts yet, the engine carries on the session to have it collect the results (the dispatch record's `continued` plus 1, not a return); one dispatch is carried on automatically this many times at most, and at the limit it is recorded as failed (`capped`), and the default of the decision point `handback_failed` becomes asking the user (for a compare dispatch, `skip`: ③ Compare never stops the run).
 
-- `checkin_minutes`：数 > 0 或 null，不写（或 null）时不做定时检查。派出处于长任务状态（交回 `long_job`）、完成标记还没出现时，引擎每隔这么多分钟（从这次派出最近一次交回算起）用续接模式 `checkin` 让同一个会话做一次定时检查（反馈开头「# 定时检查」，派出记录的 `checkins` 加 1，不算退回）；agent 检查环境、有异常先处理，长任务还在运行就以 `long_job` 交回：如果没重启试验，就交回同一个完成标记；如果重启了试验、开了新的 trsi watch，就交回新的完成标记。开了定时检查时 `rsi run` 不退出，在进程里等完成标记或下一次检查。
-- `max_checkins`：整数 >= 0，不写时为 48。同一次派出自动定时检查的次数上限；到了上限、检查又到期时问用户（问题 `checkin`，选项 `continue` 再检查这么多次、`wait` 不再检查只等完成标记、`stop` 停止运行）。完成标记出现后这个问题作废。
-- `page_refresh_seconds`：数 > 0，不写时为 60。`rsi run` 在等（等 agent，或开了定时检查时等完成标记）期间，距上一次写进度页面满这么多秒，就先采一次 GPU 快照（`<ws>/work/gpus.json`），再重写页面。见 engine.md「等待期间」。
-- `status_minutes`：数 > 0，不写时为 5。`rsi run` 在等期间，这么多分钟没往 stderr 打过状态行就再打一行（心跳）；状态变化时随时打。见 engine.md「等待期间」。
+- `checkin_minutes`: a number > 0 or null; when not written (or null) there are no check-ins. While a dispatch is in the long-job state (it handed back `long_job`) and its completion marker has not appeared, every that many minutes (from the dispatch's latest hand-back) the engine has the same session do a check-in in the continuation mode `checkin` (the feedback starts with "# Check-in", the dispatch record's `checkins` plus 1, not a return); the agent checks the environment, handles anything wrong first, and while the long job still runs hands back `long_job`: the same completion marker when it did not restart trials, or a new completion marker when it restarted trials and started a new trsi watch. With check-ins on, `rsi run` does not exit but waits in the process for the completion marker or the next check-in.
+- `max_checkins`: an integer >= 0, 48 when not written. The most automatic check-ins of one dispatch; at the limit, when another check-in is due, the user is asked (question `checkin`, options `continue` for that many check-ins more, `wait` for no more check-ins and only waiting for the completion marker, `stop` to stop the run). Once the completion marker appears the question is dropped.
+- `page_refresh_seconds`: a number > 0, 60 when not written. While `rsi run` waits (for an agent, or for a completion marker with check-ins on), once this many seconds have passed since the progress pages were last written, it takes a GPU snapshot first (`<ws>/work/gpus.json`) and then rewrites the pages. See "While waiting" in engine.md.
+- `status_minutes`: a number > 0, 5 when not written. While `rsi run` waits, when it has printed no status line on stderr for this many minutes it prints one more (a heartbeat); a change of state prints one at any time. See "While waiting" in engine.md.
 
-各项的默认值只在 `rsi/rules.py` 的 `flow_settings` 一处补上。
+The defaults of all items are filled in only in one place, `flow_settings` in `rsi/rules.py`.
 
-## `decisions`（可选）
+## `decisions` (optional)
 
-决策点（`rsi/decisions.py`）上默认由代码按规则选择。这里可以按决策点改成让 agent 判断：键是决策点 `train_gate_failed`、`quality_gate_failed`、`handback_refused`、`handback_failed`，值是 `code`（默认）或 `agent`。`agent` 时引擎用调用器启动一个决策 agent（`claude -p` 加 `--json-schema`），给它情况、上限允许的选项、代码的默认和相关事实，它必须在这些选项里选一个并写理由（`{"choice", "reason"}`）；代码校验后执行，答案不合格或调用器没有决策 agent（`manual`）时用代码的默认。上限只允许 `ask` 时不调用 agent。每次决策都记进 STATE 的 `decisions` 和 `<ws>/work/run.jsonl`（`by` 是 `code`、`agent` 或回答的用户）。
+At the decision points (`rsi/decisions.py`) code chooses by rule by default. Here, per decision point, an agent can judge instead: the keys are the decision points `train_gate_failed`, `quality_gate_failed`, `handback_refused`, `handback_failed`, and the values `code` (default) or `agent`. With `agent`, the engine has the runner launch a decision agent (`claude -p` plus `--json-schema`) and gives it the situation, the options the limits allow, the code's default and the relevant facts; it must choose one of these options and give a reason (`{"choice", "reason"}`); the code checks it and carries it out, and when the answer is invalid or the runner has no decision agent (`manual`) the code's default is used. When the limits allow only `ask`, no agent is called. Every decision is recorded in STATE's `decisions` and in `<ws>/work/run.jsonl` (`by` is `code`, `agent` or the answering user).
 
-## `runner`（可选）
+## `runner` (optional)
 
-`rsi run <ws> --runner claude`（默认）用无界面的 Claude Code 会话执行模块，命令是 `claude -p --dangerously-skip-permissions --output-format json`，再接这里的额外参数，然后是新会话的 `--session-id <uuid>`（引擎先生成并记进派出记录）或续改时的 `--resume <会话 id>`；提示词不放在命令行上，而是写进输出目录的 `prompt-<n>.md` 从标准输入给出；工作目录是这次派出的输出目录。只有一项 `claude`，其中四项都可选：
+`rsi run <ws> --runner claude` (the default) runs modules in headless Claude Code sessions; the command is `claude -p --dangerously-skip-permissions --output-format json`, followed by the extra arguments here, then `--session-id <uuid>` for a new session (the engine makes it first and records it in the dispatch record) or `--resume <session id>` when carrying on; the prompt is not put on the command line but written into `prompt-<n>.md` in the output directory and given on standard input; the working directory is this dispatch's output directory. There are two items, `claude` and `code`. The four fields of `claude` are all optional:
 
-- `command`：字符串列表，替换上面的默认命令（额外参数之前的部分），例如去掉 `--dangerously-skip-permissions`。
-- `args`：字符串列表，接在命令后面的额外参数，例如 `["--model", "sonnet"]`。没写 `--model` 时加 `--model claude-opus-5-5`，没写 `--effort` 时加 `--effort xhigh`：模块 agent 和决策 agent 默认都用 Opus 5.5、effort xhigh。
-- `timeout_s`：number >= 1，一次 agent 调用最长运行多少秒，从启动算起，不写时为 21600（6 小时）；超时的 agent 被终止，这次派出记为失败。
-- `setting_sources`：字符串列表，取值 `user`、`project`、`local`，至少一个；给了就传 `--setting-sources <逗号分隔>`，模块 agent 只读这些来源的 Claude Code 设置文件。不写时 agent 和你平时一样读全部设置（包括你的 hooks、权限、MCP 服务器）；`CLAUDE.md` 和记忆不受它影响（见 engine.md「调用器」）。
+- `command`: a list of strings that replaces the default command above (the part before the extra arguments), e.g. to drop `--dangerously-skip-permissions`.
+- `args`: a list of strings, extra arguments after the command, e.g. `["--model", "sonnet"]`. Without `--model`, `--model claude-opus-5-5` is added, and without `--effort`, `--effort xhigh`: module agents and decision agents both use Opus 5.5 with effort xhigh by default.
+- `timeout_s`: a number >= 1, the longest one agent call may run, in seconds from its start, 21600 (6 hours) when not written; an agent that times out is terminated and this dispatch is recorded as failed.
+- `setting_sources`: a list of strings from `user`, `project`, `local`, at least one; when given, `--setting-sources <comma-separated>` is passed and module agents read only the Claude Code settings files of these sources. When not written, the agent reads all settings as you do day to day (your hooks, permissions and MCP servers included); `CLAUDE.md` and memory are not affected by it (see "Runners" in engine.md).
 
-默认值只在 `rsi/runners/claude.py` 一处补上。
+The defaults are filled in only in one place, `rsi/runners/claude.py`.
+
+`code` sets how a code module (`compare`: a fixed command, no agent) is run. Its dispatches always go through the code runner, whatever `--runner` says, except `--runner mock` (see "Runners" in engine.md). Its two fields are optional:
+
+- `commands`: an object whose keys are code modules (`compare`) and whose values are argv lists (at least one non-empty string), the command that replaces the default `<repo root>/modules/<module>/run`, e.g. `{"compare": ["/opt/venv/bin/python", "-m", "my_compare"]}`. A relative path as the first word is taken from the repository root (the command runs in the dispatch's output directory, so give the other words as absolute paths); a bare name is looked up on PATH. The engine appends `--brief <outdir>/brief.json --outdir <outdir> --mode <launch mode>` and, whenever the dispatch has a feedback file for the launch (from the second launch on, and at the first launch of a dispatch a decision made), `--feedback <outdir>/<feedback file>`; the contract of the arguments is in `modules/<module>/SKILL.md`.
+- `timeout_s`: a number >= 1, the longest one launch of the command may run, in seconds from its start, 21600 (6 hours) when not written; a command that times out is terminated and the dispatch is recorded as failed.
+
+The defaults are filled in only in one place, `rsi/runners/code.py`. `rsi run` reads `runner.code` once, when it first runs a code module's command, so a change takes effect at the next `rsi run`.
 
 ## `stop`
 
-- `target`：主指标的目标值；不设时为 null。
-- `max_rounds`：最大轮数，整数 >= 1。
-- `patience`：可选，连续多少轮没有晋升就停止，整数 >= 1；不写时为 3。
-- `max_attempts_per_round`：可选，每轮最多尝试几次，整数 >= 1；不写时为 3。
+- `target`: the primary metric's target value; null when not set.
+- `max_rounds`: the maximum number of rounds, an integer >= 1.
+- `patience`: optional, stop after this many rounds in a row without promotion, an integer >= 1; 3 when not written.
+- `max_attempts_per_round`: optional, the most attempts per round, an integer >= 1; 3 when not written.
 
-两个可选字段的默认值只在 `rsi/rules.py` 的 `stop_settings` 一处补上，停止检查、登记检查和 `rsi status` 都从它取值；`rsi status` 的 stop settings 行打印生效的值，用了默认值的标 `(default)`，例如 `patience 3 (default)`。
+The defaults of the two optional fields are filled in only in one place, `stop_settings` in `rsi/rules.py`, from which the stop check, the registration checks and `rsi status` all take them; the stop settings line of `rsi status` prints the values in effect, marking defaults `(default)`, e.g. `patience 3 (default)`.
 
-停止检查由 `rsi/rules.py` 的 `check_stop` 完成（`rsi next` 和 `rsi check-stop` 调用；本轮已登记评测但还没有升级判定时，`rsi next` 先拒绝并要求 `rsi promote`，不做停止检查）：当前最佳版本的主指标达到 `target`（越小越好时为不高于）、已完成的轮数（已有判定的轮次，包括 `rsi close-round` 关闭的轮次）达到 `max_rounds`、连续未升级轮数达到 `patience`、或已用算力小时数达到 `budget.compute_hours`，任一成立即停止。
+The stop check is done by `check_stop` in `rsi/rules.py` (called by `rsi next` and `rsi check-stop`; when this round has a registered evaluation without a promotion decision, `rsi next` first refuses and asks for `rsi promote`, without a stop check): it stops when any one holds: the current best version's primary metric reaches `target` (not higher than it when lower is better), the completed rounds (rounds with a decision, including those closed by `rsi close-round`) reach `max_rounds`, the rounds in a row without promotion reach `patience`, or the use of any resource with a budget reaches it (`budget.compute_hours`, `api_cost`, `agent_cost`, `annotation_items`; see `budget` below and spend.md).
 
-**每轮的尝试次数。** 一次尝试是本轮登记的一个 search：训练调优模块的一次派出（或一次退回）是一次搜索，它比较的试验候选不单独算（旧工作区里 train 的候选、tune 的试验也不算）。本轮已有 `max_attempts_per_round` 次尝试时，再登记 search 会被拒绝，错误信息给出次数（例如 `3 of 3 attempts used in round 2`）并指向 `rsi close-round`。`rsi status` 的 attempts 行显示本轮用了几次；次数用完而本轮没有候选通过训练门时，它另起一行提示运行 `rsi close-round`。
+**Attempts per round.** An attempt is a search registered in this round: one dispatch (or one return) of the train module is one search, and the trial candidates it compares do not count separately (nor do an old workspace's train candidates and tune trials). When this round already has `max_attempts_per_round` attempts, registering another search is refused, the error giving the counts (e.g. `3 of 3 attempts used in round 2`) and pointing to `rsi close-round`. The attempts line of `rsi status` shows how many this round used; when they are used up and no candidate of this round passed the train gate, it adds a line suggesting `rsi close-round`.
 
-**关闭一轮。** 本轮没有可评测的候选时（例如所有候选都没过训练门），用 `rsi close-round <ws> --reason <理由>` 关闭本轮：本轮的判定记为 `{"decision": "keep", "version": null, "evaluation_id": null, "reason": "closed without evaluation: <理由>", "at": ...}`，连续未升级轮数加 1，所以这一轮同样计入 `max_rounds` 和 `patience`。本轮已有判定、已登记了评测（里程碑评测除外，这时要用 `rsi promote`）、或运行已停止时拒绝。本轮失败了、长任务可能还在跑的派出（例如定时检查失败了）在同一次保存里先关闭，保存后终止它们的长任务（`long_job_stop` 的 `context` 是 `close`，见 engine.md）。之后 judge 写的计划 `evaluation_id` 为 null（见 evaluation.md 的 `plan`），`rsi next` 照常做停止检查、核对计划和审批。
+**Closing a round.** When this round has no candidate to evaluate (e.g. every candidate failed the train gate), `rsi close-round <ws> --reason <reason>` closes it: the round's decision is recorded as `{"decision": "keep", "version": null, "evaluation_id": null, "reason": "closed without evaluation: <reason>", "at": ...}`, and the rounds in a row without promotion go up by 1, so this round counts in `max_rounds` and `patience` too. It is refused when this round already has a decision, has a registered evaluation (except a milestone evaluation; then use `rsi promote`), or the run has stopped. The round's dispatches that failed and whose long jobs may still run (e.g. a check-in failed) are closed first in the same save, and their long jobs are terminated after the save (`long_job_stop`'s `context` is `close`, see engine.md). After that, the plan judge writes has `evaluation_id` null (see `plan` in evaluation.md), and `rsi next` does the stop check, checks the plan and the approval as usual.
 
-**用户停止。** 除上面的停止条件外，用户随时可以要求结束运行：`rsi stop <ws> --by <name> --quote <用户原话>` 写入 STATE 的 `stopped`（`reason` 为 `user requested: <原话>`，另记 `by`、`at` 和轮次），之后与其他停止一样，只允许 `delete` 审批和登记 `record`。每次停止后用 `rsi report` 生成运行报告。
+**User stop.** Besides the stop conditions above, the user may ask to end the run at any time: `rsi stop <ws> --by <name> --quote <user's own words>` writes STATE's `stopped` (`reason` `user requested: <words>`, plus `by`, `at` and the round), after which, as with any other stop, only `delete` approvals and `record` registrations are allowed. After every stop, `rsi report` produces the run report.
 
 ## `budget`
 
-- `compute_hours`：算力小时数上限。
-- `annotation_items`：人工标注条数上限。
-- `api_cost`：API 费用上限。
+- `compute_hours`: the cap on GPU hours.
+- `annotation_items`: the cap on human annotation items.
+- `api_cost`: the cap on the dollars of the LLM calls that generate or review data (the data generator and its reviewer, prompt-variant rewrites).
+- `agent_cost` (optional): the cap on the dollars of the agent sessions (module and decision agents, `claude -p`).
 
-三项都是数字或 null；null 表示不设限。
+Each is a number or null; null (or, for `agent_cost`, leaving it out) means no cap. The two dollar caps are separate: `api_cost` never covers agent sessions, and `agent_cost` never covers data LLM calls.
 
-代码只统计算力：已用算力小时数（STATE 的 `budget_used.compute_hours`，`rsi status` 的 compute hours 行）是已登记 candidate 和登记被拒的 candidate 的 `cost.compute_hours` 之和（被拒的按来源目录计一次，见 `docs/interfaces/engine.md` 的「被拒候选的算力」），别的花费（例如数据生成、打标、推理服务占用的算力）不计入。`approvals` 含 `over_budget` 时，登记一个 candidate 会使它超过 `compute_hours` 时，需要本轮的 `over_budget` 审批（`rsi run` 在登记这样的交回之前先暂缓、问你）；它达到 `compute_hours` 时 `rsi next` 停止运行。`annotation_items` 和 `api_cost` 代码不统计也不强制：简报把它们列在剩余预算里，模块在交回的 `notes` 里报告用量，要超出时停下问用户（写进 `questions`）。
+The code counts all four in the spend ledger (STATE's `budget_used`; see `docs/interfaces/spend.md`): GPU hours are the `cost.compute_hours` of registered candidates and of candidates refused at registration (refused ones once per source directory, see "Compute of refused candidates" in `docs/interfaces/engine.md`) plus the `compute_hours` lines of the dispatches' spend files; data LLM dollars and annotation items come from the spend files only; agent dollars are what each agent session's runner reports, counted by the engine. Once the use of any resource with a cap reaches it, `rsi next` stops the run (after the round's decision). When `approvals` includes `over_budget`, a reached cap asks this round's `over_budget` approval before ① a new trainset, ② and ③, and registering a candidate that would take the GPU hours over `compute_hours` needs it too (`rsi run` holds such a hand-back before registering it and asks you). The brief gives each module what is left of each cap (`budget_left`); a module stops its own spending there and asks the user (written into `questions`) before going over.

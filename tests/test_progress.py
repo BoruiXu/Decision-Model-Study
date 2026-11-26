@@ -29,7 +29,7 @@ class TestReadProgress(ProgressCase):
     def test_read_progress_keeps_what_is_valid(self):
         now = datetime.datetime(2026, 11, 24, 12, 10, tzinfo=UTC)
         self.write({"version": 1, "updated_at": "2026-11-24T20:08:00+08:00", "summary": "x" * 250,
-                    "facts": [{"label": "配置", "value": "3/3"}, {"label": 5}, {"label": "GPU 小时", "value": 1.25}],
+                    "facts": [{"label": "configs", "value": "3/3"}, {"label": 5}, {"label": "GPU hours", "value": 1.25}],
                     "table": {"columns": ["a", "b"], "rows": [[1], ["x", "y", "z"]]}, "notes": ["n"], "extra": 1})
         r = read_progress(self.path, now)
         self.assertEqual(r["path"], self.path)
@@ -37,7 +37,7 @@ class TestReadProgress(ProgressCase):
         self.assertEqual(r["age_s"], 120)
         self.assertEqual(len(r["summary"]), 201)
         self.assertTrue(r["summary"].endswith("…"))
-        self.assertEqual(r["facts"], [("配置", "3/3"), ("GPU 小时", "1.25")])
+        self.assertEqual(r["facts"], [("configs", "3/3"), ("GPU hours", "1.25")])
         self.assertEqual(len(r["problems"]), 1)
         self.assertEqual(r["table"], {"title": None, "columns": ["a", "b"], "rows": [["1", None], ["x", "y"]]})
         self.assertEqual(r["notes"], ["n"])
@@ -45,7 +45,7 @@ class TestReadProgress(ProgressCase):
                                                                      "rows": [[True], [False], [None], [0.1234567]]}})
         r = read_progress(self.path, now)
         self.assertEqual((r["age_s"], r["problems"]), (60, []))
-        self.assertEqual(r["table"]["rows"], [["是"], ["否"], [None], ["0.123457"]])
+        self.assertEqual(r["table"]["rows"], [["yes"], ["no"], [None], ["0.123457"]])
 
     def test_bad_progress_files_never_raise(self):
         # Review Focus 1: half written, not JSON, not an object, not UTF-8, too big, an unknown version.

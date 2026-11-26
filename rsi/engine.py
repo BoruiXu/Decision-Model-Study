@@ -2,27 +2,27 @@
 
 run_status(ws, runner, max_steps=200) loops: next_action -> log the action to <ws>/work/run.jsonl -> carry it
 out -> log its result -> rewrite the progress pages (rsi.dashboard.write_dashboard; a failure only warns) ->
-next_action again. It returns (status, reason): why it stopped as one of STATUSES and one Chinese line. run()
+next_action again. It returns (status, reason): why it stopped as one of STATUSES and one line. run()
 returns the line only. All it needs is in the workspace, so a run cut off at any point (the process killed, the
 machine restarted) is picked up by running it again.
 
 While it waits (wait_agent's polls, and wait_long_job with check-ins on) every poll ends with Engine.tick: once
 flow.page_refresh_seconds (default 60) have passed since the pages were last written, it takes a GPU snapshot
 (rsi.gpus.snapshot, written to <ws>/work/gpus.json: the only place nvidia-smi runs) and rewrites the pages. Given a
-status stream (`rsi run` gives stderr) the engine prints status lines (rsi.live.now_line, e.g. `20:23 第1轮 ② 训练调优
-d-0001 · 第 3 批：3 个训练在跑 · 配置 3/3 · 下次检查 20:46`): after a step when rsi.live.now_key differs from the last
-line's (the first step always prints; a run that starts with a wait prints before it), and while it waits when it has
-printed none for flow.status_minutes (default 5: a heartbeat). The pages, the snapshot and the status line only warn
-when they fail (`warning: <what>: <error>` on stderr, each kind of failure once a run: Engine.warn); stdout keeps only
-the reason. The actions:
+status stream (`rsi run` gives stderr) the engine prints status lines (rsi.live.now_line, e.g.
+`20:23 round 1 ② Train & tune d-0001 · training 3 trials (GPUs 0, 4, 6) · configs 3/3 · GPU hours 1.3/8 · incumbent c4339e55d6 (lr 5e-6) · next check-in 20:46 | budget: GPU hours 1.3/8 · agent $ 4.20/–`):
+after a step when rsi.live.now_key differs from the last line's (the first step always prints; a run that starts with a
+wait prints before it), and while it waits when it has printed none for flow.status_minutes (default 5: a heartbeat).
+The pages, the snapshot and the status line only warn when they fail (`warning: <what>: <error>` on stderr, each kind of
+failure once a run: Engine.warn); stdout keeps only the reason. The actions:
 
   dispatch
-        the dispatch records first, in one write, status pending (purpose, and a deliver's candidate_id, copied
-        from the action), then each output directory work/round-<n>/<module>[-k]/ with brief.md and brief.json,
-        then the launches. A record is marked launched (status running and launched_at together, with the new
-        session's id when the runner makes one up) just before its runner is called: a pending record is
-        launched by the next run, a launched one is never launched twice. A record closed before its launch (the
-        run stopped) does not count that launch.
+        the dispatch records first, in one write, status pending (purpose, and a compare's or deliver's
+        candidate_id, copied from the action; runner: the name of runner_for's runner), then each output directory
+        work/round-<n>/<module>[-k]/ with brief.md and brief.json, then the launches. A record is marked launched
+        (status running and launched_at together, with the new session's id when the runner makes one up) just
+        before its runner is called: a pending record is launched by the next run, a launched one is never launched
+        twice. A record closed before its launch (the run stopped) does not count that launch.
   wait_long_job
         without check-ins (no checkin_at): stop, the run waits for `rsi run` once the marker is there. With
         check-ins on (flow.checkin_minutes): wait in this process until a long job's marker appears, the
@@ -65,7 +65,7 @@ the reason. The actions:
         the same session gets feedback-<n>.md: a return (mode resume, returns + 1), the continuation after a
         long job (continue), the second part of a two-part hand-back (followup: train's search, the judge's plan;
         followups + 1, no return), the user's answers to its questions (answer: answered + 1, no return) or a long
-        job's check-in (checkin: checkins + 1, no return; the feedback starts with 「# 定时检查」); with
+        job's check-in (checkin: checkins + 1, no return; the feedback starts with `# Check-in`); with
         no session, or one the runner says cannot be resumed, a fresh session gets history-<n>.md (the previous
         brief and hand-backs and the feedback). The user's answers to the dispatch's questions go into the
         feedback. A followup's and a return's feedback list what the dispatch registered since the round's latest
@@ -75,6 +75,18 @@ the reason. The actions:
                 decision_key, so a run cut off before carrying it out, and the run after the user answered the
                 question a decision asked, reuse the latest record; then carried out.
   ask           STATE waiting, then stop (rsi answer / rsi approve record the answer).
+
+Code modules (rsi.flow.CODE_MODULES: compare) have no agent: runner_for gives their dispatches the code runner
+(rsi.runners.code.CodeRunner, the task's runner.code), which runs the module's fixed command with the brief, the
+output directory and the launch mode, whatever --runner says; under --runner mock every module, compare included, is
+its mock script. Everything else above holds for them as it is. A record's agent is found again (attach, recover)
+through the runner the record names (runner_of).
+
+The spend ledger (docs/interfaces/spend.md): finish adds to the agent account what each launch added to its session's
+cumulative cost (cost_usd, claude's total_cost_usd, is the session's total so far: Workspace.add_agent_cost counts the
+increase over the session's last counted total, once per launch); a dispatch's spend file (<outdir>/spend.jsonl) is
+counted when its hand-back is processed, when it fails, and when a stop or a close closes it, after any long job of it
+is terminated (Workspace.count_spend: only lines not counted yet).
 
 The user may stop the run (`rsi stop`, or `stop` as an answer) from another process while a step is under way.
 Before anything is launched or resumed, and before a decision is made or carried out, the engine reads STATE
@@ -94,7 +106,7 @@ close, or at the stop (end_long_job; the start-time check makes a repeated termi
                 the Workspace methods (the report goes to <ws>/REPORT.md); done stops.
 
 While it runs the engine holds <ws>/work/run.lock (its pid), so a second `rsi run` on the workspace is refused; the
-pages show "● 运行中" only while a live process holds it, and are written once more after the lock is let go.
+pages show "● running" only while a live process holds it, and are written once more after the lock is let go.
 Besides each action and its result, run.jsonl records launch, recover, agent_end, register, resume (a return,
 or the continuation after a long job: its mode says which), followup (the second part of a two-part hand-back),
 checkin (a long job's check-in),
@@ -104,11 +116,13 @@ budget_released (that hand-back, approved, goes to registration: dispatch_id, la
 fresh_session, session_mismatch, clear_waiting, decision (every decision, with who made
 it), decision_reused, decision_agent, decision_agent_failed, approval (a use_testset approval quoting the
 milestone consent), continue_capped, closed, agent_stopped, long_job_stopped, long_job_gone, long_job_left (a
-long job still running at a stop: terminated, already gone, or left running) and exit; `rsi answer` and `rsi
+long job still running at a stop: terminated, already gone, or left running), spend_invalid (a spend-file line that is
+no spend line: dispatch_id, file, line, error, text) and exit; `rsi answer` and `rsi
 approve` append answer and approve (log_event).
 
 Files of a dispatch (n numbers its launches): brief.md, brief.json, prompt-<n>.md (claude, manual),
-agent-<n>.log, feedback-<n>.md (why it was sent back, or, for a dispatch a decision made, why it was made),
+agent-<n>.log, agent-<n>.exit (code: the command's exit status), feedback-<n>.md (why it was sent back, or, for a
+dispatch a decision made, why it was made),
 registered-<n>.json (a followup's or a return's: what the dispatch registered since the round's latest search), history-<n>.md, handback.json (the current one)
 and handback-<n>.json (the one launch n wrote, kept when the next launch starts).
 """
@@ -129,12 +143,13 @@ from rsi import decisions as DP
 from rsi import flow as F
 from rsi import gpus as G
 from rsi import live as L
-from rsi.runners import attach_runner
+from rsi.runners import CodeRunner, attach_runner
 from rsi.runners.base import SESSION_MODES, launch_failed, pid_alive, process_info, stop_process
 from rsi.runners.base import launched_epoch
-from rsi.report import _num, long_job_text
+from rsi.report import _clause, _num, long_job_text
 from rsi.rules import flow_settings
-from rsi.workspace import RsiError, StoppedError, Workspace, now_iso, parse_utc
+from rsi.timing import plural
+from rsi.workspace import HELDOUT_CHECK, RsiError, StoppedError, Workspace, now_iso, parse_utc
 
 RUN_LOG = os.path.join("work", "run.jsonl")
 RUN_LOCK = os.path.join("work", "run.lock")
@@ -144,11 +159,11 @@ STATUSES = ("done", "waiting_user", "waiting_long_job", "waiting_manual", "max_s
 STATUS_EXIT_CODES = {"done": 0, "waiting_user": 10, "waiting_long_job": 11, "waiting_manual": 12, "max_steps": 13}
 # Registration order inside one hand-back: an artifact's checks refer to the kinds before it (data's: the filled-in
 # task version first, so the manifests after it may carry its version; the corpus before the sets it vouches for).
-KIND_ORDER = ("task", "corpus", "testset", "evalset", "valset", "pool", "trainset", "candidate", "search", "delivery",
-              "feedback", "evaluation", "plan", "record")
+KIND_ORDER = ("task", "corpus", "testset", "evalset", "valset", "pool", "trainset", "candidate", "search", "baseline",
+              "comparison", "delivery", "feedback", "evaluation", "plan", "record")
 # The only module that hands back a task version (a fill of the split rule), and what a refusal of one says.
 TASK_MODULE = "data"
-TASK_REFUSED = "rsi-data 只能交回补全切分规则的任务新版本，这份不是："
+TASK_REFUSED = "rsi-data may hand back a new task version only as a fill of the split rule, and this one is not: "
 # The kinds of data's hand-back that depend on each other (KIND_ORDER): once one is refused (or a subdirectory whose
 # kind cannot be told), the later ones are refused unregistered, since registering them would skip the checks against
 # it (the sets come from the corpus) and fix the split rule; a record still registers.
@@ -157,7 +172,8 @@ DATA_CHAIN = ("task", "corpus", "testset", "evalset", "valset", "pool", "trainse
 # second line the process's start time (Unix seconds, e.g. `date +%s`). On a stop the report step terminates that
 # process (its process group) when it is confirmed to be the job (stop_long_job).
 LONG_JOB_PID_SUFFIX = ".pid"
-# The claude runner's own pid file in a dispatch's output directory (rsi.runners.claude): never a long job's.
+# The claude and code runners' own pid file in a dispatch's output directory (rsi.runners.claude, rsi.runners.code):
+# never a long job's.
 AGENT_PID_FILE = re.compile(r"^agent-\d+\.pid$")
 # How far the start time `ps` shows (or a marker's time) may be off, in whole seconds: rsi.flow.LONG_JOB_SLACK_S.
 LONG_JOB_SLACK_S = F.LONG_JOB_SLACK_S
@@ -261,7 +277,7 @@ def _answer_item(x):
 
 
 def _answer_lines(items):
-    return "".join("- %s（%s）\n  用户（%s）的回答：%s\n" % (x["question"], x["dispatch_id"], x["by"], x["quote"])
+    return "".join("- %s (%s)\n  The user's answer (%s): %s\n" % (x["question"], x["dispatch_id"], x["by"], x["quote"])
                    for x in items)
 
 
@@ -274,20 +290,20 @@ def brief_changes(old, new):
     oi, ni = old.get("ids") or {}, new.get("ids") or {}
     for k in sorted(set(oi) | set(ni)):
         if oi.get(k) != ni.get(k):
-            out.append("`ids.%s`：%s → %s" % (k, oi.get(k), ni.get(k)))
+            out.append("`ids.%s`: %s → %s" % (k, oi.get(k), ni.get(k)))
     oin, nin = old.get("inputs") or {}, new.get("inputs") or {}
     notes = new.get("input_notes") or {}
     onotes = old.get("input_notes") or {}
     for k in sorted(set(oin) | set(nin)):
         if k not in oin:
-            out.append("新的输入 `%s`：%s（%s）" % (k, notes.get(k, ""), nin[k]))
+            out.append("New input `%s`: %s (%s)" % (k, notes.get(k, ""), nin[k]))
         elif k not in nin:
-            out.append("不再给的输入 `%s`（%s）" % (k, onotes.get(k, oin[k])))
+            out.append("Input no longer given: `%s` (%s)" % (k, onotes.get(k, oin[k])))
         elif oin[k] != nin[k]:
-            out.append("输入 `%s` 换成了 %s（%s）" % (k, notes.get(k, ""), nin[k]))
-    for k, label in (("attempts", "本轮已用尝试"), ("budget_left", "剩余预算")):
+            out.append("Input `%s` is now %s (%s)" % (k, notes.get(k, ""), nin[k]))
+    for k, label in (("attempts", "Attempts used this round"), ("budget_left", "Budget left")):
         if old.get(k) != new.get(k):
-            out.append("%s：%s → %s" % (label, json.dumps(old.get(k), ensure_ascii=False),
+            out.append("%s: %s → %s" % (label, json.dumps(old.get(k), ensure_ascii=False),
                                        json.dumps(new.get(k), ensure_ascii=False)))
     return out
 
@@ -306,6 +322,19 @@ def registered_file(n):
     """The file beside feedback-<n>.md of a followup or a return that maps what the dispatch registered since the
     round's latest search: registered-<n>.json."""
     return "registered-%d.json" % n
+
+
+HELDOUT_SHOWN = 20  # the trainset rows a failed held-out check names in the data module's feedback
+
+
+def heldout_text(ids):
+    """What the data module is told of a failed generated_matches_heldout check: the trainset's own row ids (at most
+    HELDOUT_SHOWN of them), never the held-out inputs they match."""
+    more = " and %d more" % (len(ids) - HELDOUT_SHOWN) if len(ids) > HELDOUT_SHOWN else ""
+    return ("%s: %d generated or prompt-variant rows of this trainset have a state that matches an input of the "
+            "current evalset or testset (numbers rounded to 4 significant digits): %s%s. Leave them out (for a prompt "
+            "variant, its seed's state is what is compared) and build the trainset again."
+            % (HELDOUT_CHECK, len(ids), ", ".join(ids[:HELDOUT_SHOWN]) or "none now", more))
 
 
 def registered_since_search(ws, d):
@@ -363,10 +392,10 @@ def long_job_note(st):
     """A long_job_stop in words, for the record's `closed`: over its pid files (the marker's and the others)."""
     every = [st] + list(st.get("others") or [])
     left = [x for x in every if x["result"] not in ("terminated", "gone")]
-    words = ["长任务已终止"] if any(x["result"] == "terminated" for x in every) else []
+    words = ["long job terminated"] if any(x["result"] == "terminated" for x in every) else []
     if left:
-        words.append("长任务没能终止，可能仍在运行（%s）" % "；".join(x["why"] for x in left))
-    return "；".join(words) or "长任务的进程已不在"
+        words.append("long job not terminated, it may still be running (%s)" % "; ".join(x["why"] for x in left))
+    return "; ".join(words) or "the long job's process was already gone"
 
 
 def terminate_long_job(ws, d, context="stop"):
@@ -394,7 +423,8 @@ def _stop_pid_file(ws, d, path, since, context, orphan=False):
     orphan_pid_files)."""
     out = {"pid": None, "pid_file": path}
     if path is None or not os.path.exists(path):
-        out.update(result="no_pid_file", why="没有 pid 文件 %s，不知道长任务的进程" % (path or "（没有完成标记）"))
+        out.update(result="no_pid_file", why="no pid file %s, so the long job's process is unknown"
+                   % (path or "(no completion marker)"))
     else:
         pid, started, error = read_pid_file(path)
         out["pid"] = pid
@@ -409,7 +439,7 @@ def _stop_pid_file(ws, d, path, since, context, orphan=False):
             state, why = long_job_identity(pid, started, since)
             if state == "ours":
                 stop_process(pid)
-                out.update(result="terminated", why="%s，已终止" % why)
+                out.update(result="terminated", why="%s; terminated" % why)
             else:
                 out.update(result=state, why=why)
     event = {"terminated": "long_job_stopped", "gone": "long_job_gone"}.get(out["result"], "long_job_left")
@@ -432,11 +462,12 @@ def end_long_job(ws, d, context):
     except Exception as e:  # recorded: the user ends it by hand; the other dispatches are still dealt with
         marker = F.marker_path(ws, d)
         st = {"pid": None, "pid_file": long_job_pid_file(marker) if marker else None, "result": "error",
-              "why": "终止长任务时出错：%s: %s" % (type(e).__name__, e), "others": [], "at": now_iso(),
-              "context": context}
+              "why": "error while terminating the long job: %s: %s" % (type(e).__name__, e), "others": [],
+              "at": now_iso(), "context": context}
         log_event(ws.root, "long_job_left", dispatch_id=d["id"], pid=None, result="error", why=st["why"],
                   pid_file=st["pid_file"], context=context, orphan=False)
-    ws.update_dispatch(d["id"], long_job_stop=st, closed="%s；%s" % (d.get("closed"), long_job_note(st)))
+    ws.update_dispatch(d["id"], long_job_stop=st, closed="%s; %s" % (d.get("closed"), long_job_note(st)))
+    ws.count_spend(d)  # what the job wrote before it was terminated
     return st
 
 
@@ -458,13 +489,13 @@ def read_pid_file(path):
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = [x.strip() for x in f.read().splitlines()]
     except OSError as e:
-        return None, None, "读不了 %s：%s" % (path, e)
+        return None, None, "cannot read %s: %s" % (path, e)
     try:
         pid = int(lines[0])
         if pid <= 1:
             raise ValueError(pid)
     except (IndexError, ValueError):
-        return None, None, "%s 的第一行不是进程号" % path
+        return None, None, "the first line of %s is not a pid" % path
     started = None
     if len(lines) > 1 and lines[1]:
         try:
@@ -472,7 +503,8 @@ def read_pid_file(path):
         except ValueError:
             dt = parse_utc(lines[1])
             if dt is None:
-                return pid, None, "%s 的第二行不是启动时间（Unix 秒或 ISO 8601 UTC）：%s" % (path, lines[1][:80])
+                return pid, None, "the second line of %s is not a start time (Unix seconds or ISO 8601 UTC): %s" % (
+                    path, lines[1][:80])
             started = dt.timestamp()
     return pid, started, None
 
@@ -485,18 +517,19 @@ def long_job_identity(pid, started_file, launched):
     the time the file gives is the job, which wrote the file late); "gone" when there is no such process; else
     "unconfirmed"."""
     if not pid_alive(pid):
-        return "gone", "进程 %d 已不在" % pid
+        return "gone", "process %d is gone" % pid
     info = process_info(pid)
     if info is None or info[1] is None:
-        return "unconfirmed", "进程 %d 还在，但查不到它的启动时间，确认不了它是这个长任务" % pid
+        return "unconfirmed", ("process %d is alive, but its start time cannot be read, so it cannot be confirmed to "
+                               "be this long job" % pid)
     started = info[1]
     if started < int(launched) - LONG_JOB_SLACK_S:
-        return "unconfirmed", ("进程 %d 的启动时间（%s）早于这次派出的启动（%s），不是这个长任务启动的（可能是复用的进程号）"
-                               % (pid, _local(started), _local(launched)))
+        return "unconfirmed", ("process %d started (%s) before this dispatch was launched (%s), so this long job did "
+                               "not start it (the pid may have been reused)" % (pid, _local(started), _local(launched)))
     if started_file is not None and started - started_file > LONG_JOB_SLACK_S:
-        return "unconfirmed", ("进程 %d 的启动时间（%s）晚于 pid 文件的时间（%s），不是这个长任务（可能是复用的进程号）"
-                               % (pid, _local(started), _local(started_file)))
-    return "ours", "进程 %d 是这个长任务（%s 启动）" % (pid, _local(started))
+        return "unconfirmed", ("process %d started (%s) after the time in its pid file (%s), so it is not this long "
+                               "job (the pid may have been reused)" % (pid, _local(started), _local(started_file)))
+    return "ours", "process %d is this long job (started %s)" % (pid, _local(started))
 
 
 def _local(epoch):
@@ -525,6 +558,7 @@ class Engine(object):
         self.root, self.runner, self.pages = root, runner, pages
         self.poll_s = runner.poll_interval if poll_s is None else poll_s
         self.handles = {}  # dispatch id -> runner handle, for the agents this process launched or attached
+        self.code_runner = None  # runner_for's code runner, made from the task once it is needed
         self.status, self.clock = status, clock  # status: the stream of the status lines (None: none)
         self.pages_at = self.said_at = clock()  # when the pages were last written, a status line last printed
         self.said_key = self.said_line = None  # rsi.live.now_key and the text of the last status line
@@ -577,7 +611,8 @@ class Engine(object):
             if stop is not None:
                 self.log("exit", status=stop[0], reason=stop[1])
                 return stop
-        stop = ("max_steps", "已执行 %d 步，到了 --max-steps 的上限；再运行 rsi run 接着走。" % max_steps)
+        stop = ("max_steps", "Stopped after %s (the --max-steps limit); run rsi run again to go on."
+                % plural(max_steps, "step"))
         self.log("exit", status=stop[0], reason=stop[1])
         return stop
 
@@ -595,7 +630,8 @@ class Engine(object):
             if a.get("checkin_at"):
                 return self.wait_long_job(a["checkin_at"]), None
             d = ws.dispatch(a["dispatch_id"])
-            return {}, ("waiting_long_job", "在等长任务：%s（rsi-%s）完成后会写标记 %s；标记出现后再运行 rsi run。"
+            return {}, ("waiting_long_job", "Waiting for a long job: %s (rsi-%s) writes the marker %s when it "
+                        "finishes; run rsi run again once the marker is there."
                         % (d["id"], d.get("module"), F.marker_path(ws, d)))
         if t == "process_handback":
             return self.process(ws, ws.dispatch(a["dispatch_id"]))
@@ -621,8 +657,11 @@ class Engine(object):
             if closed:
                 self.write_pages()
             stopped = ws.state["stopped"] or {}
-            reason = "运行已结束（%s），报告在 %s。" % (stopped.get("reason"), os.path.join(self.root, F.REPORT_FILE))
-            reason += long_job_text(self.ws())
+            reason = "The run has ended (%s); the report is in %s." % (_clause(stopped.get("reason")),
+                                                                       os.path.join(self.root, F.REPORT_FILE))
+            jobs = long_job_text(self.ws())
+            if jobs:
+                reason += " " + jobs
             return {}, ("done", reason)
         raise RsiError("unknown action type %r" % t)
 
@@ -644,9 +683,9 @@ class Engine(object):
         the record is closed (a manual or lost agent: the record is only closed). Then every record left open is
         closed; a hand-back's `record` artifacts (still allowed after a stop) are registered first. In both, a record
         whose long job may still run (long_job_open: its marker is not there; a long job, or a check-in's session,
-        working or ended) has the job terminated (terminate_long_job). First, a long_job_stop still "pending" (a
-        close whose termination was cut off), whatever its dispatch's status, is finished (end_long_job). Returns the
-        closed ids."""
+        working or ended) has the job terminated (terminate_long_job), and every record it closes has its spend file
+        counted (Workspace.count_spend). First, a long_job_stop still "pending" (a close whose termination was cut
+        off), whatever its dispatch's status, is finished (end_long_job). Returns the closed ids."""
         reason = (ws.state["stopped"] or {}).get("reason")
         for d in pending_long_job_stops(self.ws()):  # a close saved, its termination cut off: finished now
             end_long_job(self.ws(), d, d["long_job_stop"].get("context") or "close")
@@ -672,16 +711,18 @@ class Engine(object):
                         pass
                     continue
                 stopped = h["runner"].stop(h)
-            why = "agent 已终止" if stopped else "这个运行确认不了它的 agent 进程（手动完成的，或进程已不在），只关闭记录"
+            why = "agent terminated" if stopped else ("this run cannot confirm the agent's process (done by hand, or "
+                                                      "the process is gone): only the record is closed")
             # A hand-back it wrote before its process was seen to end is this launch's (the previous one is renamed
             # before a relaunch): its candidates were trained, so their compute counts (once).
             self.ws().count_stopped_handback(d)
             extra = {}
             if long_job_open(self.ws(), d):  # a check-in's agent: the long job it looks after runs on
                 extra["long_job_stop"] = self.stop_long_job(self.ws(), d)
-                why += "；%s" % long_job_note(extra["long_job_stop"])
+                why += "; %s" % long_job_note(extra["long_job_stop"])
+            self.ws().count_spend(d)  # its spend file, once its long job can write no more
             self.ws().update_dispatch(did, status="done", pid=None, capped=None, ended_at=now_iso(),
-                                      closed="运行已停止（%s）：%s" % (reason, why), **extra)
+                                      closed="run stopped (%s): %s" % (reason, why), **extra)
             self.log("agent_stopped" if stopped else "closed", dispatch_id=did, why="stopped", pid=d.get("pid"))
             closed.append(did)
         ws = self.ws()
@@ -689,19 +730,21 @@ class Engine(object):
             status = d.get("status")
             if status not in ("handed_back", "failed", "long_job"):
                 continue
-            note = "这次派出的交回不再登记，也不再退回"
+            note = "this dispatch's hand-back is no longer registered or sent back"
             extra = {}
             if status in ("handed_back", "long_job"):  # its candidates were trained: their compute counts (once)
                 ws.count_stopped_handback(d)
             if status == "handed_back":
                 done, left = self.register_records(ws, d)
                 if done:
-                    note = "登记了交回里的实验记录 %s；其余（%s）不再登记" % ("、".join(done), "、".join(left) or "无")
+                    note = "registered experiment records from the hand-back: %s; not registered: %s" % (
+                        ", ".join(done), ", ".join(left) or "none")
             if long_job_open(ws, d):  # a long job, or a check-in that ended (e.g. failed) while it runs on
                 extra["long_job_stop"] = self.stop_long_job(ws, d)
-                note += "；%s" % long_job_note(extra["long_job_stop"])
+                note += "; %s" % long_job_note(extra["long_job_stop"])
+            ws.count_spend(d)  # its spend file, once its long job can write no more
             ws.update_dispatch(d["id"], status="done", capped=None, ended_at=d.get("ended_at") or now_iso(),
-                               closed="运行已停止（%s）：%s" % (reason, note), **extra)
+                               closed="run stopped (%s): %s" % (reason, note), **extra)
             self.log("closed", dispatch_id=d["id"], why="stopped", status=status)
             closed.append(d["id"])
         return closed
@@ -736,7 +779,7 @@ class Engine(object):
                 left.append(name)
         return done, left
 
-    def halt_if_stopped(self, d=None, what="不再启动"):
+    def halt_if_stopped(self, d=None, what="nothing more is started"):
         """Read STATE from disk; when the run has stopped meanwhile, close dispatch `d` (one this step would launch
         or resume: failed, a long job to continue, or pending: not launched yet, its launch not counted) and raise
         StoppedError. Returns the workspace as read."""
@@ -752,8 +795,10 @@ class Engine(object):
                 extra, note = {}, ""
                 if long_job_open(ws, cur):  # a check-in this step would launch: its long job runs on
                     extra["long_job_stop"] = self.stop_long_job(ws, cur)
-                    note = "；%s" % long_job_note(extra["long_job_stop"])
-                ws.update_dispatch(d["id"], status="done", closed="运行已停止（%s）：%s%s" % (st.get("reason"), what, note),
+                    note = "; %s" % long_job_note(extra["long_job_stop"])
+                ws.count_spend(cur)  # its spend file, once its long job can write no more
+                ws.update_dispatch(d["id"], status="done", closed="run stopped (%s): %s%s" % (st.get("reason"), what,
+                                                                                             note),
                                    capped=None, ended_at=now_iso(), **extra)
                 self.log("closed", dispatch_id=d["id"], why="stopped")
         raise StoppedError("the run has stopped (%s) while this step was under way: nothing more is started"
@@ -780,9 +825,10 @@ class Engine(object):
             rel = self._new_outdir(rnd, a["module"], taken)
             taken.add(rel)
             r = {"round": rnd, "module": a["module"], "purpose": a["purpose"], "reason": a.get("reason"),
-                 "outdir": rel, "brief": rel + "/brief.md", "runner": self.runner.name, "launches": 1,
+                 "outdir": rel, "brief": rel + "/brief.md", "runner": None, "launches": 1,
                  "launch_mode": "first", "feedback": "feedback-1.md" if why else None, "launched_at": None,
                  "status": "pending"}
+            r["runner"] = self.runner_for(r).name
             if why:  # kept so feedback-1.md can be written again when a run is cut off before it was
                 r["made"] = {"reason": why[0], "failing": list(why[1])}
             if "candidate_id" in a:
@@ -816,17 +862,19 @@ class Engine(object):
         """Close a record whose agent was never launched because the run stopped (pending; with `force` also one
         just marked running whose runner was not called): status done, no launched_at, and the launch it was
         prepared for is not counted (launches, and the return / continuation / followup / answer / check-in it was
-        for); a check-in's long job is terminated (stop_long_job). Returns True when it closed the record."""
+        for); a check-in's long job is terminated (stop_long_job), then its spend file is counted. Returns True when it
+        closed the record."""
         ws = self.ws()
         d = ws.dispatch(did)
         if not (d.get("status") == "pending" or (d.get("status") == "running" and (force or not d.get("launched_at")))):
             return False
         fields = {"status": "done", "launched_at": None, "pid": None, "capped": None, "ended_at": now_iso(),
-                  "closed": "运行已停止（%s）：没有启动" % (ws.state["stopped"] or {}).get("reason"),
+                  "closed": "run stopped (%s): never launched" % (ws.state["stopped"] or {}).get("reason"),
                   "launches": max(0, int(d.get("launches") or 1) - 1)}
         if long_job_open(ws, d):  # a check-in prepared, not launched: its long job runs on
             fields["long_job_stop"] = self.stop_long_job(ws, d)
-            fields["closed"] += "；%s" % long_job_note(fields["long_job_stop"])
+            fields["closed"] += "; %s" % long_job_note(fields["long_job_stop"])
+        ws.count_spend(d)  # what its earlier launches (or its long job) wrote and nothing counted yet
         counter = MODE_COUNTERS.get(d.get("launch_mode"))
         if counter:
             fields[counter] = max(0, int(d.get(counter) or 0) - 1)
@@ -843,13 +891,15 @@ class Engine(object):
         answers = DP.pending_answers(ws, d)
         if answers:  # the user's answers to questions this module asked before, not given to it yet
             brief["answers"] = [_answer_item(x) for x in answers]
-            text = text.rstrip("\n") + "\n\n## 用户对本模块之前提问的回答\n\n" + _answer_lines(brief["answers"])
+            text = text.rstrip("\n") + "\n\n## The user's answers to this module's earlier questions\n\n" + \
+                _answer_lines(brief["answers"])
         if d.get("module") == "judge" and (F.dispatch_purpose(d) == "plan"
                                            or ws.state["rounds"][str(d.get("round"))]["decision"] is not None):
             every = DP.round_answers(ws, d.get("round"))
             if every:  # the plan sees what the user answered to every module this round
                 brief["round_answers"] = [_answer_item(x) for x in every]
-                text = text.rstrip("\n") + "\n\n## 本轮用户对各模块提问的回答\n\n" + _answer_lines(brief["round_answers"])
+                text = text.rstrip("\n") + "\n\n## The user's answers to the modules' questions this round\n\n" + \
+                    _answer_lines(brief["round_answers"])
         _write(os.path.join(out, "brief.md"), text)
         if answers:
             DP.mark_delivered(ws, answers, "%s brief" % d["id"])
@@ -872,10 +922,11 @@ class Engine(object):
             skill = _read(path)
         except OSError as e:
             raise RsiError("cannot read the module skill %s: %s" % (path, e))
-        text = ("你是 RSI 运行里的模块 agent `%s`。下面先是这个模块的 skill 全文（文件 `%s`，skill 里的相对路径都相对它所在的"
-                "目录 `%s`；全文已经在这里，不必再去读），然后是这次派出的简报。\n\n"
-                "===== skill 全文开始 =====\n%s\n===== skill 全文结束 =====\n\n%s\n## 交回\n\n结构化的简报在 `%s`。%s\n"
-                "写好 `handback.json` 就结束这次会话。\n"
+        text = ("You are the module agent `%s` of an RSI run. Below is first the full text of this module's skill "
+                "(file `%s`; every relative path in the skill is relative to its directory `%s`; the full text is "
+                "already here, no need to read it again), then the brief of this dispatch.\n\n"
+                "===== skill text begins =====\n%s\n===== skill text ends =====\n\n%s\n## Hand-back\n\nThe "
+                "structured brief is in `%s`. %s\nEnd this session once `handback.json` is written.\n"
                 % (B.SKILLS[d["module"]], path, os.path.dirname(path), skill.rstrip("\n"),
                    _read(os.path.join(out, "brief.md")), os.path.join(out, "brief.json"), B.HANDBACK_FORMAT))
         if d.get("feedback"):
@@ -892,13 +943,14 @@ class Engine(object):
             self.prepare(ws, d)  # interrupted after the record was written
         self.made_feedback(ws, d)
         prompt = self.prompt(d)
+        runner = self.runner_for(d)
         mode = d.get("launch_mode") or "first"
         resume = d.get("session") if mode in SESSION_MODES else None
-        new = None if resume else self.runner.new_session(d)
-        fields = {"status": "running", "launched_at": now_iso(), "runner": self.runner.name}
+        new = None if resume else runner.new_session(d)
+        fields = {"status": "running", "launched_at": now_iso(), "runner": runner.name}
         denied = B.denied_paths(ws, json.loads(_read(os.path.join(self.outdir(d), "brief.json"))))
         fields["denied"] = denied  # enforced by the claude runner only; never in the brief
-        if getattr(self.runner, "enforces_deny", False):
+        if getattr(runner, "enforces_deny", False):
             B.deny_rules(denied)  # RsiError before anything is recorded or launched: a path no safe rule can name
         if not resume:
             fields["session"] = new
@@ -914,24 +966,39 @@ class Engine(object):
         except (OSError, TypeError):
             pass
         try:
-            h = self.runner.launch(ws, d, prompt, resume_session=resume, new_session=new)
+            h = runner.launch(ws, d, prompt, resume_session=resume, new_session=new)
         except OSError as e:
             log = os.path.join(self.outdir(d), "agent-%d.log" % int(d.get("launches") or 1))
-            h = launch_failed(self.runner, log, e)
-        h.setdefault("runner", self.runner)
+            h = launch_failed(runner, log, e)
+        h.setdefault("runner", runner)
         if h.get("pid"):
             ws.update_dispatch(did, pid=h["pid"])
         self.handles[did] = h
         self.log("launch", dispatch_id=did, module=d["module"], launch=d.get("launches"), mode=mode,
-                 runner=self.runner.name, resume_session=resume, session=new or resume, pid=h.get("pid"),
+                 runner=runner.name, resume_session=resume, session=new or resume, pid=h.get("pid"),
                  denied=denied, error=(h.get("result") or {}).get("error"))
         return h
 
     # ---- waiting for agents ------------------------------------------------------------------------
 
+    def runner_for(self, d):
+        """The runner that launches dispatch `d`: for a code module (rsi.flow.CODE_MODULES) the code runner
+        (rsi.runners.code.CodeRunner, the task's runner.code) whatever --runner says, except under --runner mock,
+        where every module is its mock script (flow simulations stay self-contained); else the run's runner."""
+        if d.get("module") in F.CODE_MODULES and self.runner.name != "mock":
+            if self.code_runner is None:
+                self.code_runner = CodeRunner.from_task(self.ws().task())
+            return self.code_runner
+        return self.runner
+
+    def runner_of(self, ws, d):
+        """The runner that finds the agent of record `d`'s latest launch: runner_for(d) when the record names it,
+        else the runner the record names (rsi.runners.attach_runner: an earlier run with another --runner)."""
+        runner = self.runner_for(d)
+        return runner if d.get("runner") == runner.name else attach_runner(d.get("runner"), ws)
+
     def attach(self, ws, d):
-        name = d.get("runner")
-        runner = self.runner if name == self.runner.name else attach_runner(name, ws)
+        runner = self.runner_of(ws, d)
         h = runner.attach(ws, d)
         h.setdefault("runner", runner)
         self.handles[d["id"]] = h
@@ -964,9 +1031,9 @@ class Engine(object):
             if ended or not pending:
                 return {"ended": ended}, None
             if not any(h.get("waits") for _d, h in pending):
-                return {"waiting_for": [d["id"] for d, _h in pending]}, ("waiting_manual", "；".join(
-                    "在等手动完成：%s（rsi-%s）在 %s 里写好产物和 handback.json 后，再运行 rsi run。"
-                    % (d["id"], d.get("module"), self.outdir(d)) for d, _h in pending))
+                return {"waiting_for": [d["id"] for d, _h in pending]}, ("waiting_manual", " ".join(
+                    "Waiting for a manual hand-back: once %s (rsi-%s) has written its artifacts and handback.json in "
+                    "%s, run rsi run again." % (d["id"], d.get("module"), self.outdir(d)) for d, _h in pending))
             self.tick(ws)
             self.sleep_unless_stopped(self.poll_s)
 
@@ -1004,8 +1071,7 @@ class Engine(object):
         did = d["id"]
         if d.get("status") == "pending" or not d.get("launched_at"):
             return self.launch(did)
-        name = d.get("runner")
-        runner = self.runner if name == self.runner.name else attach_runner(name, ws)
+        runner = self.runner_of(ws, d)
         if runner.started(ws, d) is False:
             self.log("relaunch", dispatch_id=did, launch=d.get("launches"), why="cut off before the agent started")
             ws.update_dispatch(did, status="pending", launched_at=None)
@@ -1014,13 +1080,18 @@ class Engine(object):
 
     def finish(self, did, r):
         """An agent has ended: record whether it handed back (status handed_back or long_job) or failed; a
-        session the runner says cannot be resumed gets a fresh one instead."""
+        session the runner says cannot be resumed gets a fresh one instead. The cost the runner reports (cost_usd:
+        claude's total_cost_usd, the session's cumulative total) goes to the agent account by what this launch added
+        to the session's last counted total, once per launch (Workspace.add_agent_cost); a failed dispatch's spend file
+        is counted (Workspace.count_spend)."""
         ws = self.ws()
         d = ws.dispatch(did)
+        # The session's cumulative cost so far: what this launch added to it is counted, once.
+        ws.add_agent_cost(did, int(d.get("launches") or 1), r.get("cost_usd"), r.get("session") or d.get("session"))
         if r.get("resume_failed") and d.get("launch_mode") in SESSION_MODES:
             self.log("resume_failed", dispatch_id=did, session=d.get("session"), exit_code=r.get("exit_code"),
                      log=r.get("log"))
-            self.fresh(ws, d, "会话 %s 续不上（退出码 %s）" % (d.get("session"), r.get("exit_code")))
+            self.fresh(ws, d, "session %s could not be resumed (exit code %s)" % (d.get("session"), r.get("exit_code")))
             return {"dispatch_id": did, "status": "running", "fresh_session": True}
         hb = B.read_handback(self.outdir(d))
         fields = {"ended_at": now_iso(), "exit_code": r.get("exit_code"), "pid": None}
@@ -1045,19 +1116,22 @@ class Engine(object):
             if r.get("error"):
                 errors.append(r["error"])
             if r.get("lost"):
-                errors.append("rsi run 重新运行时，这个 agent 的进程已不在")
+                errors.append("the agent's process was gone when rsi run ran again")
             if r.get("timed_out"):
-                errors.append("agent 到了时间上限，已被终止")
+                errors.append("the agent reached its time limit and was terminated")
             if hb["ok"]:
-                errors.append("rsi-%s 交回的 status 是 failed：%s" % (d.get("module"), hb["notes"] or "（notes 为空）"))
+                errors.append("rsi-%s handed back status failed: %s" % (d.get("module"),
+                                                                        hb["notes"] or "(notes empty)"))
             else:
                 errors += hb["errors"]
             if r.get("exit_code") not in (0, None):
-                errors.append("agent 的退出码是 %s" % r["exit_code"])
+                errors.append("the agent's exit code is %s" % r["exit_code"])
             if r.get("log"):
-                errors.append("agent 的输出在 %s" % r["log"])
+                errors.append("the agent's output is in %s" % r["log"])
             fields.update(status="failed", errors=errors)
         ws.update_dispatch(did, **fields)
+        if fields["status"] == "failed":  # its spend file now (a hand-back's when it is processed)
+            ws.count_spend(d)
         start = parse_utc(d.get("launched_at"))
         self.log("agent_end", dispatch_id=did, status=fields["status"], exit_code=r.get("exit_code"),
                  session=fields.get("session", d.get("session")), log=r.get("log"), cost_usd=r.get("cost_usd"),
@@ -1073,6 +1147,7 @@ class Engine(object):
         one whose candidates would go over the compute budget without the over_budget approval registers nothing
         and asks for it (hold_budget). Returns (result, stop or None)."""
         did, out = d["id"], self.outdir(d)
+        ws.count_spend(d)  # its spend file's new lines, whatever becomes of the hand-back
         hb = B.read_handback(out)
         if d.get("status") == "long_job":
             marker = F.marker_path(ws, d)
@@ -1080,7 +1155,8 @@ class Engine(object):
             first = (text.splitlines() or [""])[0].strip()
             if first != "ok":  # the job has ended (marker_seen), and failed
                 ws.update_dispatch(did, status="failed", ended_at=now_iso(), marker_seen=d.get("marker"),
-                                   errors=["长任务失败：完成标记 %s 写的是：%s" % (marker, text.strip()[:2000] or "（空）")])
+                                   errors=["long job failed: completion marker %s says: %s"
+                                           % (marker, text.strip()[:2000] or "(empty)")])
                 return {"dispatch_id": did, "status": "failed", "marker": first}, None
             if d.get("marker_seen") != d.get("marker"):  # this job has ended: no stop or close looks for it again
                 d = ws.update_dispatch(did, marker_seen=d.get("marker"))
@@ -1093,19 +1169,25 @@ class Engine(object):
             if not F.handback_answers(ws, d):
                 return self.ask_handback(ws, d, hb)
             if d.get("status") != "long_job" or hb["artifacts"]:
-                return self.resume(ws, d, "你上次交回时提了问题，用户已经回答（见下）。那次交回的产物都还没有登记：按回答修改"
-                                          "或确认后，重新交回要登记的全部产物。", mode="answer"), None
+                return self.resume(ws, d, "You asked questions in your last hand-back and the user has answered them "
+                                          "(see below). Nothing of that hand-back is registered yet: change or confirm "
+                                          "it by the answers, then hand back again every artifact to register.",
+                                   mode="answer"), None
             # (a long job that listed nothing: its continuation below carries the answers)
         if d.get("status") == "long_job":
             if not (hb["ok"] and hb["artifacts"]):
                 cap, done = flow_settings(ws.task())["max_continues"], int(d.get("continued") or 0)
                 if done >= cap:
                     ws.update_dispatch(did, status="failed", ended_at=now_iso(), capped="max_continues",
-                                       errors=["长任务已结束（完成标记 %s 写的是 ok），但这次派出已续跑 %d 次，到了上限 "
-                                               "flow.max_continues = %d：不再自动续跑会话" % (marker, done, cap)])
+                                       errors=["the long job has ended (completion marker %s says ok), but this "
+                                               "dispatch's session was continued %s, reaching the cap "
+                                               "flow.max_continues = %d: the session is not continued automatically "
+                                               "any more"
+                                               % (marker, plural(done, "time"), cap)])
                     self.log("continue_capped", dispatch_id=did, continued=done, max_continues=cap)
                     return {"dispatch_id": did, "status": "failed", "capped": "max_continues"}, None
-                return self.resume(ws, d, "长任务已结束：完成标记 `%s` 的第一行是 ok。" % F.marker_path(ws, d),
+                return self.resume(ws, d, "The long job has ended: the first line of completion marker `%s` is ok."
+                                   % F.marker_path(ws, d),
                                    mode="continue"), None
         # The candidates it lists would take the compute used over the budget, and the round has no over_budget
         # approval: nothing of it is registered before the user's answer (registration would refuse them, and a
@@ -1136,14 +1218,16 @@ class Engine(object):
             note = ""
             if long_job_open(ws, d):  # e.g. a check-in handed back a part while the job runs on (as halt_if_stopped)
                 fields["long_job_stop"] = self.stop_long_job(ws, d)
-                note = "；%s" % long_job_note(fields["long_job_stop"])
-            ws.update_dispatch(did, status="done", capped=None, closed="运行已停止（%s）：交回的 %s 没有登记%s"
-                               % ((ws.state["stopped"] or {}).get("reason"), "、".join(left), note), **fields)
+                note = "; %s" % long_job_note(fields["long_job_stop"])
+                ws.count_spend(d)  # what the job wrote before it was terminated
+            ws.update_dispatch(did, status="done", capped=None, closed="run stopped (%s): not registered from the "
+                               "hand-back: %s%s" % ((ws.state["stopped"] or {}).get("reason"), ", ".join(left), note),
+                               **fields)
             self.log("closed", dispatch_id=did, why="stopped", unregistered=left)
             raise err
         if refused:
-            fields.update(status="failed", errors=["子目录 %s（%s）登记被拒：%s" % (x["dir"], x.get("kind"), x["error"])
-                                                   for x in refused])
+            fields.update(status="failed", errors=["subdirectory %s (%s) refused by registration: %s"
+                                                   % (x["dir"], x.get("kind"), x["error"]) for x in refused])
         else:
             fields.update(status="done", errors=[])
         d = ws.update_dispatch(did, **fields)
@@ -1164,11 +1248,14 @@ class Engine(object):
         w = ws.waiting()
         if not (w and w.get("what") == "handback" and w.get("ref") == did):
             w = ws.set_waiting({"kind": "question", "what": "handback", "ref": did,
-                                "question": "rsi-%s（%s）交回时有要你决定的事：%s（它这次交回的产物%s要等你回答后再登记："
-                                            "回答会送回它的同一个会话，它按回答修改后重新交回。）"
-                                            % (d.get("module"), did, "；".join(hb["questions"]),
-                                               " %s " % "、".join(hb["artifacts"]) if hb["artifacts"] else "（这次没有）"),
-                                "options": ["已回答"]})
+                                "question": "rsi-%s (%s) handed back something for the user to decide: %s (%s; the "
+                                            "answer goes back to the same session, which hands back again after "
+                                            "changing its work by the answer)"
+                                            % (d.get("module"), did, "; ".join(hb["questions"]),
+                                               "what it handed back is registered only after the answer: %s"
+                                               % ", ".join(hb["artifacts"]) if hb["artifacts"]
+                                               else "it handed back no artifact this time"),
+                                "options": ["answered"]})
         ws.update_dispatch(did, asked={"launch": launch, "question_id": w.get("id"), "questions": list(hb["questions"])})
         self.log("asked", dispatch_id=did, launch=launch, question_id=w.get("id"), held=list(hb["artifacts"]))
         return ({"dispatch_id": did, "status": d.get("status"), "questions": hb["questions"], "held": hb["artifacts"]},
@@ -1210,11 +1297,13 @@ class Engine(object):
             launch = int(d.get("launches") or 1)
             w = ws.waiting()
             if not (w and (w.get("kind"), w.get("what"), w.get("dispatch_id")) == ("approval", "over_budget", did)):
-                question = ("over_budget：rsi-%s（%s）这次交回的候选（%s）要 %s 小时算力，加上已用 %s 小时，超过预算 %s "
-                            "小时。approve：批准超预算，登记这次交回的产物，本轮接着做到判定为止，判定后因算力超过预算停止运行；"
-                            "stop：现在停止运行（同 rsi stop），这次交回的候选不登记。"
-                            % (d.get("module"), did, "、".join(over["dirs"]), _num(over["cost"]), _num(over["used"]),
-                               _num(over["budget"])))
+                question = ("over_budget: the candidates rsi-%s (%s) handed back this time (%s) need %s; with %s "
+                            "already used, that goes over the budget of %s. approve: approve going over budget and "
+                            "register this hand-back (the round goes on until it is decided, then the run stops "
+                            "because compute is over the budget); stop: stop the run now (as rsi stop) without "
+                            "registering the candidates of this hand-back"
+                            % (d.get("module"), did, ", ".join(over["dirs"]), plural(over["cost"], "compute hour"),
+                               plural(over["used"], "compute hour"), plural(over["budget"], "compute hour")))
                 w = ws.set_waiting({"kind": "approval", "what": "over_budget", "ref": None, "dispatch_id": did,
                                     "question": question, "options": list(F.ASK_OPTIONS["over_budget"])})
             held = {"launch": launch, "question_id": w.get("id"), "dirs": list(over["dirs"]), "cost": over["cost"],
@@ -1230,25 +1319,28 @@ class Engine(object):
     def _kind_of(self, src, d):
         """(kind, error, uses the testset): the kind a hand-back subdirectory's manifest names (task for one with
         task.json and no manifest.json: only rsi-data hands one back), why it cannot be registered, and whether its
-        registration needs a use_testset approval (test predictions, or an evaluation with uses_testset)."""
+        registration needs a use_testset approval (test predictions of a delivery or a baseline, or an evaluation with
+        uses_testset)."""
         if not os.path.isdir(src):
-            return None, "%s 不是一个目录" % src, False
+            return None, "%s is not a directory" % src, False
         if not os.path.exists(os.path.join(src, "manifest.json")) and os.path.isfile(os.path.join(src, "task.json")):
             if d.get("module") != TASK_MODULE:
-                return "task", "任务新版本（task.json）只有 rsi-data 能交回（补全切分规则），这是 rsi-%s 的交回" \
-                    % d.get("module"), False
+                return "task", "only rsi-data may hand back a new task version (task.json, a fill of the split " \
+                    "rule); this is a hand-back of rsi-%s" % d.get("module"), False
             return "task", None, False
         try:
             with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
                 m = json.load(f)
         except (OSError, ValueError) as e:
-            return None, "读不了 %s：%s" % (os.path.join(src, "manifest.json"), e), False
+            return None, "cannot read %s: %s" % (os.path.join(src, "manifest.json"), e), False
         kind = m.get("kind") if isinstance(m, dict) else None
         if kind not in KIND_ORDER or kind == "task":  # a task version has no manifest
-            return kind, "manifest 的 kind %r 不是模块能交回的产物类别（%s）" % (kind, "、".join(KIND_ORDER)), False
+            return kind, "the manifest's kind %r is not a kind a module may hand back (%s)" % (
+                kind, ", ".join(KIND_ORDER)), False
         if m.get("producer") != d.get("module"):
-            return kind, "manifest 的 producer 是 %r，但这是 rsi-%s 的交回" % (m.get("producer"), d.get("module")), False
-        testset = (kind == "delivery" and "predictions_test" in (m.get("files") or {})) or \
+            return kind, "the manifest's producer is %r, but this is a hand-back of rsi-%s" % (
+                m.get("producer"), d.get("module")), False
+        testset = (kind in ("delivery", "baseline") and "predictions_test" in (m.get("files") or {})) or \
             (kind == "evaluation" and m.get("uses_testset") is True)
         return kind, None, testset
 
@@ -1261,7 +1353,7 @@ class Engine(object):
         if yes is None:
             return  # no consent recorded (e.g. a run by hand): registration says what is missing
         by = yes.get("by") or "user"
-        quote = yes.get("quote") or yes.get("reason") or "同意里程碑发布"
+        quote = yes.get("quote") or yes.get("reason") or "agreed to the milestone release"
         ws.approve("use_testset", by, quote)
         self.log("approval", what="use_testset", by=by, quote=quote, dispatch_id=d["id"], dir=name,
                  consent_at=yes.get("at"))
@@ -1291,7 +1383,8 @@ class Engine(object):
                 left.append(name)  # after a stop only records may still be registered
                 continue
             if aid is None and error is None and blocked is not None and kind in DATA_CHAIN:
-                error = "本次交回的 %s被拒，后面依赖它的集合不登记：先改好它，再一起重新交回" % blocked
+                error = ("%s of this hand-back was refused, so the sets that depend on it are not registered: fix it "
+                         "first, then hand them back together" % blocked)
             if aid is None and error is None:
                 try:
                     if testset:
@@ -1309,7 +1402,7 @@ class Engine(object):
             if error is not None:
                 refused.append({"dir": name, "kind": kind, "error": error})
                 if blocked is None and (kind in DATA_CHAIN or kind not in KIND_ORDER):
-                    blocked = "%s（子目录 %s）" % (kind or "类别不明的产物", name)
+                    blocked = "%s (subdirectory %s)" % (kind or "an artifact of unknown kind", name)
             else:
                 registered.append({"dir": name, "kind": kind, "id": aid})
         return registered, refused, (stopped, left) if stopped is not None else None
@@ -1369,11 +1462,14 @@ class Engine(object):
             if e["kind"] == "trainset" and m["quality"]["passed"] is not True:
                 checks = [c for c in m["quality"].get("checks", []) if c.get("passed") is not True] \
                     or m["quality"].get("checks", [])
-                lines.append("- 训练集 %s 没过质量门：%s" % (aid, "；".join(
-                    "%s = %s（阈值 %s，%s）" % (c.get("name"), c.get("value"), c.get("threshold"),
-                                           "通过" if c.get("passed") else "没过") for c in checks) or "没有检查项"))
+                lines.append("- Trainset %s failed its quality gate: %s" % (aid, "; ".join(
+                    "%s = %s (threshold %s, %s)" % (c.get("name"), c.get("value"), c.get("threshold"),
+                                                    "passed" if c.get("passed") else "failed") for c in checks)
+                    or "no checks"))
+                if any(c.get("name") == HELDOUT_CHECK and c.get("passed") is not True for c in checks):
+                    lines.append("  " + heldout_text(ws._generated_heldout_matches(m, ws.path(aid))))
             elif e["kind"] == "candidate" and m["train_gate"]["passed"] is not True:
-                lines.append("- 候选 %s（%s）没过训练门：%s（验证集指标 %s，对照组 %s）" % (
+                lines.append("- Candidate %s (%s) failed the train gate: %s (valset metrics %s, baselines %s)" % (
                     aid, e["producer"], m["train_gate"].get("detail"),
                     json.dumps(m.get("metrics_val"), ensure_ascii=False),
                     json.dumps(m.get("baselines_val"), ensure_ascii=False)))
@@ -1400,61 +1496,78 @@ class Engine(object):
         (refusals included) and the last hand-back's notes; then what to do."""
         out = self.outdir(d)
         if mode == "continue":
-            head = ["# 长任务已结束（rsi-%s，派出 %s）" % (d.get("module"), d["id"]), "", reason]
-            todo = ("读长任务的结果，把产物写到输出目录 `%s` 下的子目录（每个产物一个），然后重新写 `handback.json` 交回"
-                    "（status ok）。" % out)
+            head = ["# Long job finished (rsi-%s, dispatch %s)" % (d.get("module"), d["id"]), "", reason]
+            todo = ("Read the long job's results, write the artifacts to subdirectories of the output directory `%s` "
+                    "(one per artifact), then write `handback.json` again to hand back (status ok)." % out)
         elif mode == "answer":
-            head = ["# 用户回答了你的问题（rsi-%s，派出 %s；不算退回）" % (d.get("module"), d["id"]), "", "原因：%s" % reason]
-            todo = ("按用户的回答修改或确认产物：上次交回的子目录都还没有登记，可以原地修改，也可以写到输出目录 `%s` 下新的子目录；"
-                    "然后重新写 `handback.json`，列出要登记的全部子目录；上一次的 handback.json 已改名保留。" % out)
+            head = ["# The user answered your questions (rsi-%s, dispatch %s; not a return)" % (d.get("module"),
+                                                                                                d["id"]),
+                    "", "Reason: %s" % reason]
+            todo = ("Change or confirm the artifacts by the user's answers: none of the subdirectories of the last "
+                    "hand-back is registered yet, so change them in place or write new subdirectories of the output "
+                    "directory `%s`; then write `handback.json` again, listing every subdirectory to register. The "
+                    "previous handback.json was renamed and kept." % out)
         elif mode == "followup":
-            head = ["# 继续：交回的第二部分（rsi-%s，派出 %s；不算退回）" % (d.get("module"), d["id"]), "",
-                    "原因：%s" % reason]
-            todo = ("写第二部分的产物，放到输出目录 `%s` 下新的子目录（已经登记过的子目录不能再用），然后重新写 "
-                    "`handback.json` 交回；上一次的 handback.json 已改名保留。" % out)
+            head = ["# Continue: the second part of the hand-back (rsi-%s, dispatch %s; not a return)"
+                    % (d.get("module"), d["id"]), "", "Reason: %s" % reason]
+            todo = ("Write the second part's artifacts into new subdirectories of the output directory `%s` (a "
+                    "subdirectory already registered cannot be used again), then write `handback.json` again to hand "
+                    "back. The previous handback.json was renamed and kept." % out)
         elif mode == "checkin":
-            head = ["# 定时检查（rsi-%s，派出 %s，第 %d 次；不算退回）" % (d.get("module"), d["id"],
-                                                             int(d.get("checkins") or 0) + 1), "", "原因：%s" % reason]
-            todo = ("检查长任务和环境：它的进程还在不在（`<marker>.pid` 第一行的进程号）、日志是否在进展、有没有报错、用到的 "
-                    "GPU 是否被别人占用、磁盘够不够。有异常就先处理（按你的 skill：例如结束出问题的部分、换卡重跑）。长任务还在"
-                    "运行就以 long_job 交回：没有重新启动长任务，就交回同一个完成标记（现在是 `%s`）；重新启动了（新的长任务），"
-                    "就用新的完成标记路径，交回新的标记。不要等待长任务结束。上一次的 handback.json 已改名保留。"
-                    % (F.marker_path(ws, d) or "（未给出）"))
+            head = ["# Check-in (rsi-%s, dispatch %s, check-in %d; not a return)" % (d.get("module"), d["id"],
+                                                                                    int(d.get("checkins") or 0) + 1),
+                    "", "Reason: %s" % reason]
+            todo = ("Check the long job and its environment: whether its process is still there (the pid on the first "
+                    "line of `<marker>.pid`), whether its log is moving, whether there are errors, whether someone "
+                    "else is using its GPUs, whether there is enough disk. Deal with any problem first (as your skill "
+                    "says: e.g. end the part that went wrong, rerun on another GPU). While the long job is still "
+                    "running, hand back long_job: if you did not restart the long job, hand back the same completion "
+                    "marker (now `%s`); if you restarted it (a new long job), use a new completion marker path and "
+                    "hand back the new marker. Do not wait for the long job to finish. The previous handback.json was "
+                    "renamed and kept." % (F.marker_path(ws, d) or "(not given)"))
         elif mode == "made":
-            head = ["# 为什么派你（rsi-%s，派出 %s）" % (d.get("module"), d["id"]), "", "决策点给出的原因：%s" % reason]
-            todo = "按简报工作，针对上面的原因改进。产物写到输出目录 `%s` 下的子目录，然后写 `handback.json` 交回。" % out
+            head = ["# Why you were dispatched (rsi-%s, dispatch %s)" % (d.get("module"), d["id"]), "",
+                    "Reason given by the decision point: %s" % reason]
+            todo = ("Work by the brief and improve on the reason above. Write the artifacts to subdirectories of the "
+                    "output directory `%s`, then write `handback.json` to hand back." % out)
         else:
-            head = ["# 退回给 rsi-%s（派出 %s，第 %d 次退回）" % (d.get("module"), d["id"], int(d.get("returns") or 0) + 1),
-                    "", "原因：%s" % reason]
-            todo = ("按上面的原因改好。新产物写到输出目录 `%s` 下新的子目录（已经登记过的子目录不能再用），然后重新写 "
-                    "`handback.json` 交回；上一次的 handback.json 已改名保留。" % out)
+            head = ["# Returned to rsi-%s (dispatch %s, return %d)" % (d.get("module"), d["id"],
+                                                                       int(d.get("returns") or 0) + 1),
+                    "", "Reason: %s" % reason]
+            todo = ("Fix what the reason above says. Write the new artifacts into new subdirectories of the output "
+                    "directory `%s` (a subdirectory already registered cannot be used again), then write "
+                    "`handback.json` again to hand back. The previous handback.json was renamed and kept." % out)
         lines = head
         if registered and mode in ("followup", "resume"):
-            lines += ["", "## 已登记的产物（子目录 → 登记 id；这次派出在本轮最近一次 search 之后登记的，各次启动合在一起）", ""]
-            lines += ["- `%s` → %s（%s）" % (x["dir"], x["id"], x["kind"]) for x in registered]
-            lines += ["", "同样的对应关系也在 `%s`（[{\"dir\", \"kind\", \"id\"}]）。"
+            lines += ["", "## Registered artifacts (subdirectory → registered id; what this dispatch registered after "
+                      "the round's latest search, over all its launches)", ""]
+            lines += ["- `%s` → %s (%s)" % (x["dir"], x["id"], x["kind"]) for x in registered]
+            lines += ["", "The same mapping is also in `%s` ([{\"dir\", \"kind\", \"id\"}])."
                       % os.path.join(out, registered_file(int(d.get("launches") or 1) + 1))]
         if changes:
-            lines += ["", "## 简报有变化", "", "工作区在你上次启动之后变了，简报已按现在的工作区重写（`%s`；上一份留作 "
-                      "`brief-%d.md`）。新产物引用新的 id：" % (os.path.join(out, "brief.md"), int(d.get("launches") or 1)),
+            lines += ["", "## The brief has changed", "", "The workspace changed after your last launch, so the brief "
+                      "was rewritten from the workspace as it is now (`%s`; the previous one is kept as "
+                      "`brief-%d.md`). New artifacts refer to the new ids:" % (os.path.join(out, "brief.md"),
+                                                                               int(d.get("launches") or 1)),
                       ""] + ["- %s" % c for c in changes]
         if mode != "made":
             answers = DP.question_answers(ws, d)
             if answers:
-                lines += ["", "## 你上次交回时提的问题，用户的回答", ""]
-                lines += ["- %s\n  用户（%s）的回答：%s" % (x.get("question"), x.get("by"), x.get("quote")) for x in answers]
+                lines += ["", "## The user's answers to the questions of your last hand-back", ""]
+                lines += ["- %s\n  The user's answer (%s): %s" % (x.get("question"), x.get("by"), x.get("quote"))
+                          for x in answers]
         ids = [e["id"] for e in F.products(ws, d)] if mode != "made" else []
         ids += [a for a in failing if a not in ids]
         gates = self._gates(ws, ids)
         if gates:
-            lines += ["", "## 没过的门", ""] + gates
+            lines += ["", "## Failed gates", ""] + gates
         if mode != "made":
             if d.get("errors"):
-                lines += ["", "## 错误", ""] + ["- %s" % x for x in d["errors"]]
+                lines += ["", "## Errors", ""] + ["- %s" % x for x in d["errors"]]
             notes = self._last_notes(out, d)
             if notes:
-                lines += ["", "## 上次交回的 notes", "", notes]
-        lines += ["", "## 要做的事", "", todo, "简报在 `%s`。" % os.path.join(out, "brief.md"), ""]
+                lines += ["", "## Notes of the last hand-back", "", notes]
+        lines += ["", "## What to do", "", todo, "The brief is in `%s`." % os.path.join(out, "brief.md"), ""]
         return "\n".join(lines)
 
     def resume(self, ws, d, reason, mode="resume", failing=()):
@@ -1464,7 +1577,7 @@ class Engine(object):
         answers to its questions ("answer": answered + 1, no return) or checked in on during its long job
         ("checkin": checkins + 1, no return); without a session, a fresh one takes over. Nothing on a stopped
         run."""
-        ws = self.halt_if_stopped(d, "不再续")
+        ws = self.halt_if_stopped(d, "not continued")
         d = ws.dispatch(d["id"])
         did, out = d["id"], self.outdir(d)
         n = int(d.get("launches") or 1) + 1
@@ -1485,28 +1598,29 @@ class Engine(object):
         d = ws.update_dispatch(did, **fields)
         self.log(MODE_EVENTS[mode], dispatch_id=did, mode=mode, launch=n, session=d.get("session"), feedback=name)
         if not d.get("session"):
-            return self.fresh(ws, d, "派出记录里没有会话 id")
+            return self.fresh(ws, d, "the dispatch record has no session id")
         self.launch(did)
         return {"dispatch_id": did, "mode": mode, "launch": n}
 
     def history_text(self, d, why):
         out = self.outdir(d)
-        lines = ["# 接手说明：之前的会话续不上（%s）" % why, "",
-                 "你接手 RSI 运行里 rsi-%s 的一次派出（%s）。之前的会话做过下面这些；输出目录 `%s` 里的文件都还在。"
-                 % (d.get("module"), d["id"], out), "", "## 上次的简报", "",
-                 _read(os.path.join(out, "brief.md"), default="（没有简报）"), "## 上次的交回", ""]
+        lines = ["# Taking over: the previous session cannot be resumed (%s)" % why, "",
+                 "You take over a dispatch of rsi-%s in an RSI run (%s). The previous session did what follows; the "
+                 "files in the output directory `%s` are all still there." % (d.get("module"), d["id"], out), "",
+                 "## The previous brief", "", _read(os.path.join(out, "brief.md"), default="(no brief)"),
+                 "## The previous hand-backs", ""]
         backs = sorted(glob.glob(os.path.join(out, "handback-*.json")), key=os.path.getmtime)
         if not backs:
-            lines.append("（没有交回）")
+            lines.append("(no hand-back)")
         for p in backs:
-            lines += ["`%s`：" % os.path.basename(p), "", "```json", _read(p, default="").strip(), "```", ""]
+            lines += ["`%s`:" % os.path.basename(p), "", "```json", _read(p, default="").strip(), "```", ""]
         if d.get("feedback"):
-            lines += ["", "## 这次要做的", "", _read(os.path.join(out, d["feedback"]), default="")]
+            lines += ["", "## What to do this time", "", _read(os.path.join(out, d["feedback"]), default="")]
         return "\n".join(lines) + "\n"
 
     def fresh(self, ws, d, why):
         """A fresh session takes the dispatch over: history-<n>.md and a rebuilt brief, then the launch."""
-        ws = self.halt_if_stopped(d, "不再新开会话")
+        ws = self.halt_if_stopped(d, "no new session is started")
         d = ws.dispatch(d["id"])
         did, out = d["id"], self.outdir(d)
         n = int(d.get("launches") or 1) + (1 if d.get("launched_at") else 0)

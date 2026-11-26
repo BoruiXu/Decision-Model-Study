@@ -12,7 +12,7 @@ An action is a dict. "type" is one of ACTION_TYPES; its other fields:
                     None when only the best version's re-delivery is owed)
   resume            dispatch_id, feedback (what to send to that dispatch's session), mode: "resume" (a return,
                     counted against flow.max_returns), "followup" (the second part of a two-part hand-back: the
-                    training-tuning module's search, the judge's plan; counted apart, no return), "answer" (the user
+                    train module's search, the judge's plan; counted apart, no return), "answer" (the user
                     answered the questions of the dispatch's hand-back, which waits unregistered: counted apart, no
                     return) or "checkin" (a long job's marker is not there and its check-in is due: the session
                     looks at the job and hands back again; counted apart, no return)
@@ -20,8 +20,8 @@ An action is a dict. "type" is one of ACTION_TYPES; its other fields:
   wait_long_job     dispatch_id, marker, checkin_at (when the next check-in of a long job is due, UTC ISO rounded up
                     to the second; None without check-ins: the engine then stops and waits for `rsi run` again)
   process_handback  dispatch_id
-  decide            point, options, default (the code's choice: rsi.decisions.default_choice), dispatch_id (the
-                    dispatch concerned, or None), reason
+  decide            point, options (decision_options: a compare dispatch's also offer skip), default (the code's
+                    choice: rsi.decisions.default_choice), dispatch_id (the dispatch concerned, or None), reason
   ask               kind ("approval" | "question"), what, ref, question, options (ASK_OPTIONS for an approval,
                     MILESTONE_OPTIONS for the milestone; a question the engine asks for a decision offers the
                     exits of rsi.decisions)
@@ -57,13 +57,17 @@ Order (the first that holds):
   4. the current round, undecided: its evaluation (promote); the attempts (searches) used up with no candidate
      through the train gate (close_round); else the first main-flow step not done, from the round's
      entry: ① data (round 1: the four sets; any round entering at data: a trainset through the quality
-     gate), ② train, the training-tuning module (its search's trial candidates registered without their search,
-     while attempts remain: the search; else a candidate through the train gate), ③ deliver (a delivery of the
-     round's candidate on the current evalset, plus the best version's re-delivery after a refresh), ④ judge;
-     before ③ and ④ the evalset's use limit (ask refresh_sets, then data for the new evalset), before
-     ② the compute budget (ask over_budget when the task requires it);
+     gate), ② train (the train module: its search's trial candidates registered without their search,
+     while attempts remain: the search; else a candidate through the train gate), ③ compare (only when the task
+     has a compare section: the baselines, then the comparison of the chosen candidate on the current evalset, in
+     one session; report only: done once the comparison is registered or a decision chose skip), ④ deliver (a
+     delivery of the round's candidate on the current evalset, plus the best version's re-delivery after a refresh),
+     ⑤ judge; before ③, ④ and ⑤ the evalset's use limit (ask refresh_sets, then data for the new evalset), before
+     ① a trainset (a round after the first), ② and a new ③ dispatch the budget: any resource of the spend ledger
+     whose budget its use has reached (rsi.rules.reached) asks over_budget when the task requires it, naming each one;
   5. the current round, decided: when the stop check says stop, the milestone release (ask once when
-     there is a best version, then deliver and judge on the testset if the user said yes) and next
+     there is a best version, then deliver, compare when it is on and the best version has a comparison (its
+     baselines scored on the testset inputs), and judge on the testset if the user said yes) and next
      (which stops); else the judge's plan, its approval when the task requires it (the user's revise
      sends the plan back to the judge's session, or to a new plan dispatch, once per answer), next.
 
@@ -76,10 +80,11 @@ produced nothing (no registered artifact from its output directory) is a failed 
 (handback_failed) before any gate is looked at; else the decision points train_gate_failed (about the
 round's latest train dispatch, or without one the dispatch of the latest candidate) and
 quality_gate_failed for a gate that failed, handback_failed otherwise; a two-part hand-back (the search of the
-training-tuning module after its trial candidates are registered, the judge's plan after the round is decided)
-goes on in the same session as a followup, no return (second_part_due: once after the launch that registered the
-first part; asked again, it is a return). Returns are capped per module and round by the task's flow.max_returns
-(rsi.rules.flow_settings, counted by returns_used): at the cap a decision defaults to asking the user.
+train module after its trial candidates are registered, compare's comparison after its baselines are registered, the
+judge's plan after the round is decided) goes on in the same session as a followup, no return (second_part_due: once
+after the launch that registered the first part; asked again, it is a return). Returns are capped per module and
+round by the task's flow.max_returns (rsi.rules.flow_settings, counted by returns_used): at the cap a decision
+defaults to asking the user, and for a compare dispatch to skip (③ is report only, never a block).
 The default at a decision point comes from rsi.decisions.default_choice (the one place that knows the
 decision table; imported inside _decide, since rsi.decisions builds on this module).
 What a dispatch produced is read from the registry (artifacts whose source is in its output directory),
@@ -88,8 +93,10 @@ never from times, which have whole seconds only.
 import datetime
 import os
 
+from rsi import workspace as W
 from rsi.report import _num
-from rsi.rules import EPS, flow_settings, is_number
+from rsi.rules import EPS, GPU_BASELINES, compare_settings, flow_settings, is_number
+from rsi.timing import plural
 from rsi.workspace import DATASETS, DISPATCH_STATUSES, RsiError, parse_utc  # noqa: F401  (DISPATCH_STATUSES: re-exported)
 
 # How far a time may be off, in whole seconds: a long job's completion marker's or pid file's modification time and a
@@ -102,15 +109,17 @@ LONG_JOB_SLACK_S = 2
 # a long job's marker's (an NFS server's, which may run apart from this host's). marker_done compares against it.
 LAUNCH_STAMP = ".launch-%d"
 
-# The modules: data, train (训练调优, the training-tuning module: one dispatch runs one search in the task's
-# search_space), deliver, judge. Old workspaces may hold dispatches and artifacts of "tune" (merged into train):
-# they are read as they are and never dispatched again.
-MODULES = ("data", "train", "deliver", "judge")
+# The modules: data, train (the train module: one dispatch runs one search in the task's
+# search_space), compare (③, report only, on when the task has a compare section), deliver, judge. Old workspaces may
+# hold dispatches and artifacts of "tune" (merged into train): they are read as they are and never dispatched again.
+MODULES = ("data", "train", "compare", "deliver", "judge")
+# Code modules: their dispatches run a fixed command, not an agent (the engine's code runner).
+CODE_MODULES = ("compare",)
 
 
 def stage_of(name):
     """The stage (a MODULES name) of a dispatch's module, an artifact's producer or a record's module: an old
-    workspace's "tune" (merged into the training-tuning module) is train's, a module is its own, anything else
+    workspace's "tune" (merged into the train module) is train's, a module is its own, anything else
     (orchestrator, an unknown name) has none (None). The briefs and the pages (rsi.dashboard re-exports it) map an
     old tune to train only through it."""
     if name == "tune":
@@ -120,22 +129,24 @@ def stage_of(name):
 
 # Main-flow position of each module and of a round's entry module; "tune", the entry of an old plan, opens the
 # round at train.
-STEP_INDEX = {"data": 0, "train": 1, "tune": 1, "deliver": 2, "judge": 3}
+STEP_INDEX = {"data": 0, "train": 1, "tune": 1, "compare": 2, "deliver": 3, "judge": 4}
 REPORT_FILE = "REPORT.md"
 
 ACTION_TYPES = ("dispatch", "resume", "wait_agent", "wait_long_job", "process_handback", "decide",
                 "ask", "promote", "close_round", "next", "report", "done")
-# data, refresh (data makes a new evalset), train (② a search and its search artifact), deliver, judge,
-# promote, close (close_round), write_plan (the judge writes the plan), plan (its approval), decided
-# (next, milestone question), milestone (the milestone release under way), running, handed, stopped.
-STEPS = ("data", "refresh", "train", "deliver", "judge", "promote", "close", "write_plan", "plan",
+# data, refresh (data makes a new evalset), train (② a search and its search artifact), compare (③ the baselines and
+# the comparison), deliver, judge, promote, close (close_round), write_plan (the judge writes the plan), plan (its
+# approval), decided (next, milestone question), milestone (the milestone release under way), running, handed, stopped.
+STEPS = ("data", "refresh", "train", "compare", "deliver", "judge", "promote", "close", "write_plan", "plan",
          "decided", "milestone", "running", "handed", "stopped")
 # What a dispatch is for: sets (round 1's four sets), trainset (a new trainset), refresh (a new evalset),
-# train (a search), deliver (the round's delivery and the best version's re-delivery), judge (the evaluation),
-# plan (the plan of a round whose judge has no session to resume), milestone_deliver, milestone_judge. An old
-# workspace's tune dispatches keep their purpose "tune" (dispatch_purpose).
-PURPOSES = ("sets", "trainset", "refresh", "train", "deliver", "judge", "plan", "milestone_deliver",
-            "milestone_judge")
+# train (a search), compare (the baselines, then the comparison of the round's candidate), deliver (the round's
+# delivery and the best version's re-delivery), judge (the evaluation), plan (the plan of a round whose judge has no
+# session to resume), milestone_deliver, milestone_compare (the baselines of the best version's comparison scored on
+# the testset inputs), milestone_judge. An old workspace's tune dispatches keep their purpose "tune"
+# (dispatch_purpose).
+PURPOSES = ("sets", "trainset", "refresh", "train", "compare", "deliver", "judge", "plan", "milestone_deliver",
+            "milestone_compare", "milestone_judge")
 
 TRAIN_GATE_FAILED = "train_gate_failed"
 QUALITY_GATE_FAILED = "quality_gate_failed"
@@ -144,6 +155,9 @@ HANDBACK_FAILED = "handback_failed"
 DECISION_OPTIONS = {TRAIN_GATE_FAILED: ("train", "data", "ask"), QUALITY_GATE_FAILED: ("resume_data", "ask"),
                     HANDBACK_REFUSED: ("resume", "ask"), HANDBACK_FAILED: ("resume", "ask")}
 CHOICE_PURPOSE = {"train": "train", "data": "trainset"}  # train_gate_failed choices dispatched anew
+# The choice that closes a compare dispatch that failed or was refused and goes on without its step (③ Compare is
+# report only, never a gate): decision_options offers it for a compare dispatch, before ask.
+SKIP = "skip"
 # The options of each approval the flow asks for: every answer changes the state (approve records the approval;
 # revise sends the plan back to the judge with the user's words; stop stops the run, as `rsi stop`).
 # refresh_sets may also close the round instead (no new evalset, the judge writes the plan), as the manual flow could.
@@ -151,7 +165,7 @@ ASK_OPTIONS = {"plan": ("approve", "revise"), "refresh_sets": ("approve", "close
                "over_budget": ("approve", "stop")}
 # Purposes of the dispatches that still work once the round is decided: the judge's plan (also the second part
 # of its judge dispatch) and the milestone release. A failed dispatch of any other purpose is moot then.
-DECIDED_PURPOSES = ("judge", "plan", "milestone_deliver", "milestone_judge")
+DECIDED_PURPOSES = ("judge", "plan", "milestone_deliver", "milestone_compare", "milestone_judge")
 MILESTONE = "milestone"  # the decision point (STATE decisions) holding the user's answer, and the ask's what
 MILESTONE_OPTIONS = ("yes", "no")
 # A long job's check-ins at flow.max_checkins: the question's what (ref: the dispatch) and the decision point holding
@@ -189,10 +203,10 @@ def plan_approved(ws, plan):
 
 
 def decision_text(d):
-    """promote V1（evaluation-0001）, keep（evaluation-0002）, or keep（关闭，没有评测）."""
+    """promote V1 (evaluation-0001), keep (evaluation-0002), or keep (closed, no evaluation)."""
     if d.get("evaluation_id") is None:
-        return "%s（关闭，没有评测）" % d.get("decision")
-    return "%s%s（%s）" % (d.get("decision"), " " + d["version"] if d.get("version") else "", d["evaluation_id"])
+        return "%s (closed, no evaluation)" % d.get("decision")
+    return "%s%s (%s)" % (d.get("decision"), " " + d["version"] if d.get("version") else "", d["evaluation_id"])
 
 
 def data_missing(ws, arts):
@@ -202,9 +216,9 @@ def data_missing(ws, arts):
     if ws.state["round"] == 1:
         missing = [k for k in reversed(DATASETS) if ws.current(k) is None]
         if missing:
-            return "第一轮还缺 %s" % "、".join(missing)
+            return "round 1 still lacks %s" % ", ".join(missing)
     if not any(e["kind"] == "trainset" and _quality_passed(ws, e) for e in arts):
-        return "本轮还没有通过质量门的训练集"
+        return "no trainset of this round has passed its quality gate yet"
     return None
 
 
@@ -220,7 +234,7 @@ def attempts_exhausted(ws, rnd):
 
 
 def own_delivery(ws, arts):
-    """True when this round has the delivery step ③ asks for: a delivery on the current evalset of one
+    """True when this round has the delivery step ④ asks for: a delivery on the current evalset of one
     of the round's own candidates (the best version's re-delivery after a refresh, whose candidate is from
     an earlier round, does not count); in a round with no candidate of its own (entry deliver) any delivery
     on the current evalset; a milestone delivery (predictions_test) always."""
@@ -238,12 +252,12 @@ def own_delivery(ws, arts):
 
 def redeliver_pending(ws):
     """After a refreshed evalset the best version has no delivery on the new evalset yet (the rule of
-    `rsi status`): ③ also re-delivers it, the evaluation compares the candidate with it there."""
+    `rsi status`): ④ also re-delivers it, the evaluation compares the candidate with it there."""
     return ws.state["best"] is not None and ws.best_delivery_on_current_evalset() is None
 
 
 def delivered(ws, arts):
-    """True when step ③ is done in an undecided round: the round's own delivery is registered and
+    """True when step ④ is done in an undecided round: the round's own delivery is registered and
     no re-delivery of the best version is owed."""
     return own_delivery(ws, arts) and not redeliver_pending(ws)
 
@@ -257,6 +271,86 @@ def milestone_deliveries(ws):
 def milestone_evaluations(ws):
     return [a for a in _round(ws)["artifacts"]
             if ws.entry(a)["kind"] == "evaluation" and ws.manifest(a)["uses_testset"] is True]
+
+
+def compare_enabled(task):
+    """True when ③ Compare is on: the task has a compare section (rsi.rules.compare_settings). Without one (an old
+    workspace, or a task that wants none) the flow goes from ② to ④ and the pages show ③ as off."""
+    return compare_settings(task) is not None
+
+
+def is_compare(d):
+    """True for a dispatch record of the compare module (None is none)."""
+    return d is not None and d.get("module") == "compare"
+
+
+def comparison_of(ws, arts, candidate_id):
+    """The latest comparison among the registry entries `arts` of candidate `candidate_id` on the current evalset, or
+    None (rsi.workspace.latest_comparison, the selection the judge and registration use)."""
+    return W.latest_comparison(ws, [e["id"] for e in arts], candidate_id, ws.current("evalset"))
+
+
+def compare_skipped(ws, purpose="compare"):
+    """True when a decision of the current round chose skip (SKIP) on a compare dispatch of `purpose` (compare, or
+    milestone_compare): the step is left out, as ③ is report only."""
+    for x in ws.decisions(rnd=ws.state["round"]):
+        if x.get("choice") != SKIP or not x.get("dispatch_id"):
+            continue
+        try:
+            d = ws.dispatch(x["dispatch_id"])
+        except RsiError:
+            continue
+        if is_compare(d) and dispatch_purpose(d) == purpose:
+            return True
+    return False
+
+
+def best_comparison(ws):
+    """The latest registered comparison (of any round) of the best version's candidate, or None (no best version, or
+    its candidate was never compared)."""
+    best = ws.state["best"]
+    v = ws.version(best) if best is not None else None
+    if v is None:
+        return None
+    out = None
+    for e in ws.entries("comparison"):
+        if ws.manifest(e["id"])["candidate_id"] == v["candidate_id"]:
+            out = e["id"]
+    return out
+
+
+def milestone_baselines(ws):
+    """This round's registered baselines carrying predictions_test (the milestone's: the baselines of the best
+    version's comparison scored on the testset inputs; rsi.workspace.milestone_baselines)."""
+    return W.milestone_baselines(ws)
+
+
+def compare_done(ws, arts):
+    """True when step ③ needs nothing more in an undecided round: the task has no compare section, the round's entry
+    is after ③, the round holds a comparison of the chosen candidate on the current evalset (comparison_of), or a
+    decision of this round skipped its compare dispatch (compare_skipped)."""
+    if not compare_enabled(ws.task()) or STEP_INDEX.get(_round(ws)["entry"], 0) > STEP_INDEX["compare"]:
+        return True
+    return comparison_of(ws, arts, chosen_candidate(ws)) is not None or compare_skipped(ws)
+
+
+def milestone_comparison(ws):
+    """The comparison the milestone's compare step scores on the testset: best_comparison(ws) when the task has a
+    compare section and that comparison lists at least one baseline (one whose baselines were all skipped has nothing
+    to score, and a dispatch for it could never register a baseline); else None."""
+    if not compare_enabled(ws.task()):
+        return None
+    comp = best_comparison(ws)
+    return comp if comp is not None and ws.manifest(comp)["baselines"] else None
+
+
+def milestone_compare_due(ws):
+    """True when the milestone release still owes its compare step (between the milestone delivery and the milestone
+    judge): there is a milestone_comparison (a compare section, and a comparison of the best version's candidate that
+    lists at least one baseline), no baseline of this round carries predictions_test yet (compare registers all of
+    them in one hand-back) and no decision skipped the milestone compare dispatch."""
+    return (milestone_comparison(ws) is not None and not milestone_baselines(ws)
+            and not compare_skipped(ws, "milestone_compare"))
 
 
 def milestone_state(ws):
@@ -281,8 +375,8 @@ def milestone_state(ws):
 
 
 def chosen_candidate(ws):
-    """The candidate step ③ delivers: of this round's candidates through the train gate, the best on the
-    valset by the task's primary metric (its direction; ties and values that are no number go to the one
+    """The candidate steps ③ and ④ compare and deliver: of this round's candidates through the train gate, the best
+    on the valset by the task's primary metric (its direction; ties and values that are no number go to the one
     registered first); in a round with none of its own (entry deliver) the best version's candidate; else
     None. The evalset never takes part in this choice."""
     passed = ws.passed_candidates()
@@ -417,13 +511,15 @@ def _checkin(ws, d):
     marker = marker_path(ws, d)
     if done < cap:
         return _act("resume", "running", dispatch_id=d["id"], mode="checkin",
-                    feedback="长任务还在运行（完成标记 %s 还没有出现），这是第 %d 次定时检查（每 %s 分钟一次）。"
-                             % (marker, done + 1, _num(flow_settings(ws.task())["checkin_minutes"])))
+                    feedback="the long job is still running (completion marker %s is not there yet); this is check-in "
+                             "%d (one every %s)" % (marker, done + 1,
+                                                    plural(flow_settings(ws.task())["checkin_minutes"], "minute")))
     return _ask("running", "question", CHECKIN, d["id"],
-                "rsi-%s（%s）的长任务还没有结束（完成标记 %s 还没有出现），已定时检查 %d 次，到了上限 flow.max_checkins = %d。"
-                "continue：再定时检查 %d 次；wait：不再检查，只等完成标记出现；stop：停止运行（同 rsi stop，长任务会被终止）。"
-                % (d.get("module"), d["id"], marker, done, flow_settings(ws.task())["max_checkins"],
-                   max(1, flow_settings(ws.task())["max_checkins"])), CHECKIN_OPTIONS)
+                "The long job of rsi-%s (%s) has not finished (completion marker %s is not there yet) after %s, "
+                "reaching the cap flow.max_checkins = %d. continue: %s; wait: no more check-ins, only wait for the "
+                "completion marker; stop: stop the run (as rsi stop, which terminates the long job)"
+                % (d.get("module"), d["id"], marker, plural(done, "check-in"), flow_settings(ws.task())["max_checkins"],
+                   plural(max(1, flow_settings(ws.task())["max_checkins"]), "more check-in")), CHECKIN_OPTIONS)
 
 
 # ---- next_action -------------------------------------------------------------------------------
@@ -523,11 +619,20 @@ def _latest(ws, module, purposes=None):
     return ds[-1] if ds else None
 
 
+def decision_options(point, d):
+    """The options of decision `point` about dispatch `d`: DECISION_OPTIONS[point], with SKIP inserted before ask when d
+    is a compare dispatch (③ is report only: its failure never blocks the flow)."""
+    opts = list(DECISION_OPTIONS[point])
+    if is_compare(d) and SKIP not in opts:
+        opts.insert(opts.index("ask"), SKIP)
+    return opts
+
+
 def _decide(ws, point, step, d, reason):
     from rsi.decisions import default_choice  # rsi.decisions imports this module
     did = d["id"] if d else None
     default, _why = default_choice(ws, point, {"dispatch_id": did})
-    return _act("decide", step, point=point, options=list(DECISION_OPTIONS[point]), default=default,
+    return _act("decide", step, point=point, options=decision_options(point, d), default=default,
                 dispatch_id=did, reason=reason)
 
 
@@ -553,10 +658,10 @@ def refused_decision(ws, d):
         if int(x.get("launch") or launch) == launch:
             e = x.get("error") or ""
             lines.setdefault(e.splitlines()[0] if e else "", []).append(x.get("kind") or x.get("dir") or "?")
-    text = "；".join(line if len(kinds) == 1 else "%s（未登记：%s）" % (line, "、".join(kinds))
-                    for line, kinds in lines.items())
+    text = "; ".join(line if len(kinds) == 1 else "%s (not registered: %s)" % (line, ", ".join(kinds))
+                     for line, kinds in lines.items())
     return _decide(ws, HANDBACK_REFUSED, m if m in STEP_INDEX else "running", d,
-                   "rsi-%s 的派出 %s 交回的产物登记被拒：%s" % (m, d["id"], text))
+                   "registration refused what rsi-%s's dispatch %s handed back: %s" % (m, d["id"], text))
 
 
 def _ask(step, kind, what, ref, question, options):
@@ -600,8 +705,9 @@ def _agents(ws):
         status = d.get("status")
         if status == "handed_back" and question_answered(ws, d):
             return _act("resume", "handed", dispatch_id=d["id"], mode="answer",
-                        feedback="你上次交回时提了问题，用户已经回答（见下）。那次交回的产物都还没有登记：按回答修改或确认后，"
-                                 "重新交回要登记的全部产物。")
+                        feedback="You asked questions in your last hand-back and the user has answered them (see "
+                                 "below). Nothing of that hand-back is registered yet: change or confirm it by the "
+                                 "answers, then hand back again every artifact to register.")
         if status == "handed_back" or (status == "long_job" and marker_done(ws, d)):
             return _act("process_handback", "handed", dispatch_id=d["id"])
     for d in ds:
@@ -610,7 +716,7 @@ def _agents(ws):
                 return refused_decision(ws, d)
             m = d.get("module")
             return _handback_failed(ws, d, m if m in STEP_INDEX else "running",
-                                    "rsi-%s 的派出 %s 失败了，没有合法的交回" % (m, d["id"]))
+                                    "rsi-%s's dispatch %s failed with no valid hand-back" % (m, d["id"]))
     running = [d["id"] for d in ds if d.get("status") in ("pending", "running")]
     if running:
         return _act("wait_agent", "running", dispatch_ids=running)
@@ -634,14 +740,14 @@ def _round_action(ws):
         if evaluations:
             return _act("promote", "promote", evaluation_id=evaluations[-1])
         if attempts_exhausted(ws, rnd):
-            return _act("close_round", "close", reason="第 %d 轮的 %d 次尝试已用完，没有候选通过训练门"
-                        % (ws.state["round"], ws.attempt_limit()))
+            return _act("close_round", "close", reason="round %d used up its %s with no candidate through the "
+                        "train gate" % (ws.state["round"], plural(ws.attempt_limit(), "attempt")))
         return _undecided(ws, rnd)
     return _decided(ws, rnd)
 
 
 def _attempts_text(ws):
-    return "已用尝试 %d / %d" % (len(ws.attempts()), ws.attempt_limit())
+    return "attempts used %d / %d" % (len(ws.attempts()), ws.attempt_limit())
 
 
 def _undecided(ws, rnd):
@@ -657,6 +763,8 @@ def _undecided(ws, rnd):
             return _search_step(ws, trials)
         if not ws.passed_candidates():
             return _train_step(ws, rnd, arts)
+    if start <= STEP_INDEX["compare"] and not compare_done(ws, arts):
+        return _refresh(ws, "compare") or _compare_step(ws, arts)
     if not delivered(ws, arts):
         return _refresh(ws, "deliver") or _deliver_step(ws, arts)
     return _refresh(ws, "judge") or _judge_step(ws)
@@ -668,28 +776,40 @@ def _quality_decision(ws, d, reason):
 
 
 def _data_step(ws, arts, why):
+    if ws.state["round"] != 1:  # a trainset: the budget first
+        ask = _over_budget(ws, "data")
+        if ask:
+            return ask
     d = _latest(ws, "data", ("sets", "trainset"))
     if d is not None and not products(ws, d):
-        return _handback_failed(ws, d, "data", "rsi-data 的派出 %s 交回了，但没有登记任何产物（%s）" % (d["id"], why))
+        return _handback_failed(ws, d, "data", "rsi-data's dispatch %s handed back but registered no artifact (%s)"
+                                % (d["id"], why))
     failed = [e["id"] for e in arts if e["kind"] == "trainset" and not _quality_passed(ws, e)]
     if failed:  # data_missing says no trainset of this round passed: the latest one failed its quality gate
-        return _quality_decision(ws, d, "训练集 %s 没过质量门（%s）" % (failed[-1], why))
+        return _quality_decision(ws, d, "trainset %s failed its quality gate (%s)" % (failed[-1], why))
     if d is not None:
-        return _handback_failed(ws, d, "data", "rsi-data 交回后本步仍没有完成：%s" % why)
+        return _handback_failed(ws, d, "data", "rsi-data handed back and the step is still not complete: %s" % why)
     return _dispatch("data", "data", "sets" if ws.state["round"] == 1 else "trainset", why)
 
 
-def _over_budget(ws):
-    task = ws.task()
-    budget = task["budget"]["compute_hours"]
-    used = ws.state["budget_used"]["compute_hours"]
-    if "over_budget" not in task["approvals"] or budget is None or used < budget - EPS \
-            or ws.has_approval("over_budget"):
+# What step `step` would spend that the over_budget question asks about.
+OVER_BUDGET_WHAT = {"data": "a new trainset", "train": "more training", "compare": "the comparison"}
+
+
+def _over_budget(ws, step):
+    """Before ① a trainset, ② and a new ③ dispatch (`step`): ask over_budget when a resource's use has reached its
+    budget (Workspace.budget_exhausted), the task lists over_budget among its approvals and the round has none; None
+    otherwise. The question names every exhausted resource."""
+    out = ws.budget_exhausted()
+    if not out or "over_budget" not in ws.task()["approvals"] or ws.has_approval("over_budget"):
         return None
-    # Approved, the round goes on to its decision; then the stop check stops the run (used >= budget).
-    return _ask("train", "approval", "over_budget", None,
-                "over_budget：已用算力 %s 小时，达到预算 %s 小时，继续派训练要你批准超预算。approve：批准超预算，本轮接着训练到"
-                "判定为止，判定后因算力达到预算停止运行；stop：停止运行（同 rsi stop）。" % (_num(used), _num(budget)),
+    # Approved, the round goes on to its decision; then the stop check stops the run (a budget is reached).
+    return _ask(step, "approval", "over_budget", None,
+                "over_budget: %s; %s needs your approval to go over budget. approve: approve going over budget (the "
+                "round goes on until it is decided, then the run stops because the budget is reached); stop: stop the "
+                "run (as rsi stop)"
+                % ("; ".join("%s used %s, which reaches the budget of %s" % (label, _num(used), _num(budget))
+                             for label, used, budget in out), OVER_BUDGET_WHAT[step]),
                 ASK_OPTIONS["over_budget"])
 
 
@@ -702,10 +822,10 @@ def producer_of(ws, aid):
 
 
 def _train_step(ws, rnd, arts):
-    ask = _over_budget(ws)
+    ask = _over_budget(ws, "train")
     if ask:
         return ask
-    why = "本轮还没有通过训练门的候选，%s" % _attempts_text(ws)
+    why = "no candidate of this round has passed the train gate yet; %s" % _attempts_text(ws)
     ds = ws.dispatches(rnd=ws.state["round"])
     tt = [d for d in ds if d.get("module") == "train"]
     # The dispatches of this step: train's, and a data dispatch for a new trainset chosen after them.
@@ -716,15 +836,17 @@ def _train_step(ws, rnd, arts):
         made = products(ws, last)
         if not made:
             return _handback_failed(ws, last, "data" if last.get("module") == "data" else "train",
-                                    "rsi-%s 的派出 %s 交回了，但没有登记任何产物（%s）" % (last.get("module"), last["id"], why))
+                                    "rsi-%s's dispatch %s handed back but registered no artifact (%s)"
+                                    % (last.get("module"), last["id"], why))
         trainsets = [e for e in made if e["kind"] == "trainset"]
         if last.get("module") == "data" and trainsets and not _quality_passed(ws, trainsets[-1]):
-            return _quality_decision(ws, last, "新训练集 %s 没过质量门" % trainsets[-1]["id"])
+            return _quality_decision(ws, last, "new trainset %s failed its quality gate" % trainsets[-1]["id"])
     cands = [e["id"] for e in arts if e["kind"] == "candidate"]
     if cands:  # about the round's latest train dispatch; without one, the dispatch of the latest candidate
         return _decide(ws, TRAIN_GATE_FAILED, "train", _latest(ws, "train") or producer_of(ws, cands[-1]), why)
     if tt:
-        return _handback_failed(ws, tt[-1], "train", "rsi-%s 交回后本轮仍没有候选（%s）" % (tt[-1].get("module"), why))
+        return _handback_failed(ws, tt[-1], "train", "rsi-%s handed back and the round still has no candidate (%s)"
+                                % (tt[-1].get("module"), why))
     return _dispatch("train", "train", "train", why)
 
 
@@ -757,63 +879,100 @@ def _search_step(ws, trials):
     """The second part of train's search: the search over the registered trials, in the same session (a followup
     once after the launch that registered them; asked again, a return)."""
     d = _latest(ws, "train", ("train",))
-    feedback = "试验候选已登记为 %s：用这些 id 写 search 后交回。" % "、".join(trials)
+    feedback = "the trial candidates are registered as %s: write the search with these ids and hand it back" \
+        % ", ".join(trials)
     if second_part_due(d, "candidate"):
         return _act("resume", "train", dispatch_id=d["id"], mode="followup", feedback=feedback)
     if may_return(ws, "train"):
         return _act("resume", "train", dispatch_id=d["id"], mode="resume", feedback=feedback)
-    return _handback_failed(ws, d, "train", "rsi-train 还没有交回本轮的 search（试验候选 %s 已登记）" % "、".join(trials))
+    return _handback_failed(ws, d, "train", "rsi-train has not handed back the round's search yet (trial candidates "
+                            "%s registered)" % ", ".join(trials))
 
 
 def _refresh(ws, step):
-    """Before ③ and ④: with the evalset's uses at the limit, ask refresh_sets, then data for the new evalset."""
+    """Before ③, ④ and ⑤: with the evalset's uses at the limit, ask refresh_sets, then data for the new evalset."""
     s, task = ws.state, ws.task()
     if s["eval_use_count"] < task["eval_use_limit"]:
         return None
     if not ws.has_approval("refresh_sets"):
         stop, why = ws.stop_check_if_closed()
         return _ask(step, "approval", "refresh_sets", None,
-                    "refresh_sets：评测集已用 %d 次，到了上限 %d，要换新的评测集（需要你批准 refresh_sets）才能再送评。"
-                    "approve：批准刷新，接下来派 rsi-data 产出新的评测集，然后再交付和评测；close_round：不刷新，关闭本轮"
-                    "（没有评测，记 keep），%s；stop：停止运行（同 rsi stop）。"
-                    % (s["eval_use_count"], task["eval_use_limit"], "然后运行停止（%s）" % why if stop else
-                       "接着 rsi-judge 写计划"), ASK_OPTIONS["refresh_sets"])
+                    "refresh_sets: the evalset has been used %s, reaching its limit of %d; nothing more is evaluated "
+                    "before a new evalset (it needs your refresh_sets approval). approve: approve the refresh "
+                    "(rsi-data is dispatched next to produce a new evalset, then %s follow); "
+                    "close_round: no refresh, close the round (no evaluation, recorded as keep), %s; stop: stop the "
+                    "run (as rsi stop)"
+                    % (plural(s["eval_use_count"], "time"), task["eval_use_limit"],
+                       "the comparison, delivery and evaluation" if step == "compare" else "delivery and evaluation",
+                       "then the run stops (%s)" % why if stop else "then rsi-judge writes the plan"),
+                    ASK_OPTIONS["refresh_sets"])
     d = _latest(ws, "data", ("refresh",))
     if d is not None and not any(e["kind"] == "evalset" for e in products(ws, d)):
-        return _handback_failed(ws, d, "refresh", "rsi-data 的刷新派出 %s 交回后还没有新的评测集" % d["id"])
-    return _dispatch("refresh", "data", "refresh", "评测集已用 %d 次，到了上限 %d，已批准刷新：产出新的评测集"
-                     % (s["eval_use_count"], task["eval_use_limit"]))
+        return _handback_failed(ws, d, "refresh", "rsi-data's refresh dispatch %s handed back and there is still no "
+                                "new evalset" % d["id"])
+    return _dispatch("refresh", "data", "refresh", "the evalset has been used %s, reaching its limit of %d, and the "
+                     "refresh is approved: produce a new evalset"
+                     % (plural(s["eval_use_count"], "time"), task["eval_use_limit"]))
+
+
+def _compare_step(ws, arts):
+    """③: dispatch compare for the round's chosen candidate; its hand-back comes in two parts, the baselines and then
+    the comparison, in the same session (second_part_due: a followup once after the launch that registered the
+    baselines; asked again, a return); anything else is a failed hand-back (decided like any other: skip at the
+    cap)."""
+    d = _latest(ws, "compare", ("compare",))
+    if d is None:  # a new dispatch: the budget first (its second part and its decisions are not held up)
+        ask = _over_budget(ws, "compare")
+        if ask:
+            return ask
+        cand = chosen_candidate(ws)
+        return _dispatch("compare", "compare", "compare", "compare the round's candidate %s with the baselines on the "
+                         "valset (report only, never a gate)" % cand, candidate_id=cand)
+    made = products(ws, d)
+    bases = [e["id"] for e in made if e["kind"] == "baseline"]
+    if bases and not any(e["kind"] == "comparison" for e in made):
+        feedback = "Baselines registered as %s: write the comparison and hand it back." % ", ".join(bases)
+        if second_part_due(d, "baseline"):
+            return _act("resume", "compare", dispatch_id=d["id"], mode="followup", feedback=feedback)
+        if may_return(ws, "compare"):
+            return _act("resume", "compare", dispatch_id=d["id"], mode="resume", feedback=feedback)
+        return _handback_failed(ws, d, "compare", "rsi-compare handed back without a comparison (baselines %s "
+                                "registered)" % ", ".join(bases))
+    return _handback_failed(ws, d, "compare", "rsi-compare handed back without a comparison")
 
 
 def last_evalset_use(ws):
     """The note that the next evaluation is the current evalset's last use (uses one below the task's
-    eval_use_limit), or "" (the manual flow told the user so before ③)."""
+    eval_use_limit), or "" (the manual flow told the user so before ④)."""
     used, limit = ws.state["eval_use_count"], ws.task()["eval_use_limit"]
     if limit >= 1 and used == limit - 1:
-        return "；这是当前评测集的最后一次评测（已用 %d / %d 次），之后要刷新评测集才能再送评" % (used, limit)
+        return "; this is the current evalset's last evaluation (uses %d / %d): after it the evalset must be " \
+            "refreshed before anything more is evaluated" % (used, limit)
     return ""
 
 
 def _deliver_step(ws, arts):
     own = own_delivery(ws, arts)
-    owed = [] if own else ["本轮送评的候选"]
+    owed = [] if own else ["deliver the round's candidate for evaluation"]
     if redeliver_pending(ws):
-        owed.append("当前最佳版本 %s 在新评测集上的重新交付" % ws.state["best"])
+        owed.append("re-deliver the current best version %s on the new evalset" % ws.state["best"])
     d = _latest(ws, "deliver", ("deliver",))
     cur = ws.current("evalset")
     spent = d is not None and any(e["kind"] == "delivery" and ws.manifest(e["id"])["evalset_id"] != cur
                                   for e in products(ws, d))
     if d is not None and not spent:
-        return _handback_failed(ws, d, "deliver", "rsi-deliver 交回后还缺%s" % "和".join(owed))
-    return _dispatch("deliver", "deliver", "deliver", "交付%s%s" % ("和".join(owed), last_evalset_use(ws)),
+        return _handback_failed(ws, d, "deliver", "rsi-deliver handed back but still has to %s" % " and ".join(owed))
+    return _dispatch("deliver", "deliver", "deliver", "%s%s" % (" and ".join(owed), last_evalset_use(ws)),
                      candidate_id=None if own else chosen_candidate(ws))
 
 
 def _judge_step(ws):
     d = _latest(ws, "judge", ("judge",))
     if d is not None:
-        return _handback_failed(ws, d, "judge", "rsi-judge 交回后本轮还没有登记 evaluation")
-    return _dispatch("judge", "judge", "judge", "本轮的交付已登记：在评测集上评测%s" % last_evalset_use(ws))
+        return _handback_failed(ws, d, "judge", "rsi-judge handed back and the round still has no registered "
+                                "evaluation")
+    return _dispatch("judge", "judge", "judge", "the round's delivery is registered: evaluate it on the evalset%s"
+                     % last_evalset_use(ws))
 
 
 def _decided(ws, rnd):
@@ -821,10 +980,22 @@ def _decided(ws, rnd):
     if stop:
         ms = milestone_state(ws)
         if ms == "ask":
+            comp = milestone_comparison(ws)
+            if comp is None:
+                uses = ("twice (deliver runs the predictions, judge scores them, each with its own use_testset "
+                        "approval)")
+            else:  # milestone_compare_due: rsi-compare scores the comparison's baselines in between (or skips some)
+                names = ws.manifest(comp)["baselines"]
+                n = len(names)
+                gpu = (", and its GPU baselines' predictions may use GPU hours beyond the compute budget"
+                       if any(x in GPU_BASELINES for x in names) else "")
+                uses = ("up to %d times, each with its own use_testset approval quoting this answer (deliver runs the "
+                        "predictions; rsi-compare scores %s of the best version's comparison %s on the testset inputs, "
+                        "report only, one approval per baseline it registers%s; judge scores them)"
+                        % (n + 2, plural(n, "baseline"), comp, gpu))
             return _ask("decided", "question", MILESTONE, None,
-                        "里程碑发布：是否用封存的 test 验证当前最佳版本 %s？做的话要用两次 test（deliver 跑预测、judge 打分，"
-                        "各记一次 use_testset 审批）；不做就结束运行（rsi next 停止）。" % ws.state["best"],
-                        MILESTONE_OPTIONS)
+                        "Milestone release: verify the current best version %s on the sealed testset? yes uses the "
+                        "testset %s; no ends the run (rsi next stops)" % (ws.state["best"], uses), MILESTONE_OPTIONS)
         if ms == "yes" and not milestone_evaluations(ws):
             return _milestone_step(ws)
         return _act("next", "decided", reason=why)
@@ -833,10 +1004,11 @@ def _decided(ws, rnd):
         return _plan_step(ws, rnd)
     if "plan" in ws.task()["approvals"] and not ws.has_approval("plan", plan):
         return _plan_revision(ws, rnd, plan) or _ask(
-            "plan", "approval", "plan", plan, "批准计划 %s：approve 记一条 plan 审批，进入下一轮；revise 把你的原话发回 "
-            "rsi-judge 改计划（算一次退回）。" % plan, ASK_OPTIONS["plan"])
-    return _act("next", "decided", reason="计划 %s 已%s：进入第 %d 轮（从 %s 开始）"
-                % (plan, "批准" if plan_approved(ws, plan) else "登记", ws.state["round"] + 1,
+            "plan", "approval", "plan", plan, "Approve plan %s: approve records a plan approval and moves on to the "
+            "next round; revise sends your words back to rsi-judge to revise the plan (counts as a return)" % plan,
+            ASK_OPTIONS["plan"])
+    return _act("next", "decided", reason="plan %s %s: moving on to round %d (starting from %s)"
+                % (plan, "approved" if plan_approved(ws, plan) else "registered", ws.state["round"] + 1,
                    ws.manifest(plan)["entry_module"]))
 
 
@@ -848,7 +1020,8 @@ def _plan_revision(ws, rnd, plan):
     if not answers or answers[-1].get("choice") != "revise":
         return None
     a = answers[-1]
-    feedback = ("用户要求修改计划 %s（%s）：%s\n本轮已判定 %s。按用户的意见改写下一轮的计划（plan，新的子目录）后交回。"
+    feedback = ("The user asked for changes to plan %s (%s): %s\nThe round was decided as %s. Rewrite the next "
+                "round's plan as the user says (plan, in a new subdirectory) and hand it back."
                 % (plan, a.get("by"), a.get("quote") or a.get("reason") or "", decision_text(rnd["decision"])))
     did = a.get("dispatch_id")
     if did:
@@ -866,25 +1039,37 @@ def _milestone_step(ws):
     if not milestone_deliveries(ws):
         d = _latest(ws, "deliver", ("milestone_deliver",))
         if d is not None:
-            return _handback_failed(ws, d, "milestone", "rsi-deliver 还没有交回里程碑交付（test 预测）")
-        return _dispatch("milestone", "deliver", "milestone_deliver", "里程碑发布：用 test 输入跑当前最佳版本 %s 的预测" % best,
+            return _handback_failed(ws, d, "milestone", "rsi-deliver has not handed back the milestone delivery "
+                                    "(testset predictions) yet")
+        return _dispatch("milestone", "deliver", "milestone_deliver", "milestone release: run the predictions of the "
+                         "current best version %s on the testset inputs" % best,
                          candidate_id=ws.version(best)["candidate_id"])
+    if milestone_compare_due(ws):
+        d = _latest(ws, "compare", ("milestone_compare",))
+        if d is not None:
+            return _handback_failed(ws, d, "milestone", "rsi-compare has not handed back the baselines scored on the "
+                                    "testset inputs yet")
+        return _dispatch("milestone", "compare", "milestone_compare", "milestone release: score the baselines of %s "
+                         "(the comparison of the best version %s) on the testset inputs (report only)"
+                         % (milestone_comparison(ws), best), candidate_id=ws.version(best)["candidate_id"])
     d = _latest(ws, "judge", ("milestone_judge",))
     if d is not None:
-        return _handback_failed(ws, d, "milestone", "rsi-judge 还没有交回里程碑评测")
-    return _dispatch("milestone", "judge", "milestone_judge", "里程碑发布：用 test 标签给里程碑交付打分")
+        return _handback_failed(ws, d, "milestone", "rsi-judge has not handed back the milestone evaluation yet")
+    return _dispatch("milestone", "judge", "milestone_judge", "milestone release: score the milestone delivery with "
+                     "the testset labels")
 
 
 def _plan_step(ws, rnd):
     text = decision_text(rnd["decision"])
     d = _latest(ws, "judge", ("judge", "plan"))
     if d is None:
-        return _dispatch("write_plan", "judge", "plan", "本轮已判定 %s：写下一轮的计划" % text)
+        return _dispatch("write_plan", "judge", "plan", "round decided as %s: write the next round's plan" % text)
     if dispatch_purpose(d) == "plan" or not products(ws, d):  # a plan dispatch that brought no plan
-        return _handback_failed(ws, d, "write_plan", "rsi-judge 还没有交回本轮的计划")
-    feedback = "本轮已判定 %s（%s）：写下一轮的计划（plan）和 record 后交回。" % (text, rnd["decision"].get("reason"))
+        return _handback_failed(ws, d, "write_plan", "rsi-judge has not handed back the round's plan yet")
+    feedback = "round decided as %s (%s): write the next round's plan (plan) and a record, then hand them back" % (
+        text, rnd["decision"].get("reason"))
     if second_part_due(d, "evaluation"):
         return _act("resume", "write_plan", dispatch_id=d["id"], mode="followup", feedback=feedback)
     if may_return(ws, "judge"):
         return _act("resume", "write_plan", dispatch_id=d["id"], mode="resume", feedback=feedback)
-    return _handback_failed(ws, d, "write_plan", "rsi-judge 还没有交回本轮的计划")
+    return _handback_failed(ws, d, "write_plan", "rsi-judge has not handed back the round's plan yet")

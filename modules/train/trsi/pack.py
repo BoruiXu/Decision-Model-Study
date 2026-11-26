@@ -7,6 +7,10 @@ build() writes <outdir>/cand-<trial>/:
   predict.json           the ojh .venv python written at packing time; predict.py scores model/ with
                          harness.score.score_checkpoint and the settings in predict.json (those of ojh's own rescoring)
   predictions_val.jsonl  predict on the valset's inputs.jsonl
+  policy.json            with the task's policy section only: the decision policy (modules/common/dpolicy) fitted on
+  policy_report.json     the raw valset predictions (predictions_val_raw.jsonl), every pair's numbers, and dpolicy's
+  policy_apply.py        self-contained apply.py, through which predict.py applies it; predictions_val.jsonl then
+  predictions_val_raw.jsonl  holds the rows with the policy applied, exactly what predict writes
   manifest.json          metrics_val, baselines_val and train_gate from `rsi score`; config (run.lock.yaml without its
                          paths to labelled data, see config_of), config_request, cost (GPU hours + scoring time),
                          code_version (modules/train/train)
@@ -55,14 +59,17 @@ Reads each input row's id, state and question (a row without target gets a unifo
 OneJev's scoring path expects and does not use for the probabilities); scores the checkpoint in model/ beside this
 file with harness.score.score_checkpoint, using the settings in predict.json (and the machine environment ojh trained
 with); writes {"id", "probs", "decision", "uncertainty"}: decision is the most probable label, uncertainty 1 - its
-probability. Card: CUDA_VISIBLE_DEVICES, else the idle card (under 1 GiB in use) nvidia-smi shows with the least
-memory in use, by uuid (a card without memory figures, [N/A], is not idle); with nvidia-smi and no idle card it stops.
+probability. When policy.json is beside this file, each row goes through its decision policy (policy_apply.py, loaded
+by path: calibrated probabilities, the policy's decision). Card: CUDA_VISIBLE_DEVICES, else the idle card (under 1 GiB
+in use) nvidia-smi shows with the least memory in use, by uuid (a card without memory figures, [N/A], is not idle);
+with nvidia-smi and no idle card it stops.
 """
 import argparse
 import importlib.util
 import json
 import os
 import subprocess
+import sys
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 
@@ -99,6 +106,19 @@ def idle_card():
     return min(cards)[1]
 
 
+def with_policy(rows):
+    """The rows with the decision policy in policy.json beside this file applied (policy_apply.py), when it is there."""
+    path = os.path.join(HERE, "policy.json")
+    if not os.path.isfile(path):
+        return rows
+    sys.dont_write_bytecode = True   # no __pycache__ in the candidate directory
+    spec = importlib.util.spec_from_file_location("trsi_policy_apply", os.path.join(HERE, "policy_apply.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    policy = mod.load_policy(path)
+    return [mod.apply_policy(policy, r, policy["labels"]) for r in rows]
+
+
 def labels_of(question):
     kind, crit = question.get("type"), question.get("criteria")
     if kind == "noul":
@@ -131,16 +151,18 @@ def main():
             x["target"] = dict((lab, 1.0 / len(labels)) for lab in labels)
         feed.append(x)
     recs = scorer(cfg)(os.path.join(HERE, "model"), feed, base_dir=None, device="cuda:0", **cfg["kwargs"])
+    out = []
+    for r in rows:
+        rec = recs[r["id"]]
+        probs = dict(zip(rec["labels"], (float(p) for p in rec["probs"])))
+        total = sum(probs.values())
+        probs = dict((k, v / total) for k, v in probs.items())
+        dec = max(probs, key=probs.get)
+        out.append({"id": r["id"], "probs": probs, "decision": dec, "uncertainty": 1.0 - probs[dec]})
     tmp = a.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        for r in rows:
-            rec = recs[r["id"]]
-            probs = dict(zip(rec["labels"], (float(p) for p in rec["probs"])))
-            total = sum(probs.values())
-            probs = dict((k, v / total) for k, v in probs.items())
-            dec = max(probs, key=probs.get)
-            f.write(json.dumps({"id": r["id"], "probs": probs, "decision": dec, "uncertainty": 1.0 - probs[dec]},
-                               sort_keys=True) + "\n")
+        for row in with_policy(out):
+            f.write(json.dumps(row, sort_keys=True) + "\n")
     os.replace(tmp, a.out)
 
 
@@ -256,6 +278,41 @@ def metrics(run: RunConfig, manifest: dict, cand: Path) -> dict:
     return {**manifest["metrics_val"], "ece": ece(y, [float(p["probs"][pos]) for p in preds])}
 
 
+def _policy_tools():
+    """dpolicy's apply module and fit_policy, and rsi.rules.policy_settings: <REPO>/modules/common and <REPO> go on
+    sys.path first (trsi collect runs with only modules/train on it; modules/common ahead of anything installed)."""
+    for p in (str(REPO), str(REPO / "modules" / "common")):
+        if p in sys.path:
+            sys.path.remove(p)
+        sys.path.insert(0, p)
+    from dpolicy import apply as policy_apply
+    from dpolicy.fit import fit_policy
+    from rsi.rules import policy_settings
+    return policy_apply, fit_policy, policy_settings
+
+
+def fit_policy_into(fw, task: dict, dest: Path, pv: Path) -> dict | None:
+    """With the task's policy section (rsi.rules.policy_settings), fit the decision policy on model.predict's valset
+    predictions `pv` (kept as predictions_val_raw.jsonl), write policy.json, its fit report (every pair's numbers) as
+    policy_report.json and dpolicy's apply.py as policy_apply.py, and write the rows with the policy applied as `pv`,
+    line by line as predict.py writes them. Returns the policy; None (nothing changed) without a policy section."""
+    if task.get("policy") is None:
+        return None
+    policy_apply, fit_policy, policy_settings = _policy_tools()
+    settings = policy_settings(task)
+    raw = dest / "predictions_val_raw.jsonl"
+    os.replace(pv, raw)
+    preds = _jsonl(raw)
+    policy, report = fit_policy(task, settings, _jsonl(rows_file(fw.valset)), preds)
+    (dest / "policy.json").write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n")
+    (dest / "policy_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    shutil.copyfile(policy_apply.__file__, dest / "policy_apply.py")
+    with open(pv, "w", encoding="utf-8") as f:
+        for r in preds:
+            f.write(json.dumps(policy_apply.apply_policy(policy, r, policy["labels"]), sort_keys=True) + "\n")
+    return policy
+
+
 def _gate(task: dict, sc: dict) -> dict:
     primary, higher = task["metrics"]["primary"], task["metrics"]["higher_is_better"]
     if primary not in sc["metrics"]:
@@ -312,6 +369,12 @@ def _build(run: RunConfig, rec: dict, res: TrialResult, c: Candidate, start: boo
         if OOM_RE.search(p.stderr + p.stdout):   # the whole output: the last lines may be another error after it
             raise PackOOM(f"model.predict ran out of memory on {device} (exit {p.returncode}): {said[-1500:]}", device)
         raise PackError(f"model.predict failed (exit {p.returncode}): {said[-1500:]}")
+    policy = fit_policy_into(fw, task, dest, pv)
+    files = {"predictions_val": {"path": pv.name, "rows": len(_jsonl(pv))}}
+    if policy is not None:
+        files["predictions_val_raw"] = {"path": "predictions_val_raw.jsonl", "rows": files["predictions_val"]["rows"]}
+        files["policy"] = {"path": "policy.json"}
+        files["policy_report"] = {"path": "policy_report.json"}
     sc = rsi("score", "--task", fw.task, "--labels", rows_file(fw.valset), "--predictions", pv,
              "--train", rows_file(fw.trainset))
     if sc.returncode != 0:
@@ -325,9 +388,12 @@ def _build(run: RunConfig, rec: dict, res: TrialResult, c: Candidate, start: boo
         "round": fw.round, "producer": fw.producer,
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "parents": [x for x in (fw.trainset_id, fw.valset_id) if x != "unregistered"],
-        "files": {"predictions_val": {"path": pv.name, "rows": len(_jsonl(pv))}},
+        "files": files,
         "notes": f"trsi {__version__}: trial {rec['trial']} ({c.label()}, seed {rec['seed']}), ojh run {run_dir}, "
-                 f"selected step {res.selected_step}",
+                 f"selected step {res.selected_step}" + ("" if policy is None else
+                                                         f"; decision policy {policy['calibration']['method']} + "
+                                                         f"{policy['decision']['rule']} "
+                                                         f"({'accepted' if policy['accepted'] else 'the identity'})"),
         "trainset_id": fw.trainset_id, "valset_id": fw.valset_id,
         "config": config_of(lock), "config_source": fw.start_source if start else "tune",
         "config_request": config_request(c, rec["seed"], run.space.recipe_names),

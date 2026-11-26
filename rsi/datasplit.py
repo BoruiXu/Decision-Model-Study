@@ -131,11 +131,12 @@ def filled(split):
 def split_section_md(split):
     """The section a fill of the split rule appends to TASK.md, rendered from the filled rule (filled(split)): it opens
     with one newline (the separator: a TASK.md ending in a newline gets one blank line before the heading), then the
-    heading 「## 切分规则（`data.split`）」, the line saying the data module filled it in, and the rule as JSON, one
+    heading "## Split rule (`data.split`)", the line saying the data module filled it in, and the rule as JSON, one
     top-level key per line. The same rule renders the same bytes. Write the new TASK.md with fill_task_md (bytes)."""
     rule = filled(split)
     body = ",\n".join("  %s: %s" % (json.dumps(k), json.dumps(v, ensure_ascii=False)) for k, v in rule.items())
-    return ("\n## 切分规则（`data.split`）\n\n由 rsi-data 按数据填写，理由见那次派出的 record。\n\n"
+    return ("\n## Split rule (`data.split`)\n\n"
+            "Filled in by rsi-data from the data; the reasons are in that dispatch's record.\n\n"
             "```json\n{\n%s\n}\n```\n" % body)
 
 

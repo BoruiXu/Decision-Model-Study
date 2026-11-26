@@ -184,6 +184,26 @@ def stop_process(pid, proc=None, grace=5.0):
             time.sleep(0.05)
 
 
+def read_pid(path):
+    """The pid in a pid file a runner's shell writes (agent-<n>.pid); waits up to a second for a file the shell is
+    still writing; None if absent."""
+    end = time.time() + 1.0
+    while True:
+        try:
+            with open(path) as f:
+                text = f.read().strip()
+        except OSError:
+            return None
+        if text:
+            try:
+                return int(text)
+            except ValueError:
+                return None
+        if time.time() >= end:
+            return None
+        time.sleep(0.05)
+
+
 def launched_epoch(dispatch):
     """When the dispatch's agent was launched (seconds since the epoch); now when unknown."""
     dt = parse_utc(dispatch.get("launched_at"))
